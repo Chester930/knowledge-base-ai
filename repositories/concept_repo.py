@@ -1,0 +1,113 @@
+from __future__ import annotations
+import logging
+from uuid import UUID, uuid4
+from neo4j import AsyncDriver
+from core.constants import INTEREST_INIT, PROFESSIONAL_INIT, VECTOR_DIM
+
+logger = logging.getLogger(__name__)
+
+
+class ConceptRepository:
+    def __init__(self, driver: AsyncDriver):
+        self.driver = driver
+
+    async def create_vector_index(self, dim: int = VECTOR_DIM) -> None:
+        await self.driver.execute_query(
+            """
+            CREATE VECTOR INDEX concept_q_vector IF NOT EXISTS
+            FOR (c:ConceptNode) ON c.q_vector
+            OPTIONS { indexConfig: { `vector.dimensions`: $dim, `vector.similarity_function`: 'cosine' } }
+            """,
+            dim=dim,
+        )
+
+    async def get_or_create(self, name: str, domain: str, q_vector: list[float]) -> UUID:
+        result = await self.driver.execute_query(
+            """
+            MERGE (c:ConceptNode {name: $name, domain: $domain})
+            ON CREATE SET c.id = $id, c.q_vector = $q_vector
+            RETURN c.id AS id
+            """,
+            name=name, domain=domain, q_vector=q_vector, id=str(uuid4()),
+        )
+        return UUID(result.records[0]["id"])
+
+    async def init_document_concept(
+        self, doc_id: UUID, name: str,
+        interest: float = INTEREST_INIT,
+        professional: float = PROFESSIONAL_INIT,
+    ) -> None:
+        await self.driver.execute_query(
+            """
+            MATCH (d:Document {id: $doc_id})
+            MATCH (c:ConceptNode {name: $name})
+            MERGE (d)-[r:IMPLICIT]->(c)
+            SET r.interest_score = $i, r.professional_score = $p, r.updated_at = datetime()
+            """,
+            doc_id=str(doc_id), name=name, i=interest, p=professional,
+        )
+
+    async def sync_document_effective(self, doc_id: UUID) -> None:
+        await self.driver.execute_query(
+            """
+            MATCH (d:Document {id: $doc_id})-[i:IMPLICIT]->(c:ConceptNode)
+            MERGE (d)-[e:EFFECTIVE]->(c)
+            SET e.interest_score = i.interest_score, e.professional_score = i.professional_score
+            """,
+            doc_id=str(doc_id),
+        )
+        await self.driver.execute_query(
+            """
+            MATCH (d:Document {id: $doc_id})-[e:EFFECTIVE]->(c:ConceptNode)
+            WHERE NOT (d)-[:IMPLICIT]->(c)
+            DELETE e
+            """,
+            doc_id=str(doc_id),
+        )
+
+    async def get_document_concepts(self, doc_id: UUID) -> list[dict]:
+        result = await self.driver.execute_query(
+            """
+            MATCH (d:Document {id: $doc_id})-[e:EFFECTIVE]->(c:ConceptNode)
+            RETURN c.id AS id, c.name AS name, c.domain AS domain,
+                   c.q_vector AS q_vector,
+                   e.interest_score AS interest_score,
+                   e.professional_score AS professional_score
+            ORDER BY (e.interest_score + e.professional_score) DESC
+            """,
+            doc_id=str(doc_id),
+        )
+        return [dict(r) for r in result.records]
+
+    async def get_all_documents_concepts(
+        self, exclude_doc_ids: list[UUID] | None = None
+    ) -> dict[UUID, list[dict]]:
+        exclude = [str(d) for d in exclude_doc_ids] if exclude_doc_ids else []
+        result = await self.driver.execute_query(
+            """
+            MATCH (d:Document)-[e:EFFECTIVE]->(c:ConceptNode)
+            WHERE NOT d.id IN $exclude
+            RETURN d.id AS doc_id, c.id AS concept_id, c.name AS name,
+                   c.q_vector AS q_vector,
+                   e.interest_score AS interest_score,
+                   e.professional_score AS professional_score
+            """,
+            exclude=exclude,
+        )
+        result_map: dict[UUID, list[dict]] = {}
+        for r in result.records:
+            doc_id = UUID(r["doc_id"])
+            result_map.setdefault(doc_id, []).append(dict(r))
+        return result_map
+
+    async def get_all_concepts(self) -> list[dict]:
+        result = await self.driver.execute_query(
+            """
+            MATCH (c:ConceptNode)
+            OPTIONAL MATCH (d:Document)-[:EFFECTIVE]->(c)
+            WITH c, count(d) AS doc_count
+            RETURN c.id AS id, c.name AS name, c.domain AS domain, doc_count
+            ORDER BY doc_count DESC
+            """
+        )
+        return [dict(r) for r in result.records]

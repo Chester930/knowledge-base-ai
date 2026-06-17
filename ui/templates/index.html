@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>智慧知識庫</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f6fa; color: #2d3436; }
+
+.navbar { background: #2d3436; color: white; padding: 14px 24px; display: flex; align-items: center; gap: 12px; }
+.navbar h1 { font-size: 1.2rem; font-weight: 600; }
+.navbar .subtitle { font-size: 0.8rem; color: #b2bec3; margin-left: auto; }
+
+.layout { display: grid; grid-template-columns: 260px 1fr; height: calc(100vh - 52px); }
+
+.sidebar { background: white; border-right: 1px solid #dfe6e9; overflow-y: auto; padding: 16px; }
+.sidebar h3 { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: #636e72; margin-bottom: 10px; margin-top: 16px; }
+.sidebar h3:first-child { margin-top: 0; }
+.concept-cloud { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.concept-tag { background: #eff8ff; color: #0984e3; font-size: 0.78rem; padding: 3px 9px; border-radius: 12px; cursor: pointer; border: 1px solid #d6eaf8; transition: all 0.15s; }
+.concept-tag:hover { background: #0984e3; color: white; }
+.stat-row { display: flex; justify-content: space-between; font-size: 0.85rem; color: #636e72; padding: 5px 0; border-bottom: 1px solid #f0f0f0; }
+.stat-row span:last-child { font-weight: 600; color: #2d3436; }
+
+.main { display: flex; flex-direction: column; overflow: hidden; }
+.search-bar { padding: 20px 24px 0; background: white; border-bottom: 1px solid #dfe6e9; }
+.search-input-wrap { display: flex; gap: 8px; }
+.search-input { flex: 1; padding: 10px 16px; border: 2px solid #dfe6e9; border-radius: 8px; font-size: 0.95rem; outline: none; transition: border-color 0.15s; }
+.search-input:focus { border-color: #0984e3; }
+.btn { padding: 10px 18px; border: none; border-radius: 8px; font-size: 0.9rem; cursor: pointer; transition: all 0.15s; font-weight: 500; white-space: nowrap; }
+.btn-primary { background: #0984e3; color: white; }
+.btn-primary:hover { background: #0773c5; }
+.btn-secondary { background: #f0f3f5; color: #2d3436; }
+.btn-secondary:hover { background: #dfe6e9; }
+.tabs { display: flex; margin-top: 12px; }
+.tab { padding: 8px 16px; font-size: 0.85rem; cursor: pointer; border-bottom: 2px solid transparent; color: #636e72; }
+.tab.active { border-bottom-color: #0984e3; color: #0984e3; font-weight: 500; }
+
+.content-area { flex: 1; overflow-y: auto; padding: 16px 24px; }
+
+.result-card { background: white; border-radius: 10px; padding: 16px; margin-bottom: 12px; border: 1px solid #dfe6e9; cursor: pointer; transition: box-shadow 0.15s; }
+.result-card:hover { box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+.result-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 6px; }
+.result-title { font-size: 1rem; font-weight: 600; color: #2d3436; }
+.score-badge { font-size: 0.75rem; padding: 2px 8px; border-radius: 10px; font-weight: 500; white-space: nowrap; margin-left: 8px; }
+.score-high { background: #00b894; color: white; }
+.score-mid { background: #fdcb6e; color: #2d3436; }
+.score-low { background: #b2bec3; color: white; }
+.result-snippet { font-size: 0.85rem; color: #636e72; line-height: 1.5; margin-bottom: 8px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.result-concepts { display: flex; gap: 4px; flex-wrap: wrap; }
+.matched-tag { background: #e8f5e9; color: #27ae60; font-size: 0.72rem; padding: 2px 7px; border-radius: 8px; }
+
+.doc-card { background: white; border-radius: 10px; padding: 14px 16px; margin-bottom: 8px; border: 1px solid #dfe6e9; display: flex; align-items: center; gap: 12px; cursor: pointer; transition: box-shadow 0.15s; }
+.doc-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+.doc-icon { width: 36px; height: 36px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 1.1rem; flex-shrink: 0; }
+.doc-icon.md { background: #e8f5e9; }
+.doc-icon.txt { background: #fff3e0; }
+.doc-icon.pdf { background: #fce4ec; }
+.doc-icon.manual { background: #e3f2fd; }
+.doc-info { flex: 1; min-width: 0; }
+.doc-title { font-size: 0.9rem; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.doc-meta { font-size: 0.75rem; color: #b2bec3; margin-top: 2px; }
+.btn-icon { background: none; border: none; cursor: pointer; padding: 5px; border-radius: 4px; color: #636e72; font-size: 1rem; }
+.btn-icon:hover { background: #f0f3f5; }
+
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 100; display: none; align-items: center; justify-content: center; }
+.modal-overlay.open { display: flex; }
+.modal { background: white; border-radius: 12px; max-width: 760px; width: 92%; max-height: 82vh; overflow: hidden; display: flex; flex-direction: column; }
+.modal-header { padding: 16px 20px; border-bottom: 1px solid #dfe6e9; display: flex; justify-content: space-between; align-items: center; }
+.modal-title { font-size: 1.05rem; font-weight: 600; }
+.modal-body { padding: 20px; overflow-y: auto; flex: 1; }
+.modal-content { white-space: pre-wrap; font-size: 0.875rem; line-height: 1.75; color: #2d3436; }
+.modal-concepts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; padding-top: 14px; border-top: 1px solid #f0f0f0; }
+
+.add-form { background: white; border-radius: 10px; padding: 20px; border: 1px solid #dfe6e9; }
+.form-group { margin-bottom: 14px; }
+.form-label { font-size: 0.82rem; font-weight: 500; color: #636e72; margin-bottom: 5px; display: block; }
+.form-input, .form-textarea { width: 100%; padding: 9px 12px; border: 1px solid #dfe6e9; border-radius: 7px; font-size: 0.9rem; outline: none; transition: border-color 0.15s; font-family: inherit; }
+.form-input:focus, .form-textarea:focus { border-color: #0984e3; }
+.form-textarea { min-height: 180px; resize: vertical; }
+.drop-zone { border: 2px dashed #dfe6e9; border-radius: 8px; padding: 32px; text-align: center; color: #b2bec3; cursor: pointer; transition: all 0.15s; margin-bottom: 16px; }
+.drop-zone:hover, .drop-zone.drag-over { border-color: #0984e3; background: #eff8ff; color: #0984e3; }
+
+.empty-state { text-align: center; padding: 60px 20px; color: #b2bec3; }
+.empty-icon { font-size: 3rem; margin-bottom: 12px; }
+.empty-state p { font-size: 0.9rem; }
+.loading { text-align: center; padding: 40px; color: #b2bec3; }
+.spinner { border: 3px solid #f0f0f0; border-top-color: #0984e3; border-radius: 50%; width: 32px; height: 32px; animation: spin 0.8s linear infinite; margin: 0 auto 12px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.toast { position: fixed; top: 16px; right: 16px; padding: 12px 18px; border-radius: 8px; font-size: 0.875rem; z-index: 200; animation: slideIn 0.2s ease; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+.toast.success { background: #00b894; color: white; }
+.toast.error { background: #d63031; color: white; }
+@keyframes slideIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+
+.divider { text-align: center; margin: 12px 0; color: #b2bec3; font-size: 0.82rem; }
+</style>
+</head>
+<body>
+
+<nav class="navbar">
+  <span style="font-size:1.4rem">📚</span>
+  <h1>智慧知識庫</h1>
+  <span class="subtitle" id="stats-summary">連線中…</span>
+</nav>
+
+<div class="layout">
+  <div class="sidebar">
+    <h3>概念雲</h3>
+    <div class="concept-cloud" id="concept-cloud">
+      <span style="color:#b2bec3;font-size:0.8rem">載入中…</span>
+    </div>
+    <h3>統計</h3>
+    <div class="stat-row"><span>文件數量</span><span id="stat-docs">-</span></div>
+    <div class="stat-row"><span>概念節點</span><span id="stat-concepts">-</span></div>
+  </div>
+
+  <div class="main">
+    <div class="search-bar">
+      <div class="search-input-wrap">
+        <input class="search-input" id="search-input" type="text" placeholder="輸入問題或關鍵字，用概念媒合搜尋…" />
+        <button class="btn btn-primary" onclick="doSearch()">搜尋</button>
+        <button class="btn btn-secondary" onclick="showTab('docs')">文件列表</button>
+        <button class="btn btn-secondary" onclick="showTab('add')">＋ 新增</button>
+      </div>
+      <div class="tabs">
+        <div class="tab active" data-tab="search" onclick="showTab('search')">搜尋結果</div>
+        <div class="tab" data-tab="docs" onclick="showTab('docs')">所有文件</div>
+        <div class="tab" data-tab="add" onclick="showTab('add')">新增文件</div>
+      </div>
+    </div>
+
+    <div class="content-area">
+      <div id="tab-search">
+        <div class="empty-state">
+          <div class="empty-icon">🔍</div>
+          <p>輸入問題，系統會用 AI 概念媒合找到最相關的文件</p>
+        </div>
+      </div>
+
+      <div id="tab-docs" style="display:none"></div>
+
+      <div id="tab-add" style="display:none">
+        <div class="add-form">
+          <div class="drop-zone" id="drop-zone"
+               onclick="document.getElementById('file-input').click()"
+               ondragover="onDragOver(event)" ondrop="onDrop(event)" ondragleave="onDragLeave()">
+            <div style="font-size:2.2rem;margin-bottom:8px">📁</div>
+            <p style="font-size:0.9rem">拖曳或點擊上傳 .md / .txt / .pdf</p>
+          </div>
+          <input type="file" id="file-input" accept=".md,.txt,.pdf" style="display:none" onchange="uploadFile(event)">
+
+          <div class="divider">— 或手動輸入內容 —</div>
+
+          <div class="form-group">
+            <label class="form-label">標題</label>
+            <input class="form-input" id="doc-title" placeholder="文件標題">
+          </div>
+          <div class="form-group">
+            <label class="form-label">內容</label>
+            <textarea class="form-textarea" id="doc-content" placeholder="貼上或輸入文件內容…"></textarea>
+          </div>
+          <button class="btn btn-primary" onclick="submitDoc()">儲存並分析概念</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="doc-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title" id="modal-title"></span>
+      <button class="btn-icon" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-content" id="modal-content"></div>
+      <div class="modal-concepts" id="modal-concepts"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '';
+
+function showTab(name) {
+  ['search','docs','add'].forEach(t => {
+    document.getElementById('tab-'+t).style.display = t === name ? '' : 'none';
+    document.querySelector(`.tab[data-tab="${t}"]`).classList.toggle('active', t === name);
+  });
+  if (name === 'docs') loadDocs();
+}
+
+function toast(msg, type = 'success') {
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3500);
+}
+
+// ── Search ──────────────────────────────────────────────────────────────────
+document.getElementById('search-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') doSearch();
+});
+
+async function doSearch() {
+  const text = document.getElementById('search-input').value.trim();
+  if (!text) return;
+  showTab('search');
+  document.getElementById('tab-search').innerHTML =
+    '<div class="loading"><div class="spinner"></div><p>AI 概念分析中…</p></div>';
+  try {
+    const res = await fetch(`${API}/search`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({text, top_k: 10, min_score: 0}),
+    });
+    const results = await res.json();
+    renderResults(results);
+  } catch {
+    document.getElementById('tab-search').innerHTML =
+      '<div class="empty-state"><div class="empty-icon">⚠️</div><p>搜尋失敗，請確認服務是否正常運行</p></div>';
+  }
+}
+
+function scoreClass(s) { return s >= 0.6 ? 'score-high' : s >= 0.3 ? 'score-mid' : 'score-low'; }
+
+function renderResults(results) {
+  if (!results.length) {
+    document.getElementById('tab-search').innerHTML =
+      '<div class="empty-state"><div class="empty-icon">📭</div><p>沒有找到相關文件，試試其他關鍵字</p></div>';
+    return;
+  }
+  document.getElementById('tab-search').innerHTML = results.map(r => {
+    const pct = Math.round(r.score * 100) + '%';
+    const snippet = (r.document.content || '').slice(0, 160).replace(/\n/g, ' ');
+    const tags = r.matched_concepts.map(c => `<span class="matched-tag">${c}</span>`).join('');
+    return `<div class="result-card" onclick="openDoc('${r.document.id}')">
+      <div class="result-header">
+        <span class="result-title">${esc(r.document.title)}</span>
+        <span class="score-badge ${scoreClass(r.score)}">${pct}</span>
+      </div>
+      <div class="result-snippet">${esc(snippet)}…</div>
+      <div class="result-concepts">${tags}</div>
+    </div>`;
+  }).join('');
+}
+
+function filterByConcept(name) {
+  document.getElementById('search-input').value = name;
+  doSearch();
+}
+
+// ── Doc list ────────────────────────────────────────────────────────────────
+async function loadDocs() {
+  document.getElementById('tab-docs').innerHTML =
+    '<div class="loading"><div class="spinner"></div><p>載入中…</p></div>';
+  try {
+    const res = await fetch(`${API}/documents?limit=200`);
+    const docs = await res.json();
+    if (!docs.length) {
+      document.getElementById('tab-docs').innerHTML =
+        '<div class="empty-state"><div class="empty-icon">📂</div><p>尚無文件，請先新增或上傳</p></div>';
+      return;
+    }
+    const icons = {md:'📝', txt:'📄', pdf:'📕', manual:'✍️'};
+    document.getElementById('tab-docs').innerHTML = docs.map(d => {
+      const date = new Date(d.created_at).toLocaleDateString('zh-TW');
+      const len = (d.content || '').length;
+      return `<div class="doc-card" onclick="openDoc('${d.id}')">
+        <div class="doc-icon ${d.file_type}">${icons[d.file_type] || '📄'}</div>
+        <div class="doc-info">
+          <div class="doc-title">${esc(d.title)}</div>
+          <div class="doc-meta">${d.file_type.toUpperCase()} · ${date} · ${len.toLocaleString()} 字</div>
+        </div>
+        <button class="btn-icon" title="刪除" onclick="deleteDoc(event,'${d.id}')">🗑️</button>
+      </div>`;
+    }).join('');
+  } catch {
+    document.getElementById('tab-docs').innerHTML =
+      '<div class="empty-state"><div class="empty-icon">⚠️</div><p>載入失敗</p></div>';
+  }
+}
+
+async function deleteDoc(e, id) {
+  e.stopPropagation();
+  if (!confirm('確定刪除此文件？')) return;
+  await fetch(`${API}/documents/${id}`, {method: 'DELETE'});
+  toast('已刪除');
+  loadDocs();
+  loadSidebar();
+}
+
+// ── Modal ───────────────────────────────────────────────────────────────────
+async function openDoc(id) {
+  const [docRes, conRes] = await Promise.all([
+    fetch(`${API}/documents/${id}`),
+    fetch(`${API}/documents/${id}/concepts`),
+  ]);
+  const doc = await docRes.json();
+  const concepts = await conRes.json();
+  document.getElementById('modal-title').textContent = doc.title;
+  document.getElementById('modal-content').textContent = doc.content;
+  document.getElementById('modal-concepts').innerHTML =
+    concepts.map(c => `<span class="concept-tag">${esc(c.name)}</span>`).join('');
+  document.getElementById('doc-modal').classList.add('open');
+}
+
+function closeModal() {
+  document.getElementById('doc-modal').classList.remove('open');
+}
+document.getElementById('doc-modal').addEventListener('click', e => {
+  if (e.target === e.currentTarget) closeModal();
+});
+
+// ── Add document ─────────────────────────────────────────────────────────────
+async function submitDoc() {
+  const title = document.getElementById('doc-title').value.trim();
+  const content = document.getElementById('doc-content').value.trim();
+  if (!title || !content) { toast('請填寫標題和內容', 'error'); return; }
+  const res = await fetch(`${API}/documents`, {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({title, content, file_type: 'manual'}),
+  });
+  if (res.ok) {
+    toast('✅ 文件已儲存，概念正在背景分析中…');
+    document.getElementById('doc-title').value = '';
+    document.getElementById('doc-content').value = '';
+    loadSidebar();
+  } else {
+    toast('儲存失敗', 'error');
+  }
+}
+
+// ── File upload ──────────────────────────────────────────────────────────────
+function onDragOver(e) { e.preventDefault(); document.getElementById('drop-zone').classList.add('drag-over'); }
+function onDragLeave() { document.getElementById('drop-zone').classList.remove('drag-over'); }
+function onDrop(e) {
+  e.preventDefault(); onDragLeave();
+  const f = e.dataTransfer.files[0];
+  if (f) doUpload(f);
+}
+function uploadFile(e) { doUpload(e.target.files[0]); }
+
+async function doUpload(file) {
+  toast('上傳中，請稍候…');
+  const form = new FormData();
+  form.append('file', file);
+  const res = await fetch(`${API}/documents/upload`, {method: 'POST', body: form});
+  if (res.ok) {
+    toast(`✅ 「${file.name}」匯入成功，概念分析中…`);
+    loadSidebar();
+  } else {
+    const err = await res.json().catch(() => ({}));
+    toast(err.detail || '上傳失敗', 'error');
+  }
+}
+
+// ── Sidebar ──────────────────────────────────────────────────────────────────
+async function loadSidebar() {
+  try {
+    const [docsRes, conceptsRes] = await Promise.all([
+      fetch(`${API}/documents?limit=500`),
+      fetch(`${API}/search/concepts`),
+    ]);
+    const docs = await docsRes.json();
+    const concepts = await conceptsRes.json();
+
+    document.getElementById('stat-docs').textContent = docs.length;
+    document.getElementById('stat-concepts').textContent = concepts.length;
+    document.getElementById('stats-summary').textContent =
+      `${docs.length} 份文件 · ${concepts.length} 個概念`;
+
+    document.getElementById('concept-cloud').innerHTML = concepts.slice(0, 40).map(c =>
+      `<span class="concept-tag" onclick="filterByConcept('${esc(c.name)}')">${esc(c.name)}</span>`
+    ).join('') || '<span style="color:#b2bec3;font-size:0.8rem">尚無概念</span>';
+  } catch (e) {
+    document.getElementById('stats-summary').textContent = '無法連線';
+  }
+}
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+loadSidebar();
+</script>
+</body>
+</html>
