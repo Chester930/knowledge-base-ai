@@ -20,7 +20,7 @@ async def extract_concepts(text: str, domain: str = "general") -> list[str]:
         f"文字：\n{text[:3000]}"
     )
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=120.0) as client:
             res = await client.post(
                 f"{settings.ollama_base_url}/api/generate",
                 json={"model": settings.llm_model, "prompt": prompt, "stream": False},

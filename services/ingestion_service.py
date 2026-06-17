@@ -91,7 +91,7 @@ async def move_and_ingest(
     dst = Path(target_dir)
     dst.mkdir(parents=True, exist_ok=True)
 
-    files = [f for f in src.rglob("*") if f.suffix.lower() in SUPPORTED_EXTENSIONS and f.is_file()]
+    files = [f for f in src.glob("*") if f.suffix.lower() in SUPPORTED_EXTENSIONS and f.is_file()]
     logger.info(f"準備搬移 {len(files)} 個文件：{src} → {dst}")
 
     moved: list[Path] = []

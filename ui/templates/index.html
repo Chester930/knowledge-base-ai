@@ -33,6 +33,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .btn-primary:hover { background: #0773c5; }
 .btn-secondary { background: #f0f3f5; color: #2d3436; }
 .btn-secondary:hover { background: #dfe6e9; }
+.btn-purple { background: #6c5ce7; color: white; }
+.btn-purple:hover { background: #5a4ad1; }
 .tabs { display: flex; margin-top: 12px; }
 .tab { padding: 8px 16px; font-size: 0.85rem; cursor: pointer; border-bottom: 2px solid transparent; color: #636e72; }
 .tab.active { border-bottom-color: #0984e3; color: #0984e3; font-weight: 500; }
@@ -57,7 +59,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .doc-icon.md { background: #e8f5e9; }
 .doc-icon.txt { background: #fff3e0; }
 .doc-icon.pdf { background: #fce4ec; }
-.doc-icon.manual { background: #e3f2fd; }
+.doc-icon.docx { background: #e3f2fd; }
+.doc-icon.pptx { background: #fce4ec; }
+.doc-icon.doc  { background: #e3f2fd; }
+.doc-icon.ppt  { background: #fce4ec; }
+.doc-icon.manual { background: #f3e5f5; }
 .doc-info { flex: 1; min-width: 0; }
 .doc-title { font-size: 0.9rem; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .doc-meta { font-size: 0.75rem; color: #b2bec3; margin-top: 2px; }
@@ -67,8 +73,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 100; display: none; align-items: center; justify-content: center; }
 .modal-overlay.open { display: flex; }
 .modal { background: white; border-radius: 12px; max-width: 760px; width: 92%; max-height: 82vh; overflow: hidden; display: flex; flex-direction: column; }
-.modal-header { padding: 16px 20px; border-bottom: 1px solid #dfe6e9; display: flex; justify-content: space-between; align-items: center; }
-.modal-title { font-size: 1.05rem; font-weight: 600; }
+.modal-header { padding: 16px 20px; border-bottom: 1px solid #dfe6e9; display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.modal-title { font-size: 1.05rem; font-weight: 600; flex: 1; }
 .modal-body { padding: 20px; overflow-y: auto; flex: 1; }
 .modal-content { white-space: pre-wrap; font-size: 0.875rem; line-height: 1.75; color: #2d3436; }
 .modal-concepts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; padding-top: 14px; border-top: 1px solid #f0f0f0; }
@@ -81,6 +87,21 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .form-textarea { min-height: 180px; resize: vertical; }
 .drop-zone { border: 2px dashed #dfe6e9; border-radius: 8px; padding: 32px; text-align: center; color: #b2bec3; cursor: pointer; transition: all 0.15s; margin-bottom: 16px; }
 .drop-zone:hover, .drop-zone.drag-over { border-color: #0984e3; background: #eff8ff; color: #0984e3; }
+
+/* Agent query */
+.agent-box { background: white; border-radius: 10px; padding: 20px; border: 1px solid #dfe6e9; margin-bottom: 16px; }
+.agent-answer { background: #f8f9ff; border-left: 3px solid #6c5ce7; padding: 14px 16px; border-radius: 0 8px 8px 0; font-size: 0.9rem; line-height: 1.7; margin-top: 14px; }
+.agent-sources { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.source-chip { background: #e8eaf6; color: #5c6bc0; font-size: 0.75rem; padding: 3px 10px; border-radius: 10px; cursor: pointer; }
+.source-chip:hover { background: #5c6bc0; color: white; }
+.agent-context-card { background: white; border: 1px solid #dfe6e9; border-radius: 8px; padding: 12px 14px; margin-top: 10px; }
+.agent-context-title { font-weight: 600; font-size: 0.9rem; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
+.agent-context-snippet { font-size: 0.82rem; color: #636e72; line-height: 1.6; margin-top: 4px; white-space: pre-wrap; }
+
+/* Obsidian section */
+.obsidian-box { background: #f8f3ff; border: 1px solid #d1c4e9; border-radius: 10px; padding: 16px 20px; margin-bottom: 16px; }
+.obsidian-box h4 { font-size: 0.9rem; font-weight: 600; color: #6c5ce7; margin-bottom: 10px; display: flex; align-items: center; gap: 6px; }
+.vault-input-wrap { display: flex; gap: 8px; }
 
 .empty-state { text-align: center; padding: 60px 20px; color: #b2bec3; }
 .empty-icon { font-size: 3rem; margin-bottom: 12px; }
@@ -95,6 +116,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 @keyframes slideIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
 
 .divider { text-align: center; margin: 12px 0; color: #b2bec3; font-size: 0.82rem; }
+.obsidian-link { font-size: 0.8rem; color: #6c5ce7; text-decoration: none; display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border: 1px solid #d1c4e9; border-radius: 6px; }
+.obsidian-link:hover { background: #6c5ce7; color: white; }
 </style>
 </head>
 <body>
@@ -122,16 +145,19 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
         <input class="search-input" id="search-input" type="text" placeholder="輸入問題或關鍵字，用概念媒合搜尋…" />
         <button class="btn btn-primary" onclick="doSearch()">搜尋</button>
         <button class="btn btn-secondary" onclick="showTab('docs')">文件列表</button>
+        <button class="btn btn-purple" onclick="showTab('agent')">🤖 Agent</button>
         <button class="btn btn-secondary" onclick="showTab('add')">＋ 新增</button>
       </div>
       <div class="tabs">
         <div class="tab active" data-tab="search" onclick="showTab('search')">搜尋結果</div>
         <div class="tab" data-tab="docs" onclick="showTab('docs')">所有文件</div>
+        <div class="tab" data-tab="agent" onclick="showTab('agent')">Agent 查詢</div>
         <div class="tab" data-tab="add" onclick="showTab('add')">新增文件</div>
       </div>
     </div>
 
     <div class="content-area">
+      <!-- Search results -->
       <div id="tab-search">
         <div class="empty-state">
           <div class="empty-icon">🔍</div>
@@ -139,17 +165,54 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
         </div>
       </div>
 
+      <!-- Doc list -->
       <div id="tab-docs" style="display:none"></div>
 
+      <!-- Agent query -->
+      <div id="tab-agent" style="display:none">
+        <div class="agent-box">
+          <div class="form-group">
+            <label class="form-label">向 Agent 提問</label>
+            <div style="display:flex;gap:8px">
+              <input class="form-input" id="agent-question" placeholder="輸入你的問題，Agent 會從知識庫中找出最相關的段落…" style="flex:1" />
+              <button class="btn btn-purple" onclick="doAgentQuery()">🤖 送出</button>
+            </div>
+          </div>
+          <div style="display:flex;gap:10px;align-items:center">
+            <label class="form-label" style="margin:0;white-space:nowrap">回傳文件數</label>
+            <input type="number" class="form-input" id="agent-topk" value="5" min="1" max="20" style="width:70px" />
+            <label class="form-label" style="margin:0;white-space:nowrap">片段字數上限</label>
+            <input type="number" class="form-input" id="agent-chars" value="1000" min="100" max="10000" step="100" style="width:90px" />
+          </div>
+        </div>
+        <div id="agent-result"></div>
+      </div>
+
+      <!-- Add document -->
       <div id="tab-add" style="display:none">
+        <!-- Obsidian vault import -->
+        <div class="obsidian-box">
+          <h4>🟣 Obsidian Vault 匯入</h4>
+          <p style="font-size:0.82rem;color:#636e72;margin-bottom:10px">
+            輸入你的 Obsidian Vault 路徑，將整個資料夾的 .md 筆記一次匯入知識庫。
+          </p>
+          <div class="vault-input-wrap">
+            <input class="form-input" id="vault-path" placeholder="例如：C:\Users\你的名字\Documents\MyVault" style="flex:1" />
+            <button class="btn btn-purple" onclick="importVault()">匯入 Vault</button>
+          </div>
+        </div>
+
         <div class="add-form">
           <div class="drop-zone" id="drop-zone"
                onclick="document.getElementById('file-input').click()"
                ondragover="onDragOver(event)" ondrop="onDrop(event)" ondragleave="onDragLeave()">
             <div style="font-size:2.2rem;margin-bottom:8px">📁</div>
-            <p style="font-size:0.9rem">拖曳或點擊上傳 .md / .txt / .pdf</p>
+            <p style="font-size:0.9rem">拖曳或點擊上傳</p>
+            <p style="font-size:0.78rem;margin-top:4px;color:#b2bec3">.md · .txt · .pdf · .docx · .pptx</p>
           </div>
-          <input type="file" id="file-input" accept=".md,.txt,.pdf" style="display:none" onchange="uploadFile(event)">
+          <input type="file" id="file-input"
+                 accept=".md,.txt,.pdf,.docx,.pptx,.doc,.ppt"
+                 style="display:none" onchange="uploadFile(event)">
 
           <div class="divider">— 或手動輸入內容 —</div>
 
@@ -168,10 +231,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
   </div>
 </div>
 
+<!-- Document modal -->
 <div class="modal-overlay" id="doc-modal">
   <div class="modal">
     <div class="modal-header">
       <span class="modal-title" id="modal-title"></span>
+      <a id="modal-obsidian-link" class="obsidian-link" style="display:none" target="_blank">🟣 在 Obsidian 開啟</a>
       <button class="btn-icon" onclick="closeModal()">✕</button>
     </div>
     <div class="modal-body">
@@ -184,8 +249,14 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 <script>
 const API = '';
 
+const FILE_ICONS = {
+  md: '📝', txt: '📄', pdf: '📕',
+  docx: '📘', pptx: '📊', doc: '📘', ppt: '📊',
+  manual: '✍️'
+};
+
 function showTab(name) {
-  ['search','docs','add'].forEach(t => {
+  ['search','docs','agent','add'].forEach(t => {
     document.getElementById('tab-'+t).style.display = t === name ? '' : 'none';
     document.querySelector(`.tab[data-tab="${t}"]`).classList.toggle('active', t === name);
   });
@@ -236,7 +307,7 @@ function renderResults(results) {
   document.getElementById('tab-search').innerHTML = results.map(r => {
     const pct = Math.round(r.score * 100) + '%';
     const snippet = (r.document.content || '').slice(0, 160).replace(/\n/g, ' ');
-    const tags = r.matched_concepts.map(c => `<span class="matched-tag">${c}</span>`).join('');
+    const tags = r.matched_concepts.map(c => `<span class="matched-tag">${esc(c)}</span>`).join('');
     return `<div class="result-card" onclick="openDoc('${r.document.id}')">
       <div class="result-header">
         <span class="result-title">${esc(r.document.title)}</span>
@@ -265,12 +336,12 @@ async function loadDocs() {
         '<div class="empty-state"><div class="empty-icon">📂</div><p>尚無文件，請先新增或上傳</p></div>';
       return;
     }
-    const icons = {md:'📝', txt:'📄', pdf:'📕', manual:'✍️'};
     document.getElementById('tab-docs').innerHTML = docs.map(d => {
       const date = new Date(d.created_at).toLocaleDateString('zh-TW');
       const len = (d.content || '').length;
+      const icon = FILE_ICONS[d.file_type] || '📄';
       return `<div class="doc-card" onclick="openDoc('${d.id}')">
-        <div class="doc-icon ${d.file_type}">${icons[d.file_type] || '📄'}</div>
+        <div class="doc-icon ${d.file_type}">${icon}</div>
         <div class="doc-info">
           <div class="doc-title">${esc(d.title)}</div>
           <div class="doc-meta">${d.file_type.toUpperCase()} · ${date} · ${len.toLocaleString()} 字</div>
@@ -305,6 +376,16 @@ async function openDoc(id) {
   document.getElementById('modal-content').textContent = doc.content;
   document.getElementById('modal-concepts').innerHTML =
     concepts.map(c => `<span class="concept-tag">${esc(c.name)}</span>`).join('');
+
+  // Show Obsidian deep-link if it's a .md file
+  const obsLink = document.getElementById('modal-obsidian-link');
+  if (doc.file_path && doc.file_path.toLowerCase().endsWith('.md')) {
+    obsLink.href = 'obsidian://open?path=' + encodeURIComponent(doc.file_path);
+    obsLink.style.display = 'inline-flex';
+  } else {
+    obsLink.style.display = 'none';
+  }
+
   document.getElementById('doc-modal').classList.add('open');
 }
 
@@ -359,6 +440,87 @@ async function doUpload(file) {
   }
 }
 
+// ── Obsidian vault import ────────────────────────────────────────────────────
+async function importVault() {
+  const vaultPath = document.getElementById('vault-path').value.trim();
+  if (!vaultPath) { toast('請輸入 Vault 路徑', 'error'); return; }
+  toast('正在匯入 Vault，這可能需要一段時間…');
+  try {
+    const res = await fetch(
+      `${API}/documents/ingest-dir?dir_path=${encodeURIComponent(vaultPath)}`,
+      { method: 'POST' }
+    );
+    const data = await res.json();
+    if (res.ok) {
+      toast(`✅ 匯入完成：${data.ingested} 份成功，${data.failed} 份失敗`);
+      loadSidebar();
+    } else {
+      toast(data.detail || '匯入失敗', 'error');
+    }
+  } catch {
+    toast('無法連線到伺服器', 'error');
+  }
+}
+
+// ── Agent query ──────────────────────────────────────────────────────────────
+document.getElementById('agent-question').addEventListener('keydown', e => {
+  if (e.key === 'Enter') doAgentQuery();
+});
+
+async function doAgentQuery() {
+  const question = document.getElementById('agent-question').value.trim();
+  if (!question) return;
+  const topK = parseInt(document.getElementById('agent-topk').value) || 5;
+  const maxChars = parseInt(document.getElementById('agent-chars').value) || 1000;
+
+  document.getElementById('agent-result').innerHTML =
+    '<div class="loading"><div class="spinner"></div><p>Agent 分析中…</p></div>';
+
+  try {
+    const res = await fetch(`${API}/agent/query`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({question, top_k: topK, include_content: true, max_content_chars: maxChars}),
+    });
+    const data = await res.json();
+    renderAgentResult(data);
+  } catch {
+    document.getElementById('agent-result').innerHTML =
+      '<div class="empty-state"><div class="empty-icon">⚠️</div><p>Agent 查詢失敗</p></div>';
+  }
+}
+
+function renderAgentResult(data) {
+  if (!data.context || !data.context.length) {
+    document.getElementById('agent-result').innerHTML =
+      '<div class="empty-state"><div class="empty-icon">🤖</div><p>未找到相關文件，請換個問法或先匯入文件</p></div>';
+    return;
+  }
+
+  const sourcesHtml = data.sources.map(s =>
+    `<span class="source-chip" onclick="filterByConcept('${esc(s)}')">${esc(s)}</span>`
+  ).join('');
+
+  const contextHtml = data.context.map(c => {
+    const pct = Math.round(c.score * 100);
+    return `<div class="agent-context-card">
+      <div class="agent-context-title">
+        <span>${esc(c.title)}</span>
+        <span class="score-badge ${scoreClass(c.score)}">${pct}%</span>
+      </div>
+      ${c.content_snippet ? `<div class="agent-context-snippet">${esc(c.content_snippet)}</div>` : ''}
+    </div>`;
+  }).join('');
+
+  document.getElementById('agent-result').innerHTML = `
+    <div class="agent-box">
+      <p style="font-size:0.82rem;color:#636e72;margin-bottom:8px">找到 ${data.context.length} 個相關段落，來源文件：</p>
+      <div class="agent-sources">${sourcesHtml}</div>
+    </div>
+    <div style="font-size:0.82rem;color:#636e72;margin-bottom:8px;padding:0 2px">相關段落內容：</div>
+    ${contextHtml}`;
+}
+
 // ── Sidebar ──────────────────────────────────────────────────────────────────
 async function loadSidebar() {
   try {
@@ -377,7 +539,7 @@ async function loadSidebar() {
     document.getElementById('concept-cloud').innerHTML = concepts.slice(0, 40).map(c =>
       `<span class="concept-tag" onclick="filterByConcept('${esc(c.name)}')">${esc(c.name)}</span>`
     ).join('') || '<span style="color:#b2bec3;font-size:0.8rem">尚無概念</span>';
-  } catch (e) {
+  } catch {
     document.getElementById('stats-summary').textContent = '無法連線';
   }
 }
