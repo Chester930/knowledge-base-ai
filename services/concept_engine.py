@@ -1,11 +1,11 @@
 from __future__ import annotations
 import logging
-import httpx
 from uuid import UUID
+
 from core.config import settings
 from core.constants import INTEREST_INIT, PROFESSIONAL_INIT
+from core.providers.factory import get_embedding_provider, get_llm_provider
 from repositories.concept_repo import ConceptRepository
-from services.embedding_service import get_embedding_service
 from core.database import get_driver
 
 logger = logging.getLogger(__name__)
@@ -20,13 +20,7 @@ async def extract_concepts(text: str, domain: str = "general") -> list[str]:
         f"文字：\n{text[:3000]}"
     )
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            res = await client.post(
-                f"{settings.ollama_base_url}/api/generate",
-                json={"model": settings.llm_model, "prompt": prompt, "stream": False},
-            )
-            res.raise_for_status()
-            raw = res.json().get("response", "")
+        raw = await get_llm_provider().generate(prompt)
         concepts = [line.strip() for line in raw.splitlines() if line.strip()]
         return concepts[:settings.concept_extraction_max]
     except Exception as e:
@@ -96,7 +90,7 @@ def compute_match_score(
 async def extract_and_init_document_concepts(
     doc_id: UUID, text: str, domain: str = "general"
 ) -> None:
-    svc = get_embedding_service()
+    embedding = get_embedding_provider()
     repo = ConceptRepository(get_driver())
 
     concepts = await extract_concepts(text, domain)
@@ -106,7 +100,7 @@ async def extract_and_init_document_concepts(
 
     for name in concepts:
         try:
-            vec = svc.encode(name)
+            vec = embedding.encode(name)
             await repo.get_or_create(name, domain, vec)
             await repo.init_document_concept(doc_id, name, INTEREST_INIT, PROFESSIONAL_INIT)
         except Exception as e:
@@ -119,14 +113,14 @@ async def extract_and_init_document_concepts(
 # ── Query concept extraction (temp, not stored) ───────────────────────────────
 
 async def build_query_concepts(text: str) -> list[dict]:
-    svc = get_embedding_service()
+    embedding = get_embedding_provider()
     names = await extract_concepts(text)
     if not names:
         names = [text[:50]]
 
     result = []
     for name in names:
-        vec = svc.encode(name)
+        vec = embedding.encode(name)
         result.append({
             "name": name,
             "q_vector": vec,

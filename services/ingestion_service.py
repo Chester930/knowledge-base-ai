@@ -1,6 +1,8 @@
 from __future__ import annotations
 import logging
+import re
 import shutil
+import unicodedata
 from pathlib import Path
 from uuid import UUID
 
@@ -12,6 +14,19 @@ from services.concept_engine import extract_and_init_document_concepts
 logger = logging.getLogger(__name__)
 
 SUPPORTED_EXTENSIONS = {".md", ".txt", ".pdf", ".docx", ".pptx", ".doc", ".ppt"}
+
+# easyocr Reader 耗時初始化，模組層級快取，首次 OCR 時才建立
+_ocr_reader = None
+
+
+def _get_ocr_reader():
+    global _ocr_reader
+    if _ocr_reader is None:
+        import easyocr
+        logger.info("初始化 OCR 引擎（繁中 + 英文），首次載入需下載模型…")
+        _ocr_reader = easyocr.Reader(["ch_tra", "en"], gpu=True, verbose=False)
+        logger.info("OCR 引擎載入完成")
+    return _ocr_reader
 
 # 副檔名 → (reader_func, file_type_str)
 _READERS = {
@@ -135,22 +150,90 @@ async def move_and_ingest(
     return success, ingest_errors
 
 
+# ── 文字清理層 ────────────────────────────────────────────────────────────────
+
+def _sanitize_text(text: str) -> str:
+    """過濾非可讀字元，只保留有效文字，讓 LLM 可正確解讀。"""
+    # 保留換行/Tab，移除其他控制字元（Unicode 類別 C*）
+    cleaned = "".join(
+        ch for ch in text
+        if ch in ("\n", "\r", "\t") or unicodedata.category(ch)[0] != "C"
+    )
+    # 移除每行尾端空白
+    lines = [line.rstrip() for line in cleaned.splitlines()]
+    # 合併超過兩行的空白行
+    result = re.sub(r"\n{3,}", "\n\n", "\n".join(lines))
+    return result.strip()
+
+
 # ── 各格式讀取函式 ────────────────────────────────────────────────────────────
 
 def _read_text(path: Path) -> str:
     for enc in ("utf-8", "utf-8-sig", "big5", "gbk", "cp950"):
         try:
-            return path.read_text(encoding=enc)
+            return _sanitize_text(path.read_text(encoding=enc))
         except (UnicodeDecodeError, LookupError):
             continue
-    return path.read_text(encoding="utf-8", errors="replace")
+    return _sanitize_text(path.read_text(encoding="utf-8", errors="replace"))
+
+
+def _ocr_pdf(path: Path) -> str:
+    """OCR 備援：用 PyMuPDF 將每頁渲染成圖片，再用 easyocr 辨識文字。"""
+    import fitz  # pymupdf
+    import numpy as np
+
+    reader = _get_ocr_reader()
+    doc = fitz.open(str(path))
+    parts: list[str] = []
+
+    for i, page in enumerate(doc, 1):
+        # 2× 縮放提升辨識精度
+        mat = fitz.Matrix(2.0, 2.0)
+        pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
+        img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, 3)
+
+        results = reader.readtext(img, detail=0, paragraph=True)
+        page_text = "\n".join(r for r in results if r.strip())
+        if page_text:
+            parts.append(f"[第 {i} 頁]\n{page_text}")
+        logger.debug(f"OCR 第 {i}/{len(doc)} 頁完成：{path.name}")
+
+    doc.close()
+    return _sanitize_text("\n\n".join(parts))
 
 
 def _read_pdf(path: Path) -> str:
-    from pypdf import PdfReader
-    reader = PdfReader(str(path))
-    pages = [page.extract_text() or "" for page in reader.pages]
-    return "\n".join(pages)
+    # 第一層：pypdf
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(str(path))
+        pages = [page.extract_text() or "" for page in reader.pages]
+        text = _sanitize_text("\n".join(pages))
+    except Exception:
+        text = ""
+
+    # 第二層備援：pdfminer（pypdf 無法解析或文字量過少時啟用）
+    if len(text.strip()) < 50:
+        try:
+            from pdfminer.high_level import extract_text as _pdfminer_extract
+            fallback = _sanitize_text(_pdfminer_extract(str(path)) or "")
+            if len(fallback.strip()) > len(text.strip()):
+                text = fallback
+        except Exception as e:
+            logger.debug(f"pdfminer 備援失敗 [{path.name}]: {e}")
+
+    # 第三層備援：OCR（前兩層仍空的圖片型 PDF）
+    if len(text.strip()) < 50:
+        try:
+            logger.info(f"啟動 OCR 辨識：{path.name}")
+            ocr_text = _ocr_pdf(path)
+            if len(ocr_text.strip()) > len(text.strip()):
+                text = ocr_text
+                logger.info(f"OCR 完成：{path.name}，辨識 {len(text)} 字")
+        except Exception as e:
+            logger.warning(f"OCR 失敗 [{path.name}]: {e}")
+
+    return text
 
 
 def _read_docx(path: Path) -> str:
@@ -165,7 +248,7 @@ def _read_docx(path: Path) -> str:
             row_text = " | ".join(cell.text.strip() for cell in row.cells if cell.text.strip())
             if row_text:
                 parts.append(row_text)
-    return "\n".join(parts)
+    return _sanitize_text("\n".join(parts))
 
 
 def _read_pptx(path: Path) -> str:
@@ -175,11 +258,20 @@ def _read_pptx(path: Path) -> str:
     for i, slide in enumerate(prs.slides, 1):
         slide_texts: list[str] = []
         for shape in slide.shapes:
+            # 一般文字框
             if hasattr(shape, "text") and shape.text.strip():
                 slide_texts.append(shape.text.strip())
+            # 表格（部分 PPTX 文字藏在表格 cell 中）
+            if shape.has_table:
+                for row in shape.table.rows:
+                    row_text = " | ".join(
+                        cell.text.strip() for cell in row.cells if cell.text.strip()
+                    )
+                    if row_text:
+                        slide_texts.append(row_text)
         if slide_texts:
             parts.append(f"[第 {i} 頁]\n" + "\n".join(slide_texts))
-    return "\n\n".join(parts)
+    return _sanitize_text("\n\n".join(parts))
 
 
 def _read_doc(path: Path) -> str:
@@ -195,7 +287,7 @@ def _read_doc(path: Path) -> str:
         text = doc.Content.Text
         doc.Close(False)
         word.Quit()
-        return text
+        return _sanitize_text(text)
     except Exception as e:
         raise RuntimeError(f".doc 讀取失敗（需安裝 Microsoft Office）：{e}") from e
 
@@ -226,6 +318,6 @@ def _read_ppt(path: Path) -> str:
                 parts.append(f"[第 {i} 頁]\n" + "\n".join(slide_texts))
         presentation.Close()
         ppt_app.Quit()
-        return "\n\n".join(parts)
+        return _sanitize_text("\n\n".join(parts))
     except Exception as e:
         raise RuntimeError(f".ppt 讀取失敗（需安裝 Microsoft Office）：{e}") from e

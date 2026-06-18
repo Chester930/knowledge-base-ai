@@ -65,6 +65,22 @@ class DocumentRepository:
         )
         return result.records[0]["cnt"]
 
+    async def get_orphan_documents(self, preview_chars: int = 300) -> list[dict]:
+        """回傳未被任何 KG CONTAINS 的孤立文件（id, title, preview）。"""
+        result = await self.driver.execute_query(
+            """
+            MATCH (d:Document)
+            WHERE NOT ()-[:CONTAINS]->(d)
+            RETURN d.id AS id, d.title AS title, d.content AS content
+            ORDER BY d.created_at
+            """
+        )
+        docs = []
+        for r in result.records:
+            preview = (r["content"] or "")[:preview_chars].replace("\n", " ")
+            docs.append({"id": r["id"], "title": r["title"], "preview": preview})
+        return docs
+
     def _to_model(self, node) -> Document:
         return Document(
             id=UUID(node["id"]),

@@ -8,9 +8,11 @@ from fastapi.responses import HTMLResponse
 
 from core.config import settings
 from core.database import connect, disconnect, get_driver
+from core.providers.factory import init_providers
 from repositories.concept_repo import ConceptRepository
-from services.embedding_service import init_embedding_service
-from routers import documents, search, agent
+from routers import documents, search, agent, transcribe, knowledge_graph, staging
+from services.file_watcher_service import start_watcher, stop_watcher
+from services.svo_service import create_entity_index
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,10 +24,16 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await connect()
-    svc = init_embedding_service(settings.embedding_model)
-    await ConceptRepository(get_driver()).create_vector_index(svc.dim)
-    logger.info("智慧知識庫 API 啟動完成")
+    embedding = init_providers()
+    await ConceptRepository(get_driver()).create_vector_index(embedding.dim)
+    await create_entity_index()
+    start_watcher()
+    logger.info(
+        f"智慧知識庫 API 啟動完成 "
+        f"[LLM={settings.llm_provider}, Embedding={settings.embedding_provider}]"
+    )
     yield
+    stop_watcher()
     await disconnect()
 
 
@@ -39,6 +47,9 @@ app = FastAPI(
 app.include_router(documents.router)
 app.include_router(search.router)
 app.include_router(agent.router)
+app.include_router(transcribe.router)
+app.include_router(knowledge_graph.router)
+app.include_router(staging.router)
 
 templates = Jinja2Templates(directory="ui/templates")
 

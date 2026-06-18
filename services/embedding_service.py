@@ -1,33 +1,33 @@
+"""
+向下相容的 embedding 服務包裝層。
+新程式碼請直接使用 core.providers.factory.get_embedding_provider()。
+"""
 from __future__ import annotations
-import logging
-from sentence_transformers import SentenceTransformer
-
-logger = logging.getLogger(__name__)
-
-_model: SentenceTransformer | None = None
+from core.providers.factory import get_embedding_provider
+from core.providers.base import EmbeddingProvider
 
 
 def init_embedding_service(model_name: str) -> "EmbeddingService":
-    global _model
-    _model = SentenceTransformer(model_name)
-    svc = EmbeddingService(_model)
-    logger.info(f"Embedding 模型載入完成：{model_name}，維度={svc.dim}")
-    return svc
+    """保留舊介面供 main.py lifespan 呼叫；實際初始化已移至 init_providers()。"""
+    return EmbeddingService(get_embedding_provider())
 
 
 def get_embedding_service() -> "EmbeddingService":
-    if _model is None:
-        raise RuntimeError("Embedding 服務未初始化")
-    return EmbeddingService(_model)
+    return EmbeddingService(get_embedding_provider())
 
 
 class EmbeddingService:
-    def __init__(self, model: SentenceTransformer):
-        self._model = model
-        self.dim = model.get_sentence_embedding_dimension()
+    """薄包裝，保持舊呼叫介面（.encode / .encode_batch / .dim）不變。"""
+
+    def __init__(self, provider: EmbeddingProvider):
+        self._provider = provider
+
+    @property
+    def dim(self) -> int:
+        return self._provider.dim
 
     def encode(self, text: str) -> list[float]:
-        return self._model.encode(text, normalize_embeddings=True).tolist()
+        return self._provider.encode(text)
 
     def encode_batch(self, texts: list[str]) -> list[list[float]]:
-        return self._model.encode(texts, normalize_embeddings=True).tolist()
+        return self._provider.encode_batch(texts)

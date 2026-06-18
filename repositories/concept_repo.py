@@ -100,6 +100,75 @@ class ConceptRepository:
             result_map.setdefault(doc_id, []).append(dict(r))
         return result_map
 
+    # ── KG 路由層概念 ──────────────────────────────────────────────────────────
+
+    async def init_kg_concept(
+        self, kg_id: UUID, name: str,
+        interest: float = INTEREST_INIT,
+        professional: float = PROFESSIONAL_INIT,
+    ) -> None:
+        """建立 KnowledgeGraph → ConceptNode 的 IMPLICIT 邊。"""
+        await self.driver.execute_query(
+            """
+            MATCH (kg:KnowledgeGraph {id: $kg_id})
+            MATCH (c:ConceptNode {name: $name})
+            MERGE (kg)-[r:IMPLICIT]->(c)
+            SET r.interest_score = $i, r.professional_score = $p, r.updated_at = datetime()
+            """,
+            kg_id=str(kg_id), name=name, i=interest, p=professional,
+        )
+
+    async def sync_kg_effective(self, kg_id: UUID) -> None:
+        """將 KG 的 IMPLICIT 邊同步為 EFFECTIVE 邊（用於路由比對）。"""
+        await self.driver.execute_query(
+            """
+            MATCH (kg:KnowledgeGraph {id: $kg_id})-[i:IMPLICIT]->(c:ConceptNode)
+            MERGE (kg)-[e:EFFECTIVE]->(c)
+            SET e.interest_score = i.interest_score, e.professional_score = i.professional_score
+            """,
+            kg_id=str(kg_id),
+        )
+        await self.driver.execute_query(
+            """
+            MATCH (kg:KnowledgeGraph {id: $kg_id})-[e:EFFECTIVE]->(c:ConceptNode)
+            WHERE NOT (kg)-[:IMPLICIT]->(c)
+            DELETE e
+            """,
+            kg_id=str(kg_id),
+        )
+
+    async def get_kg_concepts(self, kg_id: UUID) -> list[dict]:
+        """取得單個 KG 的所有 EFFECTIVE 概念，格式與 get_document_concepts 一致。"""
+        result = await self.driver.execute_query(
+            """
+            MATCH (kg:KnowledgeGraph {id: $kg_id})-[e:EFFECTIVE]->(c:ConceptNode)
+            RETURN c.id AS id, c.name AS name, c.domain AS domain,
+                   c.q_vector AS q_vector,
+                   e.interest_score AS interest_score,
+                   e.professional_score AS professional_score
+            ORDER BY (e.interest_score + e.professional_score) DESC
+            """,
+            kg_id=str(kg_id),
+        )
+        return [dict(r) for r in result.records]
+
+    async def get_all_kgs_concepts(self) -> dict[UUID, list[dict]]:
+        """取得所有 KG 的 EFFECTIVE 概念，供分配器與路由器批次比對。"""
+        result = await self.driver.execute_query(
+            """
+            MATCH (kg:KnowledgeGraph)-[e:EFFECTIVE]->(c:ConceptNode)
+            RETURN kg.id AS kg_id, c.id AS concept_id, c.name AS name,
+                   c.q_vector AS q_vector,
+                   e.interest_score AS interest_score,
+                   e.professional_score AS professional_score
+            """
+        )
+        result_map: dict[UUID, list[dict]] = {}
+        for r in result.records:
+            kg_id = UUID(r["kg_id"])
+            result_map.setdefault(kg_id, []).append(dict(r))
+        return result_map
+
     async def get_all_concepts(self) -> list[dict]:
         result = await self.driver.execute_query(
             """
