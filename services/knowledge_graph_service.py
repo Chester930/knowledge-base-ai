@@ -283,10 +283,12 @@ async def confirm_auto_cluster(clusters: list[dict]) -> list[dict]:
 async def refresh_kg_concepts(kg_id: UUID, text: str | None = None) -> None:
     """
     重新計算 KG 路由層概念。
-    text 為空時，從此 KG 下所有 Document 的現有 EFFECTIVE 概念聚合；
-    text 不為空時，額外用 LLM 提取新概念加入。
+    來源優先順序：
+      1. 此 KG 下所有 Document 的現有 EFFECTIVE ConceptNode
+      2. fallback：此 KG SVO 圖中出現頻率最高的 Entity name（top-50）
+      3. 可選：傳入 text 時，額外用 LLM 提取概念
     """
-    from core.providers.factory import get_embedding_provider, get_llm_provider
+    from core.providers.factory import get_embedding_provider
     from services.concept_engine import extract_concepts
     from core.constants import INTEREST_INIT, PROFESSIONAL_INIT
 
@@ -294,7 +296,7 @@ async def refresh_kg_concepts(kg_id: UUID, text: str | None = None) -> None:
     concept_repo = ConceptRepository(get_driver())
     kg_repo = KnowledgeGraphRepository(get_driver())
 
-    # 聚合此 KG 下所有 Document 的概念 → 加到 KG 路由層
+    # ── 來源 1：Document EFFECTIVE ConceptNode ────────────────────────────────
     doc_concepts_map = await concept_repo.get_all_documents_concepts()
     kg_docs = await kg_repo.get_documents(kg_id)
     kg_doc_ids = {d["id"] for d in kg_docs}
@@ -305,7 +307,30 @@ async def refresh_kg_concepts(kg_id: UUID, text: str | None = None) -> None:
             for c in concepts:
                 concept_names.add(c["name"])
 
-    # 可選：用 text 提取額外概念
+    # ── 來源 2 fallback：從 SVO Entity 取高頻名詞 ────────────────────────────
+    if not concept_names:
+        logger.info(f"KG {kg_id} 無 Document 概念，從 Entity 節點取 top-50 作 fallback")
+        db_name = await kg_repo.get_db_name(kg_id)
+        driver = get_driver()
+        db_kw = {"database_": db_name} if db_name else {}
+        kg_filter = "" if db_name else "{kg_id: $kg_id}"
+        try:
+            result = await driver.execute_query(
+                f"""
+                MATCH (e:Entity {kg_filter})
+                WHERE e.type IN ['概念', '技術', '算法', '方法', '框架', '模型', '工具']
+                WITH e.name AS name,
+                     size([(e)-[:RELATION]-() | 1]) AS degree
+                ORDER BY degree DESC LIMIT 50
+                RETURN name
+                """,
+                kg_id=str(kg_id), **db_kw,
+            )
+            concept_names = {r["name"] for r in result.records if r["name"]}
+        except Exception as e:
+            logger.warning(f"Entity fallback 失敗：{e}")
+
+    # ── 來源 3：text LLM 提取 ─────────────────────────────────────────────────
     if text:
         extra = await extract_concepts(text)
         concept_names.update(extra)

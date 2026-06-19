@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from services.knowledge_graph_service import (
     auto_cluster_kgs, confirm_auto_cluster, create_kg, delete_kg, refresh_kg_concepts,
 )
-from services.svo_service import build_graph_for_kg, get_kg_graph
+from services.svo_service import apply_type_labels, build_graph_for_kg, get_kg_graph
 
 router = APIRouter(prefix="/knowledge-graphs", tags=["knowledge-graphs"])
 logger = logging.getLogger(__name__)
@@ -116,6 +116,9 @@ async def build_graph(kg_id: UUID, body: BuildGraphRequest = BuildGraphRequest()
         raise HTTPException(status_code=404, detail=f"KG 不存在：{kg_id}")
 
     async def event_stream():
+        kg = await KnowledgeGraphRepository(get_driver()).get_by_id(kg_id)
+        db_name = kg.db_name if kg else ""
+
         async for progress in build_graph_for_kg(
             kg_id,
             doc_ids=body.doc_ids,
@@ -130,6 +133,15 @@ async def build_graph(kg_id: UUID, body: BuildGraphRequest = BuildGraphRequest()
                 "message": progress.message,
             }
             yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+            if progress.event == "done":
+                try:
+                    label_stats = await apply_type_labels(kg_id, db_name=db_name)
+                    total_labeled = sum(label_stats.values())
+                    yield f"data: {json.dumps({'event': 'labels_done', 'labeled': total_labeled, 'stats': label_stats}, ensure_ascii=False)}\n\n"
+                except Exception as e:
+                    logger.warning(f"標籤套用失敗：{e}")
+                    yield f"data: {json.dumps({'event': 'labels_error', 'message': str(e)}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
         event_stream(),

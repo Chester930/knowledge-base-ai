@@ -151,68 +151,120 @@ async def merge_triples_to_neo4j(
     db_name: str = "",
 ) -> int:
     """
-    將帶型別的三元組批次 MERGE 進 Neo4j。
-    db_name 不為空 → 寫入 KG 專用資料庫（Entity 不需要 kg_id）
-    db_name 為空  → 寫入主資料庫並以 kg_id 隔離（向下相容）
+    將帶型別的三元組以 UNWIND 批次 MERGE 進 Neo4j（一次網路往返）。
+    db_name 不為空 → 寫入 KG 專用資料庫
+    db_name 為空  → 寫入主資料庫並以 kg_id 隔離
     """
     if not triples:
         return 0
 
     driver = get_driver()
-    merged = 0
+    doc_id_str = str(doc_id)
+    kg_id_str = str(kg_id)
 
-    if db_name:
-        for triple in triples:
-            try:
-                await driver.execute_query(
-                    """
-                    MERGE (s:Entity {name: $subject})
-                    ON CREATE SET s.id = $s_id, s.type = $s_type, s.created_at = datetime()
-                    ON MATCH SET s.type = CASE WHEN s.type IS NULL THEN $s_type ELSE s.type END
-                    MERGE (o:Entity {name: $object})
-                    ON CREATE SET o.id = $o_id, o.type = $o_type, o.created_at = datetime()
-                    ON MATCH SET o.type = CASE WHEN o.type IS NULL THEN $o_type ELSE o.type END
-                    MERGE (s)-[r:RELATION {rel_type: $rel_type, source_doc_id: $doc_id}]->(o)
-                    ON CREATE SET r.verb = $verb, r.confidence = 1, r.created_at = datetime()
-                    ON MATCH  SET r.confidence = r.confidence + 1,
-                                  r.verb = $verb, r.updated_at = datetime()
-                    """,
-                    subject=triple.subject, object=triple.object,
-                    rel_type=triple.rel_type, verb=triple.verb,
-                    s_type=triple.subject_type, o_type=triple.object_type,
-                    doc_id=str(doc_id), s_id=str(uuid4()), o_id=str(uuid4()),
-                    database_=db_name,
-                )
-                merged += 1
-            except Exception as e:
-                logger.warning(f"MERGE 失敗 [{triple.subject}|{triple.rel_type}|{triple.object}]: {e}")
-    else:
-        for triple in triples:
-            try:
-                await driver.execute_query(
-                    """
-                    MERGE (s:Entity {name: $subject, kg_id: $kg_id})
-                    ON CREATE SET s.id = $s_id, s.type = $s_type, s.created_at = datetime()
-                    ON MATCH SET s.type = CASE WHEN s.type IS NULL THEN $s_type ELSE s.type END
-                    MERGE (o:Entity {name: $object, kg_id: $kg_id})
-                    ON CREATE SET o.id = $o_id, o.type = $o_type, o.created_at = datetime()
-                    ON MATCH SET o.type = CASE WHEN o.type IS NULL THEN $o_type ELSE o.type END
-                    MERGE (s)-[r:RELATION {rel_type: $rel_type, source_doc_id: $doc_id}]->(o)
-                    ON CREATE SET r.verb = $verb, r.confidence = 1, r.created_at = datetime()
-                    ON MATCH  SET r.confidence = r.confidence + 1,
-                                  r.verb = $verb, r.updated_at = datetime()
-                    """,
-                    subject=triple.subject, object=triple.object,
-                    rel_type=triple.rel_type, verb=triple.verb,
-                    s_type=triple.subject_type, o_type=triple.object_type,
-                    kg_id=str(kg_id), doc_id=str(doc_id),
-                    s_id=str(uuid4()), o_id=str(uuid4()),
-                )
-                merged += 1
-            except Exception as e:
-                logger.warning(f"MERGE 失敗 [{triple.subject}|{triple.rel_type}|{triple.object}]: {e}")
+    rows = [
+        {
+            "subject":      t.subject,
+            "s_type":       t.subject_type,
+            "object":       t.object,
+            "o_type":       t.object_type,
+            "rel_type":     t.rel_type,
+            "verb":         t.verb,
+            "s_id":         str(uuid4()),
+            "o_id":         str(uuid4()),
+        }
+        for t in triples
+    ]
 
-    return merged
+    try:
+        if db_name:
+            result = await driver.execute_query(
+                """
+                UNWIND $rows AS r
+                MERGE (s:Entity {name: r.subject})
+                ON CREATE SET s.id = r.s_id, s.type = r.s_type, s.created_at = datetime()
+                ON MATCH SET  s.type = CASE WHEN s.type IS NULL THEN r.s_type ELSE s.type END
+                MERGE (o:Entity {name: r.object})
+                ON CREATE SET o.id = r.o_id, o.type = r.o_type, o.created_at = datetime()
+                ON MATCH SET  o.type = CASE WHEN o.type IS NULL THEN r.o_type ELSE o.type END
+                MERGE (s)-[rel:RELATION {rel_type: r.rel_type, source_doc_id: $doc_id}]->(o)
+                ON CREATE SET rel.verb = r.verb, rel.confidence = 1, rel.created_at = datetime()
+                ON MATCH SET  rel.confidence = rel.confidence + 1,
+                              rel.verb = r.verb, rel.updated_at = datetime()
+                RETURN count(rel) AS merged
+                """,
+                rows=rows, doc_id=doc_id_str,
+                database_=db_name,
+            )
+        else:
+            result = await driver.execute_query(
+                """
+                UNWIND $rows AS r
+                MERGE (s:Entity {name: r.subject, kg_id: $kg_id})
+                ON CREATE SET s.id = r.s_id, s.type = r.s_type, s.created_at = datetime()
+                ON MATCH SET  s.type = CASE WHEN s.type IS NULL THEN r.s_type ELSE s.type END
+                MERGE (o:Entity {name: r.object, kg_id: $kg_id})
+                ON CREATE SET o.id = r.o_id, o.type = r.o_type, o.created_at = datetime()
+                ON MATCH SET  o.type = CASE WHEN o.type IS NULL THEN r.o_type ELSE o.type END
+                MERGE (s)-[rel:RELATION {rel_type: r.rel_type, source_doc_id: $doc_id}]->(o)
+                ON CREATE SET rel.verb = r.verb, rel.confidence = 1, rel.created_at = datetime()
+                ON MATCH SET  rel.confidence = rel.confidence + 1,
+                              rel.verb = r.verb, rel.updated_at = datetime()
+                RETURN count(rel) AS merged
+                """,
+                rows=rows, doc_id=doc_id_str, kg_id=kg_id_str,
+            )
+        return result.records[0]["merged"] if result.records else len(rows)
+    except Exception as e:
+        logger.warning(f"批次 MERGE 失敗，回退逐條模式：{e}")
+        # 逐條回退，確保部分成功
+        merged = 0
+        for row in rows:
+            try:
+                if db_name:
+                    await driver.execute_query(
+                        """
+                        MERGE (s:Entity {name: $subject})
+                        ON CREATE SET s.id = $s_id, s.type = $s_type, s.created_at = datetime()
+                        ON MATCH SET  s.type = CASE WHEN s.type IS NULL THEN $s_type ELSE s.type END
+                        MERGE (o:Entity {name: $object})
+                        ON CREATE SET o.id = $o_id, o.type = $o_type, o.created_at = datetime()
+                        ON MATCH SET  o.type = CASE WHEN o.type IS NULL THEN $o_type ELSE o.type END
+                        MERGE (s)-[rel:RELATION {rel_type: $rel_type, source_doc_id: $doc_id}]->(o)
+                        ON CREATE SET rel.verb = $verb, rel.confidence = 1, rel.created_at = datetime()
+                        ON MATCH SET  rel.confidence = rel.confidence + 1,
+                                      rel.verb = $verb, rel.updated_at = datetime()
+                        """,
+                        subject=row["subject"], object=row["object"],
+                        rel_type=row["rel_type"], verb=row["verb"],
+                        s_type=row["s_type"], o_type=row["o_type"],
+                        doc_id=doc_id_str, s_id=row["s_id"], o_id=row["o_id"],
+                        database_=db_name,
+                    )
+                else:
+                    await driver.execute_query(
+                        """
+                        MERGE (s:Entity {name: $subject, kg_id: $kg_id})
+                        ON CREATE SET s.id = $s_id, s.type = $s_type, s.created_at = datetime()
+                        ON MATCH SET  s.type = CASE WHEN s.type IS NULL THEN $s_type ELSE s.type END
+                        MERGE (o:Entity {name: $object, kg_id: $kg_id})
+                        ON CREATE SET o.id = $o_id, o.type = $o_type, o.created_at = datetime()
+                        ON MATCH SET  o.type = CASE WHEN o.type IS NULL THEN $o_type ELSE o.type END
+                        MERGE (s)-[rel:RELATION {rel_type: $rel_type, source_doc_id: $doc_id}]->(o)
+                        ON CREATE SET rel.verb = $verb, rel.confidence = 1, rel.created_at = datetime()
+                        ON MATCH SET  rel.confidence = rel.confidence + 1,
+                                      rel.verb = $verb, rel.updated_at = datetime()
+                        """,
+                        subject=row["subject"], object=row["object"],
+                        rel_type=row["rel_type"], verb=row["verb"],
+                        s_type=row["s_type"], o_type=row["o_type"],
+                        kg_id=kg_id_str, doc_id=doc_id_str,
+                        s_id=row["s_id"], o_id=row["o_id"],
+                    )
+                merged += 1
+            except Exception as inner_e:
+                logger.warning(f"MERGE 失敗 [{row['subject']}|{row['rel_type']}|{row['object']}]: {inner_e}")
+        return merged
 
 
 async def get_kg_graph(
@@ -221,12 +273,15 @@ async def get_kg_graph(
     min_confidence: int = 1,
 ) -> dict:
     """取得 KG 的 Entity 節點與 RELATION 邊清單，供前端視覺化或 API 輸出。"""
+    import asyncio
+
     driver = get_driver()
     db_name = await _get_kg_db(kg_id)
     db_kw = {"database_": db_name} if db_name else {}
     kg_filter = "" if db_name else "{kg_id: $kg_id}"
+    params = {"kg_id": str(kg_id), "limit": limit, "min_conf": min_confidence}
 
-    entities_result = await driver.execute_query(
+    entities_q = driver.execute_query(
         f"""
         MATCH (e:Entity {kg_filter})
         OPTIONAL MATCH (e)-[r:RELATION]->()
@@ -234,10 +289,9 @@ async def get_kg_graph(
         RETURN e.id AS id, e.name AS name, e.type AS type, out_degree
         ORDER BY out_degree DESC LIMIT $limit
         """,
-        kg_id=str(kg_id), limit=limit, **db_kw,
+        **params, **db_kw,
     )
-
-    relations_result = await driver.execute_query(
+    relations_q = driver.execute_query(
         f"""
         MATCH (s:Entity {kg_filter})-[r:RELATION]->(o:Entity {kg_filter})
         WHERE r.confidence >= $min_conf
@@ -247,8 +301,10 @@ async def get_kg_graph(
                r.confidence AS confidence, r.source_doc_id AS source_doc_id
         ORDER BY r.confidence DESC LIMIT $limit
         """,
-        kg_id=str(kg_id), min_conf=min_confidence, limit=limit, **db_kw,
+        **params, **db_kw,
     )
+
+    entities_result, relations_result = await asyncio.gather(entities_q, relations_q)
 
     entities = [dict(r) for r in entities_result.records]
     relations = [dict(r) for r in relations_result.records]
@@ -262,6 +318,12 @@ async def get_kg_graph(
     }
 
 
+def _build_ft_query(terms: list[str]) -> str:
+    """將 terms 轉成 Lucene OR 查詢字串，特殊字元逸出。"""
+    escape = str.maketrans({c: f"\\{c}" for c in r'+-&|!(){}[]^"~*?:\/'})
+    return " OR ".join(f'"{t.translate(escape)}"' for t in terms)
+
+
 async def query_svo_facts(
     kg_id: UUID,
     terms: list[str],
@@ -273,6 +335,7 @@ async def query_svo_facts(
     BFS 遍歷 SVO 圖，回傳：
     - facts:       知識事實字串清單（供 LLM prompt 使用）
     - source_docs: 這些事實來源的 doc_id 字串清單（供圖譜驅動文件選取）
+    seed 搜尋優先使用 fulltext index（entity_name_ft），失敗時回退 CONTAINS。
     """
     if not terms:
         return [], []
@@ -281,49 +344,102 @@ async def query_svo_facts(
         db_name = await _get_kg_db(kg_id)
 
     driver = get_driver()
-    where_clauses = " OR ".join(f"toLower(e.name) CONTAINS toLower($term{i})" for i in range(len(terms)))
-    params: dict = {f"term{i}": t for i, t in enumerate(terms)}
-    params["limit"] = limit
+    db_kw = {"database_": db_name} if db_name else {}
+    kg_id_str = str(kg_id)
+    ft_query_str = _build_ft_query(terms)
+
+    # ── 嘗試 fulltext seed 搜尋 ───────────────────────────────────────────────
+    seed_cypher_ft: str
+    seed_params_ft: dict
 
     if db_name:
+        seed_cypher_ft = (
+            "CALL db.index.fulltext.queryNodes('entity_name_ft', $ft_q) "
+            "YIELD node AS e RETURN e"
+        )
+        seed_params_ft = {"ft_q": ft_query_str}
+    else:
+        seed_cypher_ft = (
+            "CALL db.index.fulltext.queryNodes('entity_name_ft', $ft_q) "
+            "YIELD node AS e WHERE e.kg_id = $kg_id RETURN e"
+        )
+        seed_params_ft = {"ft_q": ft_query_str, "kg_id": kg_id_str}
+
+    try:
+        seed_result = await driver.execute_query(seed_cypher_ft, **seed_params_ft, **db_kw)
+        use_ft = True
+    except Exception:
+        use_ft = False
+
+    # ── BFS 展開（共用，seed 來源不同）──────────────────────────────────────────
+    kg_filter = "" if db_name else "{kg_id: $kg_id}"
+
+    if use_ft and seed_result.records:
+        seed_ids = [r["e"].element_id for r in seed_result.records]
+        bfs_params: dict = {"seed_ids": seed_ids, "limit": limit}
+        if not db_name:
+            bfs_params["kg_id"] = kg_id_str
         result = await driver.execute_query(
             f"""
-            MATCH (e:Entity)
-            WHERE {where_clauses}
-            WITH collect(e) AS seeds
+            MATCH (seed)
+            WHERE elementId(seed) IN $seed_ids
+            WITH collect(seed) AS seeds
             UNWIND seeds AS seed
-            MATCH path = (seed)-[:RELATION*1..{hops}]-(neighbor:Entity)
+            MATCH path = (seed)-[:RELATION*1..{hops}]-(neighbor:Entity {kg_filter})
             UNWIND relationships(path) AS r
             WITH startNode(r) AS s, r, endNode(r) AS o
             RETURN DISTINCT s.name AS subject, s.type AS subject_type,
                    coalesce(r.rel_type, 'RELATED_TO') AS rel_type, r.verb AS verb,
                    o.name AS object, o.type AS object_type,
-                   r.confidence AS confidence,
-                   r.source_doc_id AS source_doc_id
+                   r.confidence AS confidence, r.source_doc_id AS source_doc_id
             ORDER BY confidence DESC LIMIT $limit
             """,
-            database_=db_name, **params,
+            **bfs_params, **db_kw,
         )
     else:
-        params["kg_id"] = str(kg_id)
-        result = await driver.execute_query(
-            f"""
-            MATCH (e:Entity {{kg_id: $kg_id}})
-            WHERE {where_clauses}
-            WITH collect(e) AS seeds
-            UNWIND seeds AS seed
-            MATCH path = (seed)-[:RELATION*1..{hops}]-(neighbor:Entity {{kg_id: $kg_id}})
-            UNWIND relationships(path) AS r
-            WITH startNode(r) AS s, r, endNode(r) AS o
-            RETURN DISTINCT s.name AS subject, s.type AS subject_type,
-                   coalesce(r.rel_type, 'RELATED_TO') AS rel_type, r.verb AS verb,
-                   o.name AS object, o.type AS object_type,
-                   r.confidence AS confidence,
-                   r.source_doc_id AS source_doc_id
-            ORDER BY confidence DESC LIMIT $limit
-            """,
-            **params,
+        # fallback：CONTAINS 全表掃描
+        where_clauses = " OR ".join(
+            f"toLower(e.name) CONTAINS toLower($term{i})" for i in range(len(terms))
         )
+        fallback_params: dict = {f"term{i}": t for i, t in enumerate(terms)}
+        fallback_params["limit"] = limit
+        if db_name:
+            result = await driver.execute_query(
+                f"""
+                MATCH (e:Entity)
+                WHERE {where_clauses}
+                WITH collect(e) AS seeds
+                UNWIND seeds AS seed
+                MATCH path = (seed)-[:RELATION*1..{hops}]-(neighbor:Entity)
+                UNWIND relationships(path) AS r
+                WITH startNode(r) AS s, r, endNode(r) AS o
+                RETURN DISTINCT s.name AS subject, s.type AS subject_type,
+                       coalesce(r.rel_type, 'RELATED_TO') AS rel_type, r.verb AS verb,
+                       o.name AS object, o.type AS object_type,
+                       r.confidence AS confidence, r.source_doc_id AS source_doc_id
+                ORDER BY confidence DESC LIMIT $limit
+                """,
+                database_=db_name, **fallback_params,
+            )
+        else:
+            fallback_params["kg_id"] = kg_id_str
+            result = await driver.execute_query(
+                f"""
+                MATCH (e:Entity {{kg_id: $kg_id}})
+                WHERE {where_clauses}
+                WITH collect(e) AS seeds
+                UNWIND seeds AS seed
+                MATCH path = (seed)-[:RELATION*1..{hops}]-(neighbor:Entity {{kg_id: $kg_id}})
+                UNWIND relationships(path) AS r
+                WITH startNode(r) AS s, r, endNode(r) AS o
+                RETURN DISTINCT s.name AS subject, s.type AS subject_type,
+                       coalesce(r.rel_type, 'RELATED_TO') AS rel_type, r.verb AS verb,
+                       o.name AS object, o.type AS object_type,
+                       r.confidence AS confidence, r.source_doc_id AS source_doc_id
+                ORDER BY confidence DESC LIMIT $limit
+                """,
+                **fallback_params,
+            )
 
     facts = []
     source_docs: list[str] = []
@@ -351,6 +467,59 @@ async def create_entity_index() -> None:
     await driver.execute_query(
         "CREATE INDEX entity_kg_name IF NOT EXISTS FOR (e:Entity) ON (e.kg_id, e.name)"
     )
+    # fulltext index：加速 query_svo_facts 的關鍵字模糊搜尋
+    try:
+        await driver.execute_query(
+            "CREATE FULLTEXT INDEX entity_name_ft IF NOT EXISTS "
+            "FOR (e:Entity) ON EACH [e.name]"
+        )
+    except Exception as e:
+        logger.debug(f"fulltext index 建立跳過（可能已存在）：{e}")
+
+
+# type 屬性 → Neo4j 附加標籤的映射（保留 Entity 主標籤，加上語義標籤）
+_TYPE_LABEL_MAP: dict[str, str] = {
+    "概念":  "Concept",
+    "算法":  "Algorithm",
+    "技術":  "Technology",
+    "方法":  "Method",
+    "工具":  "Tool",
+    "框架":  "Framework",
+    "模型":  "Model",
+    "系統":  "System",
+    "人物":  "Person",
+    "組織":  "Organization",
+    "資料集": "Dataset",
+    "指標":  "Metric",
+    "其他":  "Other",
+}
+
+
+async def apply_type_labels(kg_id: UUID, db_name: str = "") -> dict[str, int]:
+    """
+    依 Entity.type 屬性為節點附加語義標籤（e.g. :Algorithm, :Model）。
+    不移除 :Entity 主標籤，只疊加。
+    回傳各標籤打上的節點數 {label: count}。
+    """
+    driver = get_driver()
+    db_kw = {"database_": db_name} if db_name else {}
+    kg_filter = "" if db_name else "{kg_id: $kg_id}"
+    params_base: dict = {} if db_name else {"kg_id": str(kg_id)}
+
+    stats: dict[str, int] = {}
+    for type_name, label in _TYPE_LABEL_MAP.items():
+        result = await driver.execute_query(
+            f"MATCH (e:Entity {kg_filter}) WHERE e.type = $type "
+            f"SET e:`{label}` RETURN count(e) AS n",
+            type=type_name, **params_base, **db_kw,
+        )
+        n = result.records[0]["n"] if result.records else 0
+        if n:
+            stats[label] = n
+
+    # 為 rel_type 也加關係類型索引標籤（RELATION 本身已有，這裡確保完整性）
+    logger.info(f"KG {kg_id} 標籤完成：{stats}")
+    return stats
 
 
 # ── 內部工具 ──────────────────────────────────────────────────────────────────
