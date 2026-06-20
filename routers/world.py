@@ -382,53 +382,84 @@ def _build_world_prompt(question: str, svo_facts: list[str], contexts: list[dict
 async def explore_entities(
     q: str = Query("", description="實體名稱關鍵字（空白回傳高頻實體）"),
     limit: int = Query(30, ge=1, le=100),
+    expand_synonyms: bool = Query(False, description="是否展開同義詞（Phase 2d）"),
 ):
     """
     在所有公開 KG 中搜尋實體。
     每個 KG 可能使用獨立的 Neo4j 資料庫（Enterprise mode），逐一查詢後合併。
+    結果包含 instance_id（Phase 2d）。
     """
+    from services.federation_service import get_federation_cache
+    from core.config import settings as _settings
+
     driver = get_driver()
     kg_repo = KnowledgeGraphRepository(driver)
     public_kgs = [kg for kg in await kg_repo.list_all(include_private=True) if kg.is_public]
 
+    # Phase 2d：建立 kg_id → instance_id 對照
+    merged_reg = await get_federation_cache().merged_registry()
+    kg_instance_map = {s.kb_id: s.instance_id for s in merged_reg.skills if s.is_local}
+
     per_kg = max(1, limit // max(len(public_kgs), 1))
+
+    # Phase 2d：同義詞展開
+    search_q = q.strip()
+    search_terms: list[str] = []
+    if search_q and expand_synonyms:
+        from services.entity_alignment import expand_terms
+        search_terms = expand_terms([search_q])
+    elif search_q:
+        search_terms = [search_q]
 
     async def _query_kg(kg):
         try:
             db = kg.db_name or None
-            if q.strip():
-                cypher = (
-                    "MATCH (e:Entity) WHERE toLower(e.name) CONTAINS toLower($q) "
-                    "RETURN e.name AS name, e.type AS type, count{(e)-[]->()} AS deg "
-                    "ORDER BY deg DESC LIMIT $lim"
-                )
-                params = {"q": q.strip(), "lim": per_kg * 2}
-            else:
-                cypher = (
-                    "MATCH (e:Entity) WITH e, count{(e)-[]->()} AS deg "
-                    "ORDER BY deg DESC LIMIT $lim "
-                    "RETURN e.name AS name, e.type AS type, deg"
-                )
-                params = {"lim": per_kg * 2}
+            instance_id = kg_instance_map.get(str(kg.id), _settings.instance_id)
 
-            if db:
-                result = await driver.execute_query(cypher, **params, database_=db)
-            else:
-                # Community fallback: filter by kg_id
-                if q.strip():
-                    cypher_c = (
-                        "MATCH (e:Entity {kg_id: $kg_id}) WHERE toLower(e.name) CONTAINS toLower($q) "
+            if search_terms:
+                where = " OR ".join(
+                    f"toLower(e.name) CONTAINS toLower($t{i})"
+                    for i in range(len(search_terms))
+                )
+                params: dict = {f"t{i}": t for i, t in enumerate(search_terms)}
+                params["lim"] = per_kg * 2
+                if db:
+                    cypher = (
+                        f"MATCH (e:Entity) WHERE {where} "
+                        "RETURN e.name AS name, e.type AS type, count{{(e)-[]->()}} AS deg "
+                        "ORDER BY deg DESC LIMIT $lim"
+                    )
+                    result = await driver.execute_query(cypher, **params, database_=db)
+                else:
+                    params["kg_id"] = str(kg.id)
+                    cypher = (
+                        f"MATCH (e:Entity {{kg_id: $kg_id}}) WHERE {where} "
                         "RETURN e.name AS name, e.type AS type, 0 AS deg LIMIT $lim"
                     )
-                else:
-                    cypher_c = (
-                        "MATCH (e:Entity {kg_id: $kg_id}) RETURN e.name AS name, e.type AS type, 0 AS deg LIMIT $lim"
+                    result = await driver.execute_query(cypher, **params)
+            else:
+                params = {"lim": per_kg * 2}
+                if db:
+                    cypher = (
+                        "MATCH (e:Entity) WITH e, count{(e)-[]->()} AS deg "
+                        "ORDER BY deg DESC LIMIT $lim "
+                        "RETURN e.name AS name, e.type AS type, deg"
                     )
-                result = await driver.execute_query(cypher_c, kg_id=str(kg.id), **params)
+                    result = await driver.execute_query(cypher, **params, database_=db)
+                else:
+                    params["kg_id"] = str(kg.id)
+                    cypher = (
+                        "MATCH (e:Entity {kg_id: $kg_id}) "
+                        "RETURN e.name AS name, e.type AS type, 0 AS deg LIMIT $lim"
+                    )
+                    result = await driver.execute_query(cypher, **params)
 
             return [
-                {"name": r["name"], "type": r["type"] or "Entity",
-                 "kg_id": str(kg.id), "kg_name": kg.name, "degree": r["deg"]}
+                {
+                    "name": r["name"], "type": r["type"] or "Entity",
+                    "kg_id": str(kg.id), "kg_name": kg.name,
+                    "degree": r["deg"], "instance_id": instance_id,
+                }
                 for r in result.records
             ]
         except Exception as e:
@@ -437,7 +468,7 @@ async def explore_entities(
 
     results_nested = await asyncio.gather(*[_query_kg(kg) for kg in public_kgs])
 
-    # 合併、去重（同名實體保留最高 degree 的那筆），排序
+    # 合併：同名實體保留最高 degree 的那筆
     seen: dict[str, dict] = {}
     for batch in results_nested:
         for item in batch:
@@ -446,7 +477,105 @@ async def explore_entities(
                 seen[key] = item
 
     merged = sorted(seen.values(), key=lambda x: x["degree"], reverse=True)[:limit]
-    return {"entities": merged, "total": len(merged), "query": q}
+    return {
+        "entities": merged,
+        "total": len(merged),
+        "query": q,
+        "search_terms": search_terms or ([q] if q else []),
+    }
+
+
+# ── GET /world/align/synonyms ─────────────────────────────────────────────────
+
+@router.get("/align/synonyms", summary="查詢術語的同義詞組（Phase 2d）")
+async def get_synonyms(term: str = Query(..., description="術語（zh 或 en）")):
+    """回傳 term 所屬的同義詞組，以及展開後的查詢詞清單。"""
+    from services.entity_alignment import get_synonym_group, expand_terms
+    group = get_synonym_group(term)
+    expanded = expand_terms([term])
+    return {
+        "term": term,
+        "synonym_group": group,
+        "expanded_query": expanded,
+        "found": bool(group),
+    }
+
+
+# ── GET /world/align/entities ─────────────────────────────────────────────────
+
+@router.get("/align/entities", summary="跨 instance 實體對齊查詢（Phase 2d）")
+async def align_entities(
+    name: str = Query(..., description="實體名稱（支援同義詞自動展開）"),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """
+    跨所有本機公開 KG 搜尋同名／同義詞實體，
+    回傳 AlignedEntity 清單（每個實體保留所有 instance 來源）。
+    """
+    from services.entity_alignment import expand_terms, align_entity_results
+    from services.federation_service import get_federation_cache
+    from core.config import settings as _settings
+
+    search_terms = expand_terms([name])
+
+    driver = get_driver()
+    kg_repo = KnowledgeGraphRepository(driver)
+    public_kgs = [kg for kg in await kg_repo.list_all(include_private=True) if kg.is_public]
+
+    merged_reg = await get_federation_cache().merged_registry()
+    kg_instance_map = {s.kb_id: s.instance_id for s in merged_reg.skills if s.is_local}
+
+    per_kg = max(1, limit // max(len(public_kgs), 1))
+
+    async def _search_kg(kg):
+        try:
+            db = kg.db_name or None
+            instance_id = kg_instance_map.get(str(kg.id), _settings.instance_id)
+            where = " OR ".join(
+                f"toLower(e.name) CONTAINS toLower($t{i})"
+                for i in range(len(search_terms))
+            )
+            params: dict = {f"t{i}": t for i, t in enumerate(search_terms)}
+            params["lim"] = per_kg * 3
+
+            if db:
+                cypher = (
+                    f"MATCH (e:Entity) WHERE {where} "
+                    "RETURN e.name AS name, e.type AS type, count{(e)-[]->()} AS deg "
+                    "ORDER BY deg DESC LIMIT $lim"
+                )
+                result = await driver.execute_query(cypher, **params, database_=db)
+            else:
+                params["kg_id"] = str(kg.id)
+                cypher = (
+                    f"MATCH (e:Entity {{kg_id: $kg_id}}) WHERE {where} "
+                    "RETURN e.name AS name, e.type AS type, 0 AS deg LIMIT $lim"
+                )
+                result = await driver.execute_query(cypher, **params)
+
+            return [
+                {
+                    "name": r["name"], "type": r["type"] or "Entity",
+                    "kg_id": str(kg.id), "kg_name": kg.name,
+                    "degree": r["deg"], "instance_id": instance_id,
+                }
+                for r in result.records
+            ]
+        except Exception as e:
+            logger.warning(f"對齊搜尋失敗 [{kg.name}]: {e}")
+            return []
+
+    results_nested = await asyncio.gather(*[_search_kg(kg) for kg in public_kgs])
+    all_entities = [item for batch in results_nested for item in batch]
+
+    aligned = align_entity_results(all_entities)
+    return {
+        "query": name,
+        "search_terms": search_terms,
+        "aligned": [a.to_dict() for a in aligned[:limit]],
+        "total": len(aligned),
+        "cross_instance_count": sum(1 for a in aligned if a.instance_count > 1),
+    }
 
 
 # ── GET /world/explore/neighbors ──────────────────────────────────────────────

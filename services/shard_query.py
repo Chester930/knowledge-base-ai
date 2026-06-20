@@ -186,15 +186,22 @@ async def query_shards_parallel(
     hops: int = 1,
     limit_per_shard: int = 30,
     timeout: float = SHARD_TIMEOUT,
+    expand_synonyms: bool = True,
 ) -> tuple[list[str], list[str], list[ShardResult]]:
     """
     並行查詢所有分片，回傳：
     - merged_facts   : 去重後的知識事實清單（遠端事實帶 instance 前綴）
     - merged_docs    : 本機 source_doc_id 清單（跨分片去重）
     - shard_results  : 每個分片的詳細結果（狀態、耗時、facts 數量）
+
+    expand_synonyms=True（Phase 2d）：查詢前自動展開同義詞（zh↔en 術語對照）。
     """
     if not skills or not terms:
         return [], [], []
+
+    if expand_synonyms:
+        from services.entity_alignment import expand_terms
+        terms = expand_terms(terms)
 
     async def _run(skill: KBSkill) -> ShardResult:
         try:

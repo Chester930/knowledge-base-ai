@@ -149,9 +149,14 @@ Phase 2c：並行查詢引擎 ✅
   → /world/chat SSE 新增 shard_meta、shards_queried、shards_offline 欄位
   → 遠端路由：top_concepts 關鍵字比對（本機 KG 仍用 ConceptRepository 向量路由）
 
-Phase 2d：實體對齊（可選）
-  → instance_id 命名空間（必做）
-  → 同義詞合併 Ontology alignment（社群貢獻）
+Phase 2d：實體對齊 ✅
+  → services/entity_alignment.py：同義詞字典（35 組 zh↔en AI/CS 術語）
+  → expand_terms()：查詢前自動展開同義詞（e.g. 強化學習 → RL → Reinforcement Learning）
+  → AlignedEntity + align_entity_results()：跨 instance 同名/同義詞實體分組
+  → shard_query.py：query_shards_parallel() 加 expand_synonyms=True 參數
+  → explore/entities 回傳補 instance_id、新增 expand_synonyms 查詢參數
+  → GET /world/align/synonyms：查詢術語的同義詞組
+  → GET /world/align/entities：跨 instance 實體對齊搜尋（含同義詞展開）
 ```
 
 ---
