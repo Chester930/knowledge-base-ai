@@ -58,7 +58,8 @@ async def get_detail(kg_id: UUID):
 
 @router.put("/{kg_id}", response_model=KnowledgeGraph, summary="更新 KG")
 async def update(kg_id: UUID, body: KnowledgeGraphUpdate):
-    repo = KnowledgeGraphRepository(get_driver())
+    driver = get_driver()
+    repo = KnowledgeGraphRepository(driver)
     kg = await repo.update(
         kg_id,
         name=body.name,
@@ -67,6 +68,19 @@ async def update(kg_id: UUID, body: KnowledgeGraphUpdate):
     )
     if kg is None:
         raise HTTPException(status_code=404, detail=f"KG 不存在：{kg_id}")
+
+    # 自動同步 KB Skill 描述檔
+    if body.is_public is not None:
+        from services.kb_skill_service import generate_skill, upsert_skill, remove_skill
+        if body.is_public:
+            try:
+                skill = await generate_skill(kg_id, driver)
+                upsert_skill(skill)
+            except Exception as e:
+                logger.warning(f"KB Skill 自動同步失敗 [{kg_id}]：{e}")
+        else:
+            remove_skill(str(kg_id))
+
     return kg
 
 

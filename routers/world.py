@@ -30,6 +30,23 @@ from services.svo_service import query_svo_facts
 router = APIRouter(prefix="/world", tags=["world"])
 logger = logging.getLogger(__name__)
 
+# ── GET /world/registry ───────────────────────────────────────────────────────
+
+@router.get("/registry", summary="取得本機 KB Registry（供 world-hub 讀取）")
+async def get_registry():
+    from services.kb_skill_service import load_registry
+    registry = load_registry()
+    return registry.model_dump(exclude_none=True)
+
+
+# ── POST /world/sync ──────────────────────────────────────────────────────────
+
+@router.post("/sync", summary="同步所有公開 KG 到 registry.json")
+async def sync_registry():
+    from services.kb_skill_service import sync_public_kgs
+    result = await sync_public_kgs(get_driver())
+    return {"status": "ok", **result}
+
 _ALL_REL = (
     "IS_A|PART_OF|CONTAINS|INSTANCE_OF|CAUSES|PREVENTS|ENABLES|IMPROVES|INHIBITS|"
     "USES|REQUIRES|PRODUCES|IMPLEMENTS|REPLACES|EXTENDS|CONTRASTS|SIMILAR_TO|OUTPERFORMS|"

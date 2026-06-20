@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     docs_dir: str = "./docs"
     workspace_dir: str = "./workspace"
 
+    # ── 聯邦識別 ───────────────────────────────────────────────────────────────
+    instance_id: str = "local"          # 用於 KB Skill 描述檔的 instance 命名空間
+    registry_path: str = "./registry.json"   # 本機 registry 路徑
+
     # 向下相容舊 .env（mapping 舊欄位名稱）
     @property
     def llm_model(self) -> str:
