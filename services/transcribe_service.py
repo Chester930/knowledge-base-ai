@@ -8,7 +8,13 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_EXTENSIONS = {".md", ".txt", ".pdf", ".docx", ".pptx", ".doc", ".ppt"}
+SUPPORTED_EXTENSIONS = {
+    ".md", ".txt", ".pdf", ".docx", ".pptx", ".doc", ".ppt",
+    # 音訊 / 影片（Whisper 轉譯）
+    ".mp3", ".mp4", ".wav", ".m4a", ".ogg", ".flac", ".webm", ".mkv", ".avi",
+}
+
+AUDIO_EXTENSIONS = {".mp3", ".mp4", ".wav", ".m4a", ".ogg", ".flac", ".webm", ".mkv", ".avi"}
 
 
 def _default_staging_dir() -> Path:
@@ -141,6 +147,8 @@ def _extract_text(path: Path) -> str:
             return _read_doc(path)
         case ".ppt":
             return _read_ppt(path)
+        case s if s in AUDIO_EXTENSIONS:
+            return _read_audio(path)
         case _:
             raise ValueError(f"不支援的格式：{suffix}")
 
@@ -314,3 +322,36 @@ def _read_ppt(path: Path) -> str:
         return _sanitize("\n\n".join(parts))
     except Exception as e:
         raise RuntimeError(f".ppt 讀取失敗（需安裝 Microsoft Office）：{e}") from e
+
+
+# ── Whisper 語音/影片轉譯 ──────────────────────────────────────────────────────
+
+_whisper_model = None
+
+
+def _get_whisper_model():
+    global _whisper_model
+    if _whisper_model is None:
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError as e:
+            raise RuntimeError(
+                "未安裝 faster-whisper。請執行：pip install faster-whisper"
+            ) from e
+        from core.config import settings
+        model_size = settings.whisper_model_size
+        logger.info(f"初始化 Whisper 模型（{model_size}）…")
+        _whisper_model = WhisperModel(model_size, device="auto", compute_type="auto")
+        logger.info("Whisper 模型載入完成")
+    return _whisper_model
+
+
+def _read_audio(path: Path) -> str:
+    """使用 faster-whisper 將音訊或影片轉譯為文字。"""
+    logger.info(f"啟動 Whisper 語音轉譯：{path.name}")
+    model = _get_whisper_model()
+    segments, info = model.transcribe(str(path), beam_size=5)
+    lang = getattr(info, "language", "unknown")
+    logger.info(f"Whisper 偵測語言：{lang}（{path.name}）")
+    parts = [seg.text.strip() for seg in segments if seg.text.strip()]
+    return _sanitize(" ".join(parts))

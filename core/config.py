@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     grok_api_key: str = ""
     grok_model: str = "grok-2"
 
+    # ── Whisper 語音/影片轉譯 ──────────────────────────────────────────────────
+    whisper_model_size: str = "base"   # tiny | base | small | medium | large-v3
+
     # ── 系統行為 ───────────────────────────────────────────────────────────────
     concept_extraction_max: int = 8
     score_threshold: float = 0.70
