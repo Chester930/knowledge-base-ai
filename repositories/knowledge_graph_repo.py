@@ -183,6 +183,8 @@ class KnowledgeGraphRepository:
         )
         doc_c = doc_result.records[0]["doc_c"] if doc_result.records else 0
 
+        _REL = "IS_A|PART_OF|USES|ENABLES|CAUSES|HAS_PROPERTY|PRECEDES|RELATED_TO"
+
         # entity / relation count：per-KG db 或 main db
         if db_name:
             ent_result = await self.driver.execute_query(
@@ -190,7 +192,7 @@ class KnowledgeGraphRepository:
                 database_=db_name,
             )
             rel_result = await self.driver.execute_query(
-                "MATCH ()-[r:RELATION]->() RETURN count(r) AS rel_c",
+                f"MATCH ()-[r:{_REL}]->() RETURN count(r) AS rel_c",
                 database_=db_name,
             )
         else:
@@ -199,7 +201,7 @@ class KnowledgeGraphRepository:
                 id=str(kg_id),
             )
             rel_result = await self.driver.execute_query(
-                "MATCH (s:Entity {kg_id: $id})-[r:RELATION]->() RETURN count(r) AS rel_c",
+                f"MATCH (s:Entity {{kg_id: $id}})-[r:{_REL}]->() RETURN count(r) AS rel_c",
                 id=str(kg_id),
             )
 
@@ -231,11 +233,12 @@ class KnowledgeGraphRepository:
         )
         top_concepts = [r["name"] for r in concepts_result.records]
 
+        _REL = "IS_A|PART_OF|USES|ENABLES|CAUSES|HAS_PROPERTY|PRECEDES|RELATED_TO"
         db_name = kg.db_name
         if db_name:
             entities_result = await self.driver.execute_query(
-                """
-                MATCH (e:Entity)<-[r:RELATION]-()
+                f"""
+                MATCH (e:Entity)<-[r:{_REL}]-()
                 WITH e, count(r) AS rel_count
                 RETURN e.name AS name ORDER BY rel_count DESC LIMIT 10
                 """,
@@ -243,8 +246,8 @@ class KnowledgeGraphRepository:
             )
         else:
             entities_result = await self.driver.execute_query(
-                """
-                MATCH (e:Entity {kg_id: $id})<-[r:RELATION]-()
+                f"""
+                MATCH (e:Entity {{kg_id: $id}})<-[r:{_REL}]-()
                 WITH e, count(r) AS rel_count
                 RETURN e.name AS name ORDER BY rel_count DESC LIMIT 10
                 """,

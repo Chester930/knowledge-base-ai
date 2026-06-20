@@ -114,7 +114,7 @@ async def extract_svo_from_text(text: str) -> list[SVOTriple]:
 
     prompt = (
         "請從以下文字中提取知識關係，以六欄格式輸出，每行一組：\n"
-        "主詞|主詞類型|關係類別|關係描述|受詞|受詞類型\n\n"
+        "主詞|主詞類型|關係類別|動詞|受詞|受詞類型\n\n"
         "【實體類型】選最接近：概念、算法、技術、方法、工具、框架、模型、系統、人物、組織、資料集、指標、其他\n\n"
         "【關係類別】必須從以下 8 種選一，不可自造：\n"
         "  IS_A       → 階層歸屬（是一種、屬於、屬於類別）\n"
@@ -127,17 +127,18 @@ async def extract_svo_from_text(text: str) -> list[SVOTriple]:
         "  RELATED_TO → 其他相關（無法歸入以上類別時使用）\n\n"
         "規則：\n"
         "- 主詞與受詞為名詞或名詞短語（2-15字）\n"
-        "- 關係描述為自然語言動詞短語（2-8字），清楚說明關係內容\n"
+        "- 動詞欄位直接從原文提取最能代表關係的核心動詞或動詞短語（2-6字），"
+        "如：使用、導致、屬於、包含、提供、改善、基於、需要、支援、觸發\n"
         "- 只輸出六欄格式，不加說明、序號、標點\n"
         "- 行數上限 30 行，優先抽取最重要的知識關係\n\n"
         "範例：\n"
-        "Q-Learning|算法|IS_A|屬於強化學習的一種算法|強化學習|概念\n"
-        "工具呼叫|方法|PART_OF|是代理迴圈的執行步驟|代理迴圈|概念\n"
-        "提示快取|技術|ENABLES|使跨請求重用 context 成為可能|效能優化|指標\n"
-        "Context 超限|概念|CAUSES|導致回應延遲增加|回應延遲|指標\n"
-        "Transformer|模型|USES|使用多頭注意力機制進行特徵提取|注意力機制|技術\n"
-        "並行執行|技術|HAS_PROPERTY|具有非阻塞的執行特性|非阻塞|概念\n"
-        "路由層|系統|PRECEDES|先完成路由才進行 SVO 查詢|SVO 查詢|方法\n\n"
+        "Q-Learning|算法|IS_A|屬於|強化學習|概念\n"
+        "工具呼叫|方法|PART_OF|包含於|代理迴圈|概念\n"
+        "提示快取|技術|ENABLES|使能|效能優化|指標\n"
+        "Context 超限|概念|CAUSES|導致|回應延遲|指標\n"
+        "Transformer|模型|USES|使用|注意力機制|技術\n"
+        "並行執行|技術|HAS_PROPERTY|具有|非阻塞特性|概念\n"
+        "路由層|系統|PRECEDES|先於|SVO 查詢|方法\n\n"
         f"文字：\n{text}"
     )
     raw = await get_llm_provider().generate(prompt)
@@ -151,120 +152,120 @@ async def merge_triples_to_neo4j(
     db_name: str = "",
 ) -> int:
     """
-    將帶型別的三元組以 UNWIND 批次 MERGE 進 Neo4j（一次網路往返）。
+    將帶型別的三元組以 rel_type 作為真正的 Neo4j relationship type 寫入。
+    每個 rel_type 一批 UNWIND（最多 8 批），確保邊標籤有語意意義。
     db_name 不為空 → 寫入 KG 專用資料庫
     db_name 為空  → 寫入主資料庫並以 kg_id 隔離
     """
     if not triples:
         return 0
 
+    from collections import defaultdict
     driver = get_driver()
     doc_id_str = str(doc_id)
     kg_id_str = str(kg_id)
 
-    rows = [
-        {
-            "subject":      t.subject,
-            "s_type":       t.subject_type,
-            "object":       t.object,
-            "o_type":       t.object_type,
-            "rel_type":     t.rel_type,
-            "verb":         t.verb,
-            "s_id":         str(uuid4()),
-            "o_id":         str(uuid4()),
-        }
-        for t in triples
-    ]
+    # 按 rel_type 分組，rel_type 已通過 _VALID_REL_TYPES 驗證，可安全嵌入 Cypher
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for t in triples:
+        groups[t.rel_type].append({
+            "subject": t.subject,
+            "s_type":  t.subject_type,
+            "object":  t.object,
+            "o_type":  t.object_type,
+            "verb":    t.verb,
+            "s_id":    str(uuid4()),
+            "o_id":    str(uuid4()),
+        })
 
-    try:
-        if db_name:
-            result = await driver.execute_query(
-                """
-                UNWIND $rows AS r
-                MERGE (s:Entity {name: r.subject})
-                ON CREATE SET s.id = r.s_id, s.type = r.s_type, s.created_at = datetime()
-                ON MATCH SET  s.type = CASE WHEN s.type IS NULL THEN r.s_type ELSE s.type END
-                MERGE (o:Entity {name: r.object})
-                ON CREATE SET o.id = r.o_id, o.type = r.o_type, o.created_at = datetime()
-                ON MATCH SET  o.type = CASE WHEN o.type IS NULL THEN r.o_type ELSE o.type END
-                MERGE (s)-[rel:RELATION {rel_type: r.rel_type, source_doc_id: $doc_id}]->(o)
-                ON CREATE SET rel.verb = r.verb, rel.confidence = 1, rel.created_at = datetime()
-                ON MATCH SET  rel.confidence = rel.confidence + 1,
-                              rel.verb = r.verb, rel.updated_at = datetime()
-                RETURN count(rel) AS merged
-                """,
-                rows=rows, doc_id=doc_id_str,
-                database_=db_name,
-            )
-        else:
-            result = await driver.execute_query(
-                """
-                UNWIND $rows AS r
-                MERGE (s:Entity {name: r.subject, kg_id: $kg_id})
-                ON CREATE SET s.id = r.s_id, s.type = r.s_type, s.created_at = datetime()
-                ON MATCH SET  s.type = CASE WHEN s.type IS NULL THEN r.s_type ELSE s.type END
-                MERGE (o:Entity {name: r.object, kg_id: $kg_id})
-                ON CREATE SET o.id = r.o_id, o.type = r.o_type, o.created_at = datetime()
-                ON MATCH SET  o.type = CASE WHEN o.type IS NULL THEN r.o_type ELSE o.type END
-                MERGE (s)-[rel:RELATION {rel_type: r.rel_type, source_doc_id: $doc_id}]->(o)
-                ON CREATE SET rel.verb = r.verb, rel.confidence = 1, rel.created_at = datetime()
-                ON MATCH SET  rel.confidence = rel.confidence + 1,
-                              rel.verb = r.verb, rel.updated_at = datetime()
-                RETURN count(rel) AS merged
-                """,
-                rows=rows, doc_id=doc_id_str, kg_id=kg_id_str,
-            )
-        return result.records[0]["merged"] if result.records else len(rows)
-    except Exception as e:
-        logger.warning(f"批次 MERGE 失敗，回退逐條模式：{e}")
-        # 逐條回退，確保部分成功
-        merged = 0
-        for row in rows:
-            try:
-                if db_name:
-                    await driver.execute_query(
-                        """
-                        MERGE (s:Entity {name: $subject})
-                        ON CREATE SET s.id = $s_id, s.type = $s_type, s.created_at = datetime()
-                        ON MATCH SET  s.type = CASE WHEN s.type IS NULL THEN $s_type ELSE s.type END
-                        MERGE (o:Entity {name: $object})
-                        ON CREATE SET o.id = $o_id, o.type = $o_type, o.created_at = datetime()
-                        ON MATCH SET  o.type = CASE WHEN o.type IS NULL THEN $o_type ELSE o.type END
-                        MERGE (s)-[rel:RELATION {rel_type: $rel_type, source_doc_id: $doc_id}]->(o)
-                        ON CREATE SET rel.verb = $verb, rel.confidence = 1, rel.created_at = datetime()
-                        ON MATCH SET  rel.confidence = rel.confidence + 1,
-                                      rel.verb = $verb, rel.updated_at = datetime()
-                        """,
-                        subject=row["subject"], object=row["object"],
-                        rel_type=row["rel_type"], verb=row["verb"],
-                        s_type=row["s_type"], o_type=row["o_type"],
-                        doc_id=doc_id_str, s_id=row["s_id"], o_id=row["o_id"],
-                        database_=db_name,
-                    )
-                else:
-                    await driver.execute_query(
-                        """
-                        MERGE (s:Entity {name: $subject, kg_id: $kg_id})
-                        ON CREATE SET s.id = $s_id, s.type = $s_type, s.created_at = datetime()
-                        ON MATCH SET  s.type = CASE WHEN s.type IS NULL THEN $s_type ELSE s.type END
-                        MERGE (o:Entity {name: $object, kg_id: $kg_id})
-                        ON CREATE SET o.id = $o_id, o.type = $o_type, o.created_at = datetime()
-                        ON MATCH SET  o.type = CASE WHEN o.type IS NULL THEN $o_type ELSE o.type END
-                        MERGE (s)-[rel:RELATION {rel_type: $rel_type, source_doc_id: $doc_id}]->(o)
-                        ON CREATE SET rel.verb = $verb, rel.confidence = 1, rel.created_at = datetime()
-                        ON MATCH SET  rel.confidence = rel.confidence + 1,
-                                      rel.verb = $verb, rel.updated_at = datetime()
-                        """,
-                        subject=row["subject"], object=row["object"],
-                        rel_type=row["rel_type"], verb=row["verb"],
-                        s_type=row["s_type"], o_type=row["o_type"],
-                        kg_id=kg_id_str, doc_id=doc_id_str,
-                        s_id=row["s_id"], o_id=row["o_id"],
-                    )
-                merged += 1
-            except Exception as inner_e:
-                logger.warning(f"MERGE 失敗 [{row['subject']}|{row['rel_type']}|{row['object']}]: {inner_e}")
-        return merged
+    total_merged = 0
+    for rel_type, rows in groups.items():
+        try:
+            if db_name:
+                result = await driver.execute_query(
+                    f"""
+                    UNWIND $rows AS r
+                    MERGE (s:Entity {{name: r.subject}})
+                    ON CREATE SET s.id = r.s_id, s.type = r.s_type, s.created_at = datetime()
+                    ON MATCH SET  s.type = CASE WHEN s.type IS NULL THEN r.s_type ELSE s.type END
+                    MERGE (o:Entity {{name: r.object}})
+                    ON CREATE SET o.id = r.o_id, o.type = r.o_type, o.created_at = datetime()
+                    ON MATCH SET  o.type = CASE WHEN o.type IS NULL THEN r.o_type ELSE o.type END
+                    MERGE (s)-[rel:{rel_type} {{source_doc_id: $doc_id}}]->(o)
+                    ON CREATE SET rel.verb = r.verb, rel.confidence = 1, rel.created_at = datetime()
+                    ON MATCH SET  rel.confidence = rel.confidence + 1,
+                                  rel.verb = r.verb, rel.updated_at = datetime()
+                    RETURN count(rel) AS merged
+                    """,
+                    rows=rows, doc_id=doc_id_str,
+                    database_=db_name,
+                )
+            else:
+                result = await driver.execute_query(
+                    f"""
+                    UNWIND $rows AS r
+                    MERGE (s:Entity {{name: r.subject, kg_id: $kg_id}})
+                    ON CREATE SET s.id = r.s_id, s.type = r.s_type, s.created_at = datetime()
+                    ON MATCH SET  s.type = CASE WHEN s.type IS NULL THEN r.s_type ELSE s.type END
+                    MERGE (o:Entity {{name: r.object, kg_id: $kg_id}})
+                    ON CREATE SET o.id = r.o_id, o.type = r.o_type, o.created_at = datetime()
+                    ON MATCH SET  o.type = CASE WHEN o.type IS NULL THEN r.o_type ELSE o.type END
+                    MERGE (s)-[rel:{rel_type} {{source_doc_id: $doc_id}}]->(o)
+                    ON CREATE SET rel.verb = r.verb, rel.confidence = 1, rel.created_at = datetime()
+                    ON MATCH SET  rel.confidence = rel.confidence + 1,
+                                  rel.verb = r.verb, rel.updated_at = datetime()
+                    RETURN count(rel) AS merged
+                    """,
+                    rows=rows, doc_id=doc_id_str, kg_id=kg_id_str,
+                )
+            total_merged += result.records[0]["merged"] if result.records else len(rows)
+        except Exception as e:
+            logger.warning(f"批次 MERGE 失敗 [{rel_type}]，回退逐條模式：{e}")
+            for row in rows:
+                try:
+                    if db_name:
+                        await driver.execute_query(
+                            f"""
+                            MERGE (s:Entity {{name: $subject}})
+                            ON CREATE SET s.id = $s_id, s.type = $s_type, s.created_at = datetime()
+                            ON MATCH SET  s.type = CASE WHEN s.type IS NULL THEN $s_type ELSE s.type END
+                            MERGE (o:Entity {{name: $object}})
+                            ON CREATE SET o.id = $o_id, o.type = $o_type, o.created_at = datetime()
+                            ON MATCH SET  o.type = CASE WHEN o.type IS NULL THEN $o_type ELSE o.type END
+                            MERGE (s)-[rel:{rel_type} {{source_doc_id: $doc_id}}]->(o)
+                            ON CREATE SET rel.verb = $verb, rel.confidence = 1, rel.created_at = datetime()
+                            ON MATCH SET  rel.confidence = rel.confidence + 1,
+                                          rel.verb = $verb, rel.updated_at = datetime()
+                            """,
+                            subject=row["subject"], object=row["object"],
+                            verb=row["verb"], s_type=row["s_type"], o_type=row["o_type"],
+                            doc_id=doc_id_str, s_id=row["s_id"], o_id=row["o_id"],
+                            database_=db_name,
+                        )
+                    else:
+                        await driver.execute_query(
+                            f"""
+                            MERGE (s:Entity {{name: $subject, kg_id: $kg_id}})
+                            ON CREATE SET s.id = $s_id, s.type = $s_type, s.created_at = datetime()
+                            ON MATCH SET  s.type = CASE WHEN s.type IS NULL THEN $s_type ELSE s.type END
+                            MERGE (o:Entity {{name: $object, kg_id: $kg_id}})
+                            ON CREATE SET o.id = $o_id, o.type = $o_type, o.created_at = datetime()
+                            ON MATCH SET  o.type = CASE WHEN o.type IS NULL THEN $o_type ELSE o.type END
+                            MERGE (s)-[rel:{rel_type} {{source_doc_id: $doc_id}}]->(o)
+                            ON CREATE SET rel.verb = $verb, rel.confidence = 1, rel.created_at = datetime()
+                            ON MATCH SET  rel.confidence = rel.confidence + 1,
+                                          rel.verb = $verb, rel.updated_at = datetime()
+                            """,
+                            subject=row["subject"], object=row["object"],
+                            verb=row["verb"], s_type=row["s_type"], o_type=row["o_type"],
+                            kg_id=kg_id_str, doc_id=doc_id_str,
+                            s_id=row["s_id"], o_id=row["o_id"],
+                        )
+                    total_merged += 1
+                except Exception as inner_e:
+                    logger.warning(f"MERGE 失敗 [{row['subject']}|{rel_type}|{row['object']}]: {inner_e}")
+
+    return total_merged
 
 
 async def get_kg_graph(
@@ -284,7 +285,7 @@ async def get_kg_graph(
     entities_q = driver.execute_query(
         f"""
         MATCH (e:Entity {kg_filter})
-        OPTIONAL MATCH (e)-[r:RELATION]->()
+        OPTIONAL MATCH (e)-[r:{_ALL_REL_PATTERN}]->()
         WITH e, count(r) AS out_degree
         RETURN e.id AS id, e.name AS name, e.type AS type, out_degree
         ORDER BY out_degree DESC LIMIT $limit
@@ -293,10 +294,10 @@ async def get_kg_graph(
     )
     relations_q = driver.execute_query(
         f"""
-        MATCH (s:Entity {kg_filter})-[r:RELATION]->(o:Entity {kg_filter})
+        MATCH (s:Entity {kg_filter})-[r:{_ALL_REL_PATTERN}]->(o:Entity {kg_filter})
         WHERE r.confidence >= $min_conf
         RETURN s.name AS subject, s.type AS subject_type,
-               coalesce(r.rel_type, 'RELATED_TO') AS rel_type, r.verb AS verb,
+               type(r) AS rel_type, r.verb AS verb,
                o.name AS object, o.type AS object_type,
                r.confidence AS confidence, r.source_doc_id AS source_doc_id
         ORDER BY r.confidence DESC LIMIT $limit
@@ -385,11 +386,11 @@ async def query_svo_facts(
             WHERE elementId(seed) IN $seed_ids
             WITH collect(seed) AS seeds
             UNWIND seeds AS seed
-            MATCH path = (seed)-[:RELATION*1..{hops}]-(neighbor:Entity {kg_filter})
+            MATCH path = (seed)-[:{_ALL_REL_PATTERN}*1..{hops}]-(neighbor:Entity {kg_filter})
             UNWIND relationships(path) AS r
             WITH startNode(r) AS s, r, endNode(r) AS o
             RETURN DISTINCT s.name AS subject, s.type AS subject_type,
-                   coalesce(r.rel_type, 'RELATED_TO') AS rel_type, r.verb AS verb,
+                   type(r) AS rel_type, r.verb AS verb,
                    o.name AS object, o.type AS object_type,
                    r.confidence AS confidence, r.source_doc_id AS source_doc_id
             ORDER BY confidence DESC LIMIT $limit
@@ -410,11 +411,11 @@ async def query_svo_facts(
                 WHERE {where_clauses}
                 WITH collect(e) AS seeds
                 UNWIND seeds AS seed
-                MATCH path = (seed)-[:RELATION*1..{hops}]-(neighbor:Entity)
+                MATCH path = (seed)-[:{_ALL_REL_PATTERN}*1..{hops}]-(neighbor:Entity)
                 UNWIND relationships(path) AS r
                 WITH startNode(r) AS s, r, endNode(r) AS o
                 RETURN DISTINCT s.name AS subject, s.type AS subject_type,
-                       coalesce(r.rel_type, 'RELATED_TO') AS rel_type, r.verb AS verb,
+                       type(r) AS rel_type, r.verb AS verb,
                        o.name AS object, o.type AS object_type,
                        r.confidence AS confidence, r.source_doc_id AS source_doc_id
                 ORDER BY confidence DESC LIMIT $limit
@@ -429,11 +430,11 @@ async def query_svo_facts(
                 WHERE {where_clauses}
                 WITH collect(e) AS seeds
                 UNWIND seeds AS seed
-                MATCH path = (seed)-[:RELATION*1..{hops}]-(neighbor:Entity {{kg_id: $kg_id}})
+                MATCH path = (seed)-[:{_ALL_REL_PATTERN}*1..{hops}]-(neighbor:Entity {{kg_id: $kg_id}})
                 UNWIND relationships(path) AS r
                 WITH startNode(r) AS s, r, endNode(r) AS o
                 RETURN DISTINCT s.name AS subject, s.type AS subject_type,
-                       coalesce(r.rel_type, 'RELATED_TO') AS rel_type, r.verb AS verb,
+                       type(r) AS rel_type, r.verb AS verb,
                        o.name AS object, o.type AS object_type,
                        r.confidence AS confidence, r.source_doc_id AS source_doc_id
                 ORDER BY confidence DESC LIMIT $limit
@@ -447,10 +448,11 @@ async def query_svo_facts(
 
     for r in result.records:
         rel_type = r.get("rel_type") or "RELATED_TO"
+        verb = r.get("verb") or rel_type
         label = REL_TYPE_LABELS.get(rel_type, rel_type)
         facts.append(
             f"[{label}] {r['subject']}({r.get('subject_type') or '概念'})"
-            f" {r['verb']} "
+            f" {verb} "
             f"{r['object']}({r.get('object_type') or '概念'})"
         )
         doc_id = r.get("source_doc_id")
@@ -560,6 +562,9 @@ _VALID_REL_TYPES = {
     "CAUSES", "HAS_PROPERTY", "PRECEDES", "RELATED_TO",
 }
 
+# Cypher relationship type pattern（供 MATCH 使用）
+_ALL_REL_PATTERN = "IS_A|PART_OF|USES|ENABLES|CAUSES|HAS_PROPERTY|PRECEDES|RELATED_TO"
+
 # 關係類別的中文顯示名稱（供 UI 顯示）
 REL_TYPE_LABELS = {
     "IS_A":         "階層",
@@ -613,7 +618,7 @@ def _parse_svo_lines(raw: str) -> list[SVOTriple]:
 
         if not s or not v or not o:
             continue
-        if len(s) > 50 or len(v) > 30 or len(o) > 50:
+        if len(s) > 50 or len(v) > 15 or len(o) > 50:
             continue
         key = (s, rel_type, o)   # 用 rel_type 去重（同類別的同主受詞只保留一條）
         if key in seen:

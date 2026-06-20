@@ -320,7 +320,7 @@ async def refresh_kg_concepts(kg_id: UUID, text: str | None = None) -> None:
                 MATCH (e:Entity {kg_filter})
                 WHERE e.type IN ['概念', '技術', '算法', '方法', '框架', '模型', '工具']
                 WITH e.name AS name,
-                     size([(e)-[:RELATION]-() | 1]) AS degree
+                     size([(e)-[:IS_A|PART_OF|USES|ENABLES|CAUSES|HAS_PROPERTY|PRECEDES|RELATED_TO]-() | 1]) AS degree
                 ORDER BY degree DESC LIMIT 50
                 RETURN name
                 """,
