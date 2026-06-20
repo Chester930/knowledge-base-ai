@@ -21,14 +21,15 @@ class ConceptRepository:
             dim=dim,
         )
 
-    async def get_or_create(self, name: str, domain: str, q_vector: list[float]) -> UUID:
+    async def get_or_create(self, name: str, domain: str, q_vector) -> UUID:
+        vec = q_vector.tolist() if hasattr(q_vector, "tolist") else list(q_vector)
         result = await self.driver.execute_query(
             """
             MERGE (c:ConceptNode {name: $name, domain: $domain})
             ON CREATE SET c.id = $id, c.q_vector = $q_vector
             RETURN c.id AS id
             """,
-            name=name, domain=domain, q_vector=q_vector, id=str(uuid4()),
+            name=name, domain=domain, q_vector=vec, id=str(uuid4()),
         )
         return UUID(result.records[0]["id"])
 
