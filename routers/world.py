@@ -57,6 +57,66 @@ async def federation_refresh():
     return cache.status()
 
 
+# ── GET /world/provenance/facts ── Phase 3a ───────────────────────────────────
+
+@router.get("/provenance/facts", summary="查詢事實的完整溯源（Phase 3a）")
+async def provenance_facts(
+    q: str = Query(..., description="查詢詞（逗號分隔多詞）"),
+    kg_id: str = Query("", description="限定 KG 的 UUID（空白 = 所有公開 KG）"),
+    hops: int = Query(1, ge=1, le=2),
+    limit: int = Query(30, ge=1, le=100),
+):
+    """
+    回傳與查詢詞相關的 SVO 事實，每條事實帶有：
+    - 來源文件標題
+    - 信心分數（同一對實體在幾份文件中被提及）
+    - 建立時間
+    """
+    from services.svo_service import query_svo_facts_with_provenance
+    from services.entity_alignment import expand_terms
+    from models.provenance import ProvenanceReport
+
+    terms = [t.strip() for t in q.split(",") if t.strip()]
+    terms = expand_terms(terms)  # Phase 2d 同義詞展開
+
+    driver = get_driver()
+    kg_repo = KnowledgeGraphRepository(driver)
+
+    if kg_id:
+        target_kgs = [kg for kg in [await kg_repo.get_by_id(UUID(kg_id))] if kg and kg.is_public]
+    else:
+        target_kgs = [kg for kg in await kg_repo.list_all(include_private=True) if kg.is_public]
+
+    all_sourced = []
+    for kg in target_kgs:
+        sourced = await query_svo_facts_with_provenance(
+            kg.id, terms, hops=hops, limit=limit,
+            db_name=kg.db_name or None,
+        )
+        all_sourced.extend(sourced)
+
+    # 組裝文件引用摘要
+    from collections import Counter
+    doc_counter: Counter = Counter()
+    doc_titles: dict[str, str] = {}
+    for f in all_sourced:
+        if f.source_doc_id:
+            doc_counter[f.source_doc_id] += 1
+            doc_titles[f.source_doc_id] = f.source_doc_title
+
+    citations = [
+        {"doc_id": did, "title": doc_titles.get(did, ""), "fact_count": cnt}
+        for did, cnt in doc_counter.most_common()
+    ]
+
+    report = ProvenanceReport(
+        query_terms=terms,
+        facts=sorted(all_sourced, key=lambda x: x.confidence, reverse=True)[:limit],
+        doc_citations=citations,
+    )
+    return report.to_dict()
+
+
 # ── GET /world/registry ───────────────────────────────────────────────────────
 
 @router.get("/registry", summary="取得本機 KB Registry（供 world-hub 讀取）")
@@ -250,13 +310,15 @@ async def world_chat(req: dict):
             svo_facts: list[str] = []
             graph_doc_ids: list[str] = []
 
+            sourced_facts_all = []
             if use_svo and skills_to_query:
-                merged_facts, merged_docs, shard_results = await query_shards_parallel(
-                    skills=skills_to_query,
-                    terms=query_terms,
-                    hops=svo_hops,
-                    limit_per_shard=50,
-                )
+                merged_facts, merged_docs, shard_results, sourced_facts_all = \
+                    await query_shards_parallel(
+                        skills=skills_to_query,
+                        terms=query_terms,
+                        hops=svo_hops,
+                        limit_per_shard=50,
+                    )
                 svo_facts = merged_facts
                 graph_doc_ids = merged_docs
 
@@ -270,13 +332,28 @@ async def world_chat(req: dict):
                     }
                     for sr in shard_results
                 ]
-                shards_ok = sum(1 for sr in shard_results if sr.status == "ok")
                 shards_offline = [sr.shard_name for sr in shard_results if sr.status in ("timeout", "offline")]
                 yield _sse({
                     "shard_meta": shard_meta,
                     "shards_queried": len(shard_results),
                     "shards_offline": shards_offline,
                 })
+
+                # Phase 3a：溯源事件（文件引用清單）
+                if sourced_facts_all:
+                    from collections import Counter
+                    doc_cnt: Counter = Counter()
+                    doc_ttl: dict[str, str] = {}
+                    for sf in sourced_facts_all:
+                        if sf.source_doc_id:
+                            doc_cnt[sf.source_doc_id] += 1
+                            doc_ttl[sf.source_doc_id] = sf.source_doc_title
+                    citations = [
+                        {"doc_id": did, "title": doc_ttl.get(did, ""), "fact_count": cnt}
+                        for did, cnt in doc_cnt.most_common(10)
+                    ]
+                    if citations:
+                        yield _sse({"provenance": citations})
 
             if svo_facts:
                 yield _sse({"svo_facts": svo_facts})
@@ -331,7 +408,7 @@ async def world_chat(req: dict):
                 yield _sse({"error": "公開知識庫中沒有找到相關資訊"})
                 return
 
-            prompt = _build_world_prompt(question, svo_facts, contexts)
+            prompt = _build_world_prompt(question, svo_facts, contexts, sourced_facts_all)
             yield _sse({"status": "generating"})
 
             async for token in get_llm_provider().stream(prompt):
@@ -350,14 +427,26 @@ async def world_chat(req: dict):
     )
 
 
-def _build_world_prompt(question: str, svo_facts: list[str], contexts: list[dict]) -> str:
+def _build_world_prompt(
+    question: str,
+    svo_facts: list[str],
+    contexts: list[dict],
+    sourced_facts: list | None = None,
+) -> str:
     parts = [
         "你是世界知識助手，能根據多個公開知識圖譜的事實與文件，提供客觀、全面的回答。\n"
         "【重要】無論問題使用何種語言，你的所有回覆必須使用正體（繁體）中文，不得使用簡體字。\n"
     ]
-    if svo_facts:
+
+    # Phase 3a：優先使用帶引用格式的事實（cite_str）
+    if sourced_facts:
+        cited = [sf.cite_str() for sf in sourced_facts[:40]]
+        facts_text = "\n".join(f"• {c}" for c in cited)
+        parts.append(f"\n【知識圖譜事實（附來源引用）】\n{facts_text}\n")
+    elif svo_facts:
         facts_text = "\n".join(f"• {f}" for f in svo_facts[:40])
         parts.append(f"\n【知識圖譜事實（來自公開知識庫）】\n{facts_text}\n")
+
     if contexts:
         docs = "".join(
             f"\n=== 文件 {i}：{c['title']} ===\n{c['content']}\n"
@@ -369,6 +458,7 @@ def _build_world_prompt(question: str, svo_facts: list[str], contexts: list[dict
         f"請根據以上公開知識，用繁體中文回答：\n{question}\n\n"
         "回答要求：\n"
         "- 優先引用知識圖譜事實中的具體資訊\n"
+        "- 若事實有標注來源（如「[來源：《文件名》]」），請在回答中提及出處\n"
         "- 若多份知識庫都有相關資訊，請整合說明\n"
         "- 若資訊不足，請誠實說明\n"
         "- 回答要清晰有條理"

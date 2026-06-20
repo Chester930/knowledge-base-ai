@@ -51,6 +51,7 @@ class ShardResult:
     facts: list[str] = field(default_factory=list)
     source_docs: list[str] = field(default_factory=list)
     elapsed_ms: int = 0
+    sourced_facts: list = field(default_factory=list)   # list[SourcedFact] Phase 3a
 
 
 # ── 遠端 AuraDB BFS 查詢 ──────────────────────────────────────────────────────
@@ -132,13 +133,15 @@ async def _query_one_shard(
     try:
         if skill.is_local:
             from uuid import UUID
-            from services.svo_service import query_svo_facts
-            facts, src_docs = await query_svo_facts(
+            from services.svo_service import query_svo_facts_with_provenance
+            sourced = await query_svo_facts_with_provenance(
                 UUID(skill.kb_id), terms,
                 hops=hops, limit=limit, db_name=skill.db_name,
+                instance_id=skill.instance_id,
             )
-            result.facts = facts
-            result.source_docs = src_docs
+            result.sourced_facts = sourced
+            result.facts = [sf.fact_str for sf in sourced]
+            result.source_docs = list({sf.source_doc_id for sf in sourced if sf.source_doc_id})
         else:
             from services.federation_service import get_federation_cache
             cache = get_federation_cache()
@@ -226,11 +229,12 @@ async def query_shards_parallel(
         await asyncio.gather(*[_run(s) for s in skills])
     )
 
-    # 合併去重
+    # 合併去重（facts 字串 + sourced_facts）
     seen_facts: set[str] = set()
     merged_facts: list[str] = []
     seen_docs: set[str] = set()
     merged_docs: list[str] = []
+    merged_sourced: list = []   # list[SourcedFact]
 
     for sr in shard_results:
         if sr.status != "ok":
@@ -243,5 +247,6 @@ async def query_shards_parallel(
             if d not in seen_docs:
                 seen_docs.add(d)
                 merged_docs.append(d)
+        merged_sourced.extend(sr.sourced_facts)
 
-    return merged_facts, merged_docs, shard_results
+    return merged_facts, merged_docs, shard_results, merged_sourced

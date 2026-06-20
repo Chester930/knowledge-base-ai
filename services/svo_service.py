@@ -628,6 +628,166 @@ async def query_svo_facts(
     return facts, source_docs
 
 
+async def _batch_get_doc_titles(doc_ids: list[str]) -> dict[str, str]:
+    """批次查詢 Document 標題（主資料庫），回傳 {doc_id: title}。"""
+    if not doc_ids:
+        return {}
+    driver = get_driver()
+    try:
+        result = await driver.execute_query(
+            "MATCH (d:Document) WHERE d.id IN $ids RETURN d.id AS id, d.title AS title",
+            ids=doc_ids,
+        )
+        return {r["id"]: r["title"] for r in result.records if r["title"]}
+    except Exception as e:
+        logger.warning(f"批次查詢 Document 標題失敗：{e}")
+        return {}
+
+
+async def query_svo_facts_with_provenance(
+    kg_id: UUID,
+    terms: list[str],
+    hops: int = 2,
+    limit: int = 50,
+    db_name: str | None = None,
+    min_confidence: int = 1,
+    instance_id: str = "local",
+) -> list:
+    """
+    Phase 3a：帶完整溯源資訊的 BFS 查詢。
+    回傳 list[SourcedFact]，每條事實包含：
+      - 來源文件標題（JOIN Document 節點）
+      - 信心分數（confidence）
+      - 建立時間（created_at，ISO 8601）
+    """
+    from models.provenance import SourcedFact
+
+    if not terms:
+        return []
+
+    if db_name is None:
+        db_name = await _get_kg_db(kg_id)
+
+    driver = get_driver()
+    db_kw = {"database_": db_name} if db_name else {}
+    kg_id_str = str(kg_id)
+    kg_filter = "" if db_name else "{kg_id: $kg_id}"
+    ft_query_str = _build_ft_query(terms)
+
+    # ── 種子節點（Full-text → fallback CONTAINS）─────────────────────────────
+    use_ft = False
+    seed_ids: list[str] = []
+    if db_name:
+        seed_cypher = (
+            "CALL db.index.fulltext.queryNodes('entity_name_ft', $ft_q) "
+            "YIELD node AS e RETURN e"
+        )
+        seed_params: dict = {"ft_q": ft_query_str}
+    else:
+        seed_cypher = (
+            "CALL db.index.fulltext.queryNodes('entity_name_ft', $ft_q) "
+            "YIELD node AS e WHERE e.kg_id = $kg_id RETURN e"
+        )
+        seed_params = {"ft_q": ft_query_str, "kg_id": kg_id_str}
+
+    try:
+        seed_res = await driver.execute_query(seed_cypher, **seed_params, **db_kw)
+        if seed_res.records:
+            seed_ids = [r["e"].element_id for r in seed_res.records]
+            use_ft = True
+    except Exception:
+        pass
+
+    # ── BFS 查詢（帶 created_at）──────────────────────────────────────────────
+    raw_records = []
+    if use_ft and seed_ids:
+        bfs_params: dict = {"seed_ids": seed_ids, "limit": limit, "min_conf": min_confidence}
+        if not db_name:
+            bfs_params["kg_id"] = kg_id_str
+        res = await driver.execute_query(
+            f"""
+            MATCH (seed) WHERE elementId(seed) IN $seed_ids
+            WITH collect(seed) AS seeds
+            UNWIND seeds AS seed
+            MATCH path = (seed)-[:{_ALL_REL_PATTERN}*1..{hops}]-(nb:Entity {kg_filter})
+            UNWIND relationships(path) AS r
+            WITH startNode(r) AS s, r, endNode(r) AS o
+            WHERE r.confidence >= $min_conf
+            RETURN DISTINCT
+                s.name AS subject, s.type AS subject_type,
+                type(r) AS rel_type, r.verb AS verb,
+                o.name AS object, o.type AS object_type,
+                r.confidence AS confidence,
+                r.source_doc_id AS source_doc_id,
+                toString(r.created_at) AS created_at
+            ORDER BY confidence DESC LIMIT $limit
+            """,
+            **bfs_params, **db_kw,
+        )
+        raw_records = res.records
+    else:
+        where = " OR ".join(
+            f"toLower(e.name) CONTAINS toLower($term{i})" for i in range(len(terms))
+        )
+        fb_params: dict = {f"term{i}": t for i, t in enumerate(terms)}
+        fb_params.update({"limit": limit, "min_conf": min_confidence})
+        if not db_name:
+            fb_params["kg_id"] = kg_id_str
+        cypher = f"""
+        MATCH (e:Entity {kg_filter}) WHERE {where}
+        WITH collect(e) AS seeds
+        UNWIND seeds AS seed
+        MATCH path = (seed)-[:{_ALL_REL_PATTERN}*1..{hops}]-(nb:Entity {kg_filter})
+        UNWIND relationships(path) AS r
+        WITH startNode(r) AS s, r, endNode(r) AS o
+        WHERE r.confidence >= $min_conf
+        RETURN DISTINCT
+            s.name AS subject, s.type AS subject_type,
+            type(r) AS rel_type, r.verb AS verb,
+            o.name AS object, o.type AS object_type,
+            r.confidence AS confidence,
+            r.source_doc_id AS source_doc_id,
+            toString(r.created_at) AS created_at
+        ORDER BY confidence DESC LIMIT $limit
+        """
+        res = await driver.execute_query(cypher, **fb_params, **db_kw)
+        raw_records = res.records
+
+    # ── 批次查詢文件標題 ──────────────────────────────────────────────────────
+    doc_ids = list({r.get("source_doc_id") for r in raw_records if r.get("source_doc_id")})
+    title_map = await _batch_get_doc_titles(doc_ids)
+
+    # ── 組裝 SourcedFact ──────────────────────────────────────────────────────
+    sourced: list[SourcedFact] = []
+    seen: set[tuple] = set()
+    for r in raw_records:
+        rel_type = r.get("rel_type") or "RELATED_TO"
+        verb = r.get("verb") or rel_type
+        label = REL_TYPE_LABELS.get(rel_type, rel_type)
+        s = r["subject"]
+        o = r["object"]
+        st = r.get("subject_type") or "概念"
+        ot = r.get("object_type") or "概念"
+        key = (s, rel_type, o)
+        if key in seen:
+            continue
+        seen.add(key)
+        doc_id = r.get("source_doc_id") or ""
+        sourced.append(SourcedFact(
+            fact_str=f"{s}({st}) -[{label}:{verb}]→ {o}({ot})",
+            subject=s, subject_type=st,
+            rel_type=rel_type, verb=verb,
+            object=o, object_type=ot,
+            confidence=r.get("confidence") or 1,
+            source_doc_id=doc_id,
+            source_doc_title=title_map.get(doc_id, ""),
+            created_at=r.get("created_at") or "",
+            instance_id=instance_id,
+        ))
+
+    return sourced
+
+
 async def create_entity_index() -> None:
     """在 lifespan 啟動時建立 Entity 的 Neo4j 索引，加速查詢。"""
     driver = get_driver()

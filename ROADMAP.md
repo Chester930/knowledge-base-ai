@@ -1,6 +1,6 @@
 # 路線圖 · Roadmap
 
-> 最後更新：2026-06-21（Phase 2 全部完成）
+> 最後更新：2026-06-21（Phase 3a 知識溯源完成）
 
 本文件記錄「智慧知識庫」的長期願景與開發計畫。  
 若你對某個階段的方向有興趣，歡迎填寫下方意願表單或直接開 Issue 討論。
@@ -163,16 +163,86 @@ Phase 2d：實體對齊 ✅
 
 ## 計畫中
 
+### 🔄 Phase 3 — 知識深化（Knowledge Deepening）
+
+Phase 3 聚焦於「讓知識更可信、更可視、更可追蹤、更易共享」，分為四個子階段：
+
+---
+
+#### Phase 3a：知識溯源（Provenance）✅
+
+**目標**：每條 SVO 事實都能追蹤到來源文件、信心分數、建立時間。
+
+```
+事實：強化學習(算法) -[需要:REQUIRES]→ 大量訓練資料(資源)
+溯源：來源《深度學習導論》，信心分數 3（三份文件均提及），建立於 2026-06-20
+```
+
+```
+→ models/provenance.py：SourcedFact（事實 + 來源 + 信心 + 時間）、ProvenanceReport
+→ services/svo_service.py：query_svo_facts_with_provenance()
+   - BFS + 批次 JOIN Document 節點取得標題（_batch_get_doc_titles）
+→ services/shard_query.py：ShardResult.sourced_facts、query_shards_parallel() 回傳第 4 值
+→ GET /world/provenance/facts：查詢詞 → 完整溯源報告（含 doc_citations）
+→ /world/chat SSE 新增 provenance 事件（Top 10 文件引用清單）
+→ LLM Prompt：改用 cite_str() 格式「事實 [來源：《文件名》，信心 N]」
+   - 指示模型在回答中提及出處
+```
+
+---
+
+#### Phase 3b：互動式圖視覺化（Interactive Graph）
+
+**目標**：在前端渲染力導向圖，取代純列表的實體探索。
+
+```
+→ 前端引入 D3.js force simulation
+→ 節點：Entity（依 type 著色），邊：關係標籤
+→ 互動：點擊節點展開鄰居（呼叫現有 /world/explore/neighbors）
+→ 縮放 / 平移 / Hover tooltip（顯示實體類型 + degree）
+→ 高亮：查詢命中的路徑以不同顏色顯示
+```
+
+---
+
+#### Phase 3c：KG 版本控制（Version Control）
+
+**目標**：像 Git 一樣追蹤 KG 的每次變更。
+
+Neo4j 邊上已有 `created_at`，Phase 3c 補充：
+
+```
+→ 邊新增 updated_at 欄位（MERGE 時更新）
+→ GET /kg/{id}/changelog：列出近期新增/修改的 SVO 事實（含時間戳）
+→ GET /kg/{id}/diff?since=ISO8601：指定時間點之後的所有變更
+→ GET /kg/{id}/snapshot?at=ISO8601：某時間點的知識快照（過濾 created_at）
+```
+
+---
+
+#### Phase 3d：KG 訂閱 / 自動同步（Subscription）
+
+**目標**：訂閱別人的公開 KG，定時拉取並合併到本機。
+
+```
+→ subscriptions.json：本機訂閱清單（instance_id + kb_id + 上次同步時間）
+→ POST /world/subscribe：新增訂閱
+→ DELETE /world/subscribe/{kb_id}：取消訂閱
+→ GET /world/subscriptions：列出所有訂閱 + 同步狀態
+→ POST /world/sync-subscriptions：手動觸發全部訂閱同步
+→ 背景排程（APScheduler）：每 N 小時自動同步
+```
+
+---
+
 ### 💡 未來探索方向（尚未排期）
 
 以下是社群提出或作者思考中的方向，尚未進入正式計畫：
 
-- **KG 版本控制**：像 Git 一樣，追蹤知識的變更歷史
-- **實體圖視覺化**：互動式力導向圖（D3.js / Cytoscape.js）
 - **使用者帳號系統**：追蹤個人貢獻與知識授權
-- **KG 訂閱 / 追蹤**：訂閱別人的公開 KG，自動同步更新
-- **知識溯源**：每條 SVO 事實標記來源文件與信心分數
-- **多語言實體對齊**：跨語言知識連結
+- **多語言實體對齊**：跨語言知識連結（Phase 2d 的延伸）
+- **知識品質評分**：基於社群回饋調整 confidence 分數
+- **KG 合併工具**：將兩個本機 KG 智慧合併，衝突時人工仲裁
 
 ---
 
@@ -196,3 +266,4 @@ Phase 2d：實體對齊 ✅
 | v0.1 | 2026-06-21 | Phase 1 完成，公開 Phase 2 計畫草案 |
 | v0.2 | 2026-06-21 | Phase 2 架構更新：採用免費帳號分片 + GitHub Registry 方案 |
 | v0.3 | 2026-06-21 | Phase 2 全部完成（2a 同步協議 / 2b GitHub Registry / 2c 並行查詢 / 2d 實體對齊）|
+| v0.4 | 2026-06-21 | Phase 3 規劃：知識溯源 / 圖視覺化 / 版本控制 / 訂閱同步 |
