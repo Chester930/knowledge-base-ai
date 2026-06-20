@@ -355,6 +355,23 @@ html.dark #cluster-cards span[style] { background: var(--bg-secondary) !importan
 .toggle-slider:before { position:absolute; content:""; height:12px; width:12px; left:3px; bottom:3px; background:white; border-radius:50%; transition:.2s; }
 input:checked + .toggle-slider { background:#6c5ce7; }
 input:checked + .toggle-slider:before { transform:translateX(16px); }
+
+/* ── Phase 3b: Graph Visualization ── */
+.graph-view-toggle { display:flex; gap:4px; margin-left:auto; flex-shrink:0; }
+.graph-toggle-btn { padding:2px 10px; font-size:0.76rem; border:1px solid var(--border); border-radius:6px; cursor:pointer; background:var(--bg-card); color:var(--text-muted); transition:all .15s; }
+.graph-toggle-btn.active { background:#6c5ce7; color:white; border-color:#6c5ce7; }
+.graph-canvas-wrap { flex:1; position:relative; overflow:hidden; border-radius:8px; border:1px solid var(--border); background:var(--bg-card); }
+.graph-canvas-wrap svg { width:100%; height:100%; display:block; }
+.graph-tooltip { position:absolute; background:var(--bg-card); border:1px solid var(--border); border-radius:6px; padding:6px 10px; font-size:0.76rem; pointer-events:none; box-shadow:0 2px 8px var(--shadow-md); z-index:100; max-width:220px; line-height:1.5; }
+.graph-tooltip .gt-name { font-weight:600; word-break:break-all; }
+.graph-tooltip .gt-type { color:var(--text-muted); font-size:0.7rem; }
+.graph-tooltip .gt-hint { font-size:0.65rem; color:var(--text-faint); margin-top:2px; }
+.graph-legend { position:absolute; bottom:8px; left:10px; display:flex; flex-wrap:wrap; gap:5px; pointer-events:none; }
+.graph-legend-item { display:flex; align-items:center; gap:3px; font-size:0.65rem; color:var(--text-muted); }
+.graph-legend-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
+.graph-controls { position:absolute; top:8px; right:10px; display:flex; gap:4px; }
+.graph-ctrl-btn { background:var(--bg-card); border:1px solid var(--border); border-radius:5px; padding:2px 7px; font-size:0.72rem; cursor:pointer; color:var(--text-muted); transition:all .15s; }
+.graph-ctrl-btn:hover { background:var(--bg-secondary); }
 </style>
 </head>
 <body>
@@ -598,9 +615,24 @@ input:checked + .toggle-slider:before { transform:translateX(16px); }
                        onkeydown="if(event.key==='Enter')exploreEntities()">
                 <button class="btn btn-purple btn-sm" onclick="exploreEntities()">搜尋</button>
                 <button class="btn btn-secondary btn-sm" onclick="exploreEntities('')">全部高頻</button>
+                <div class="graph-view-toggle">
+                  <button class="graph-toggle-btn active" id="explore-list-btn" onclick="switchExploreView('list')">≡ 列表</button>
+                  <button class="graph-toggle-btn" id="explore-graph-btn" onclick="switchExploreView('graph')">◎ 圖形</button>
+                </div>
               </div>
+              <!-- 列表視圖 -->
               <div class="world-explore-results" id="entity-results">
                 <div class="empty-state"><div class="empty-icon">🔭</div><p>搜尋實體，或點擊「全部高頻」查看關係最多的實體</p></div>
+              </div>
+              <!-- 圖形視圖（Phase 3b）-->
+              <div class="graph-canvas-wrap" id="graph-canvas-wrap" style="display:none">
+                <div class="graph-tooltip" id="graph-tooltip" style="display:none"></div>
+                <div class="graph-legend" id="graph-legend"></div>
+                <div class="graph-controls">
+                  <button class="graph-ctrl-btn" onclick="graphResetZoom()" title="重置縮放">⊙ 重置</button>
+                  <button class="graph-ctrl-btn" onclick="graphClear()" title="清除圖形">✕ 清除</button>
+                </div>
+                <svg id="graph-svg"></svg>
               </div>
             </div>
           </div>
@@ -626,6 +658,7 @@ input:checked + .toggle-slider:before { transform:translateX(16px); }
   </div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
 <script>
 const API = '';
 const FILE_ICONS = { md:'📝', txt:'📄', pdf:'📕', docx:'📘', pptx:'📊', doc:'📘', ppt:'📊', manual:'✍️' };
@@ -1540,6 +1573,205 @@ async function doWorldChat() {
 
 // ── Entity Explorer ───────────────────────────────────────────────────────────
 
+// ── Phase 3b: D3 Force Graph ─────────────────────────────────────────────────
+
+const _TYPE_COLORS = {
+  '算法':'#6c5ce7','Algorithm':'#6c5ce7',
+  '概念':'#0984e3','Concept':'#0984e3',
+  '工具':'#00b894','Tool':'#00b894',
+  '資源':'#e17055','Resource':'#e17055',
+  '系統':'#74b9ff','System':'#74b9ff',
+  '方法':'#fd79a8','Method':'#fd79a8',
+  '模型':'#a29bfe','Model':'#a29bfe',
+  '框架':'#55efc4','Framework':'#55efc4',
+};
+const _TYPE_COLOR_DEFAULT = '#b2bec3';
+function _nodeColor(type) { return _TYPE_COLORS[type] || _TYPE_COLOR_DEFAULT; }
+
+let _gNodes = [];       // {id, name, type, kg_id, kg_name, x?, y?}
+let _gLinks = [];       // {source, target, rel_type, verb}
+let _gExpanded = new Set();
+let _gSimulation = null;
+let _gSvgRoot = null;
+let _gSvgG = null;
+let _gZoom = null;
+let _gExploreView = 'list';
+
+function switchExploreView(view) {
+  _gExploreView = view;
+  document.getElementById('entity-results').style.display = view === 'list' ? '' : 'none';
+  document.getElementById('graph-canvas-wrap').style.display = view === 'graph' ? '' : 'none';
+  document.getElementById('explore-list-btn').classList.toggle('active', view === 'list');
+  document.getElementById('explore-graph-btn').classList.toggle('active', view === 'graph');
+  if (view === 'graph') { _initGraph(); _renderGraph(); }
+}
+
+function _initGraph() {
+  if (_gSvgRoot) return;
+  const svg = d3.select('#graph-svg');
+  _gSvgRoot = svg;
+  svg.append('defs').append('marker')
+    .attr('id','g-arrow').attr('viewBox','-0 -5 10 10')
+    .attr('refX',18).attr('refY',0).attr('orient','auto')
+    .attr('markerWidth',5).attr('markerHeight',5)
+    .append('path').attr('d','M 0,-5 L 10,0 L 0,5').attr('fill','#b2bec3');
+  _gZoom = d3.zoom().scaleExtent([0.15, 5])
+    .on('zoom', e => _gSvgG && _gSvgG.attr('transform', e.transform));
+  svg.call(_gZoom);
+  _gSvgG = svg.append('g');
+}
+
+function graphResetZoom() {
+  if (_gSvgRoot && _gZoom) _gSvgRoot.transition().duration(400).call(_gZoom.transform, d3.zoomIdentity);
+}
+
+function graphClear() {
+  _gNodes = []; _gLinks = []; _gExpanded.clear();
+  if (_gSimulation) { _gSimulation.stop(); _gSimulation = null; }
+  _renderGraph();
+}
+
+function _renderGraph() {
+  if (!_gSvgRoot) _initGraph();
+  const wrap = document.getElementById('graph-canvas-wrap');
+  const W = wrap.clientWidth || 700;
+  const H = wrap.clientHeight || 450;
+
+  _gSvgG.selectAll('*').remove();
+
+  if (_gNodes.length === 0) {
+    _gSvgG.append('text').attr('x', W/2).attr('y', H/2)
+      .attr('text-anchor','middle').attr('fill','var(--text-muted)').attr('font-size','0.85rem')
+      .text('搜尋實體後點擊「◎ 圖形」在此顯示知識圖譜');
+    _updateLegend([]);
+    return;
+  }
+
+  // Build valid link set (both endpoints must exist)
+  const idSet = new Set(_gNodes.map(n => n.id));
+  const links = _gLinks.filter(l => {
+    const s = typeof l.source === 'object' ? l.source.id : l.source;
+    const t = typeof l.target === 'object' ? l.target.id : l.target;
+    return idSet.has(s) && idSet.has(t);
+  }).map(l => ({
+    source: typeof l.source === 'object' ? l.source.id : l.source,
+    target: typeof l.target === 'object' ? l.target.id : l.target,
+    rel_type: l.rel_type, verb: l.verb,
+  }));
+
+  // Edges
+  const edgeG = _gSvgG.append('g');
+  const linkLines = edgeG.selectAll('line').data(links).enter().append('line')
+    .attr('stroke','var(--border)').attr('stroke-width',1.4)
+    .attr('marker-end','url(#g-arrow)');
+  const linkLabels = edgeG.selectAll('text').data(links).enter().append('text')
+    .attr('text-anchor','middle').attr('font-size','0.55rem')
+    .attr('fill','var(--text-faint)').attr('pointer-events','none')
+    .text(d => (d.verb && d.verb !== d.rel_type ? d.verb : d.rel_type) || '');
+
+  // Nodes
+  const nodeG = _gSvgG.append('g');
+  const drag = d3.drag()
+    .on('start', (e,d) => { if(!e.active) _gSimulation.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; })
+    .on('drag',  (e,d) => { d.fx=e.x; d.fy=e.y; })
+    .on('end',   (e,d) => { if(!e.active) _gSimulation.alphaTarget(0); d.fx=null; d.fy=null; });
+
+  const nodeSel = nodeG.selectAll('g').data(_gNodes, d => d.id).enter().append('g')
+    .attr('cursor','pointer').call(drag)
+    .on('click', (e,d) => { e.stopPropagation(); _graphExpand(d); })
+    .on('mouseover', (e,d) => _showTip(e,d))
+    .on('mousemove', e => _moveTip(e))
+    .on('mouseout', () => _hideTip());
+
+  nodeSel.append('circle')
+    .attr('r', d => _gExpanded.has(d.id) ? 16 : 11)
+    .attr('fill', d => _nodeColor(d.type))
+    .attr('stroke', 'var(--bg-card)').attr('stroke-width', 2.5)
+    .attr('opacity', d => _gExpanded.has(d.id) ? 1 : 0.85);
+
+  nodeSel.append('text')
+    .attr('text-anchor','middle').attr('dy','0.35em')
+    .attr('font-size','0.55rem').attr('fill','white').attr('pointer-events','none')
+    .text(d => d.name.length > 7 ? d.name.slice(0,6)+'…' : d.name);
+
+  // Simulation
+  if (_gSimulation) _gSimulation.stop();
+  _gSimulation = d3.forceSimulation(_gNodes)
+    .force('link', d3.forceLink(links).id(d => d.id).distance(100))
+    .force('charge', d3.forceManyBody().strength(-220))
+    .force('center', d3.forceCenter(W/2, H/2))
+    .force('collide', d3.forceCollide(26))
+    .on('tick', () => {
+      linkLines
+        .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+        .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+      linkLabels
+        .attr('x', d => (d.source.x + d.target.x)/2)
+        .attr('y', d => (d.source.y + d.target.y)/2 - 4);
+      nodeSel.attr('transform', d => `translate(${d.x??0},${d.y??0})`);
+    });
+
+  _updateLegend([...new Set(_gNodes.map(n => n.type).filter(Boolean))]);
+}
+
+async function _graphExpand(node) {
+  if (_gExpanded.has(node.id)) return;
+  _gExpanded.add(node.id);
+  try {
+    const res = await fetch(`${API}/world/explore/neighbors?entity=${encodeURIComponent(node.name)}&kg_id=${node.kg_id}&limit=25`);
+    const data = await res.json();
+    if (!data.nodes || !data.edges.length) return;
+    const existing = new Set(_gNodes.map(n => n.id));
+    data.nodes.forEach(n => {
+      const id = `${node.kg_id}::${n.id}`;
+      if (!existing.has(id)) {
+        _gNodes.push({ id, name: n.id, type: n.type || 'Entity', kg_id: node.kg_id, kg_name: node.kg_name });
+        existing.add(id);
+      }
+    });
+    const existLinks = new Set(_gLinks.map(l => {
+      const s = typeof l.source==='object' ? l.source.id : l.source;
+      const t = typeof l.target==='object' ? l.target.id : l.target;
+      return `${s}→${t}→${l.rel_type}`;
+    }));
+    data.edges.forEach(e => {
+      const src = `${node.kg_id}::${e.src}`;
+      const tgt = `${node.kg_id}::${e.dst}`;
+      const key = `${src}→${tgt}→${e.rel_type}`;
+      if (!existLinks.has(key)) { _gLinks.push({ source:src, target:tgt, rel_type:e.rel_type, verb:e.verb }); existLinks.add(key); }
+    });
+    _renderGraph();
+  } catch(err) { console.warn('graph expand error', err); }
+}
+
+function _updateLegend(types) {
+  const el = document.getElementById('graph-legend');
+  if (!el) return;
+  el.innerHTML = types.slice(0,8).map(t =>
+    `<div class="graph-legend-item"><div class="graph-legend-dot" style="background:${_nodeColor(t)}"></div>${esc(t)}</div>`
+  ).join('');
+}
+
+function _showTip(e, d) {
+  const t = document.getElementById('graph-tooltip');
+  const expanded = _gExpanded.has(d.id);
+  t.innerHTML = `<div class="gt-name">${esc(d.name)}</div>
+    <div class="gt-type">${esc(d.type||'Entity')}${d.kg_name ? ' · '+esc(d.kg_name) : ''}</div>
+    <div class="gt-hint">${expanded ? '已展開鄰居' : '點擊展開鄰居'}</div>`;
+  t.style.display = '';
+  _moveTip(e);
+}
+function _moveTip(e) {
+  const wrap = document.getElementById('graph-canvas-wrap');
+  const rect = wrap.getBoundingClientRect();
+  const t = document.getElementById('graph-tooltip');
+  t.style.left = (e.clientX - rect.left + 14) + 'px';
+  t.style.top  = (e.clientY - rect.top  - 12) + 'px';
+}
+function _hideTip() { document.getElementById('graph-tooltip').style.display = 'none'; }
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 async function exploreEntities(q) {
   const query = q !== undefined ? q : document.getElementById('entity-search-input').value.trim();
   const el = document.getElementById('entity-results');
@@ -1552,15 +1784,33 @@ async function exploreEntities(q) {
       return;
     }
     el.innerHTML = data.entities.map(e => `
-      <div class="entity-card" onclick="exploreNeighbors('${esc(e.name)}','${e.kg_id}','${esc(e.kg_name)}')">
+      <div class="entity-card" onclick="exploreNeighbors('${esc(e.name)}','${e.kg_id}','${esc(e.kg_name)}');graphSeedEntities([{name:'${esc(e.name)}',type:'${esc(e.type||'Entity')}',kg_id:'${e.kg_id}',kg_name:'${esc(e.kg_name)}'}])">
         <span class="entity-name">${esc(e.name)}</span>
         <span class="entity-type-tag">${esc(e.type || 'Entity')}</span>
         <span class="entity-kg-tag">${esc(e.kg_name)}</span>
         <span style="font-size:0.7rem;color:var(--text-faint)">↔${e.degree}</span>
       </div>`).join('');
+
+    // 同步更新圖形視圖的種子節點
+    _gNodes = []; _gLinks = []; _gExpanded.clear();
+    data.entities.forEach(e => {
+      _gNodes.push({ id:`${e.kg_id}::${e.name}`, name:e.name, type:e.type||'Entity', kg_id:e.kg_id, kg_name:e.kg_name||'' });
+    });
+    if (_gExploreView === 'graph') _renderGraph();
   } catch(e) {
     el.innerHTML = '<div class="empty-state"><div class="empty-icon">⚠️</div><p>搜尋失敗</p></div>';
   }
+}
+
+function graphSeedEntities(entities) {
+  // 點擊列表中的單一實體卡片時，把它加入圖形作為種子
+  entities.forEach(e => {
+    const id = `${e.kg_id}::${e.name}`;
+    if (!_gNodes.find(n => n.id === id)) {
+      _gNodes.push({ id, name: e.name, type: e.type, kg_id: e.kg_id, kg_name: e.kg_name || '' });
+    }
+  });
+  if (_gExploreView === 'graph') _renderGraph();
 }
 
 let _neighborEl = null;

@@ -1,6 +1,6 @@
 # 路線圖 · Roadmap
 
-> 最後更新：2026-06-21（Phase 3a 知識溯源完成）
+> 最後更新：2026-06-21（Phase 3b 互動式圖視覺化完成）
 
 本文件記錄「智慧知識庫」的長期願景與開發計畫。  
 若你對某個階段的方向有興趣，歡迎填寫下方意願表單或直接開 Issue 討論。
@@ -191,16 +191,21 @@ Phase 3 聚焦於「讓知識更可信、更可視、更可追蹤、更易共享
 
 ---
 
-#### Phase 3b：互動式圖視覺化（Interactive Graph）
+#### Phase 3b：互動式圖視覺化（Interactive Graph）✅
 
 **目標**：在前端渲染力導向圖，取代純列表的實體探索。
 
 ```
-→ 前端引入 D3.js force simulation
-→ 節點：Entity（依 type 著色），邊：關係標籤
-→ 互動：點擊節點展開鄰居（呼叫現有 /world/explore/neighbors）
-→ 縮放 / 平移 / Hover tooltip（顯示實體類型 + degree）
-→ 高亮：查詢命中的路徑以不同顏色顯示
+→ 前端引入 D3.js v7 force simulation（CDN，無需打包）
+→ 節點：Entity（依 type 著色，8 種類型色系）
+→ 邊：關係標籤（rel_type / verb）+ 方向箭頭
+→ 互動：點擊節點展開鄰居（呼叫 /world/explore/neighbors）
+→ 縮放 / 平移（d3.zoom，⊙ 重置按鈕）
+→ Hover tooltip（顯示實體類型 + KG 名稱）
+→ 節點拖曳（d3.drag，釋放後繼續模擬）
+→ 圖形 / 列表 雙視圖切換（≡ 列表 ↔ ◎ 圖形）
+→ 圖例（左下角自動顯示當前節點類型）
+→ ✕ 清除按鈕（重置圖形狀態）
 ```
 
 ---
@@ -267,3 +272,4 @@ Neo4j 邊上已有 `created_at`，Phase 3c 補充：
 | v0.2 | 2026-06-21 | Phase 2 架構更新：採用免費帳號分片 + GitHub Registry 方案 |
 | v0.3 | 2026-06-21 | Phase 2 全部完成（2a 同步協議 / 2b GitHub Registry / 2c 並行查詢 / 2d 實體對齊）|
 | v0.4 | 2026-06-21 | Phase 3 規劃：知識溯源 / 圖視覺化 / 版本控制 / 訂閱同步 |
+| v0.5 | 2026-06-21 | Phase 3a 知識溯源 + Phase 3b 互動式 D3.js 力導向圖完成 |
