@@ -3,8 +3,7 @@ import logging
 import sys
 from uuid import UUID
 from core.database import connect, disconnect, get_driver
-from core.config import settings
-from services.embedding_service import init_embedding_service
+from core.providers.factory import init_providers
 from repositories.concept_repo import ConceptRepository
 from services.concept_engine import extract_and_init_document_concepts
 
@@ -21,8 +20,8 @@ async def fix_missing_concepts():
     driver = get_driver()
     
     # 初始化 embedding
-    svc = init_embedding_service(settings.embedding_model)
-    await ConceptRepository(driver).create_vector_index(svc.dim)
+    embedding = init_providers()
+    await ConceptRepository(driver).create_vector_index(embedding.dim)
     
     # 查詢沒有 EFFECTIVE 概念關聯的所有文件
     logger.info("查詢缺少概念的文件…")

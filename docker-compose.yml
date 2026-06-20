@@ -11,10 +11,11 @@ services:
       - "7475:7474"   # HTTP Browser
     environment:
       NEO4J_ACCEPT_LICENSE_AGREEMENT: "yes"
-      NEO4J_AUTH: neo4j/kg_test_2024
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-knowledge123}
     volumes:
-      # 直接掛載 Neo4j Desktop 的 DBMS 資料目錄（啟動前需確保 Desktop Neo4j 已停止）
-      - C:/Users/666/.Neo4jDesktop/relate-data/dbmss/dbms-8fbe2ff4-fb91-402c-bbb4-746fefe1cd5f/data:/data
+      - neo4j_data:/data
+      # 若要掛載 Neo4j Desktop 現有資料，改用以下設定（停止 Desktop DBMS 後再啟動）：
+      # - /path/to/neo4j-desktop-dbms/data:/data
     healthcheck:
       test: ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"]
       interval: 15s
@@ -45,8 +46,9 @@ services:
         condition: service_healthy
     volumes:
       - ./workspace:/app/workspace
-      # 若需要讀取文件目錄，可依實際路徑調整
-      # - D:/666/Downloads:/mnt/docs
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
+
+volumes:
+  neo4j_data:

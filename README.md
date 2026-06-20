@@ -39,18 +39,19 @@ RAG Prompt → LLM → 串流回答
 
 ## 知識圖譜本體論結構
 
-每條 RELATION 邊包含語意關係分類（8 種）：
+每條關係邊直接以語意類型作為 Neo4j relationship type（30 種）：
 
-| 類別 | 說明 | 範例 |
-|------|------|------|
-| `IS_A` | 階層歸屬 | `Claude Code IS_A CLI工具` |
-| `PART_OF` | 組成關係 | `工具呼叫 PART_OF 代理迴圈` |
-| `USES` | 功能依賴 | `子代理 USES 提示快取` |
-| `ENABLES` | 賦能關係 | `並行執行 ENABLES 效能優化` |
-| `CAUSES` | 因果關係 | `Context超限 CAUSES 回應延遲` |
-| `HAS_PROPERTY` | 屬性描述 | `代理迴圈 HAS_PROPERTY 非同步` |
-| `PRECEDES` | 時序關係 | `路由層 PRECEDES SVO查詢` |
-| `RELATED_TO` | 其他相關 | 無法歸類時使用 |
+| 群組 | 類型 |
+|------|------|
+| 層級/組成 | `IS_A` `PART_OF` `CONTAINS` `INSTANCE_OF` |
+| 因果/效應 | `CAUSES` `PREVENTS` `ENABLES` `IMPROVES` `INHIBITS` |
+| 功能/操作 | `USES` `REQUIRES` `PRODUCES` `IMPLEMENTS` `REPLACES` `EXTENDS` |
+| 比較 | `CONTRASTS` `SIMILAR_TO` `OUTPERFORMS` |
+| 描述/定義 | `DEFINED_AS` `HAS_PROPERTY` `MEASURED_BY` `APPLIES_TO` |
+| 時序 | `PRECEDES` `FOLLOWS` `CO_OCCURS` |
+| 資料流 | `INPUTS` `TRANSFORMS` |
+| 歸屬/解決 | `CREATED_BY` `SOLVES` |
+| 其他 | `RELATED_TO`（最後手段，目標使用率 < 5%）|
 
 ## 功能
 
@@ -68,10 +69,10 @@ RAG Prompt → LLM → 串流回答
 | 元件 | 版本 / 說明 |
 |------|------------|
 | FastAPI | 後端 API，SSE 串流 |
-| Neo4j | 主資料庫 + 每 KG 獨立資料庫 |
-| Ollama | 本地 LLM（llama3 / qwen 等） |
-| sentence-transformers | 本地 Embedding（paraphrase-multilingual-MiniLM-L12-v2） |
-| Vanilla JS | 前端 UI，無框架依賴 |
+| Neo4j | 主資料庫 + 每 KG 獨立資料庫（Enterprise）；Community 版自動 fallback |
+| LLM | Ollama（本地）/ OpenAI / Anthropic / Google Gemini / xAI Grok |
+| Embedding | sentence-transformers（本地）/ OpenAI / Ollama |
+| Vanilla JS | 前端單頁應用，無框架依賴 |
 
 ## 快速啟動
 
@@ -82,18 +83,18 @@ cp .env.example .env
 # 編輯 .env，填入 Neo4j 連線資訊與 LLM 設定
 ```
 
-`.env` 必要設定：
+`.env` 必要設定（完整範本見 `.env.example`）：
 
 ```env
 NEO4J_URI=bolt://localhost:7687
 NEO4J_USER=neo4j
 NEO4J_PASSWORD=your_password
 
-LLM_PROVIDER=ollama
+LLM_PROVIDER=ollama          # ollama | openai | anthropic | gemini | grok
 OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_MODEL=llama3.2
+OLLAMA_LLM_MODEL=qwen2.5:7b
 
-EMBEDDING_PROVIDER=local
+EMBEDDING_PROVIDER=local     # local | openai | ollama
 ```
 
 ### 2. 安裝相依套件
@@ -104,20 +105,25 @@ pip install -r requirements.txt
 
 ### 3. 啟動 Neo4j
 
-確認 Neo4j 已啟動並可連線（使用 Neo4j Desktop 或 Docker）。
+**方法 A：Docker（推薦）**
 
 ```bash
-# Docker 方式
-docker compose up -d neo4j
+docker compose up -d
+# API 啟動後開啟 http://localhost:8000
 ```
 
-### 4. 啟動伺服器
+**方法 B：本地 + Neo4j Desktop**
+
+1. Neo4j Desktop → 啟動 DBMS（確認 Bolt port 與 .env 一致）
+2. 啟動 API：
 
 ```bash
 python -m uvicorn main:app --reload --port 8000
 ```
 
 開啟瀏覽器：`http://localhost:8000`
+
+> **Windows 一鍵啟動**：`start.ps1`（自動檢查 Docker / Ollama 並啟動服務）
 
 ## 使用流程
 
@@ -142,19 +148,25 @@ python -m uvicorn main:app --reload --port 8000
 開啟 Neo4j Browser：`http://localhost:7474`
 
 ```cypher
--- 查所有 KG
+// 查所有 KG
 MATCH (kg:KnowledgeGraph) RETURN kg.name, kg.db_name, kg.entity_count
 
--- 查某 KG 的 Entity（切換到對應 db）
+// 查某 KG 的 Entity（在對應 db 執行）
 MATCH (e:Entity) RETURN e.name, e.type LIMIT 50
 
--- 查知識關係（按語意類別過濾）
-MATCH (s:Entity)-[r:RELATION {rel_type: 'CAUSES'}]->(o:Entity)
+// 查特定語意類型的關係（rel_type 即 Neo4j edge label）
+MATCH (s:Entity)-[r:CAUSES]->(o:Entity)
 RETURN s.name, r.verb, o.name
 
--- IS_A 階層遍歷
-MATCH path = (e:Entity)-[:RELATION*1..3 {rel_type: 'IS_A'}]->(root:Entity)
+// IS_A 階層遍歷（1-3 跳）
+MATCH path = (e:Entity)-[:IS_A*1..3]->(root:Entity)
 RETURN path
+
+// 查高信心度的知識事實
+MATCH (s:Entity)-[r]->(o:Entity)
+WHERE r.confidence >= 2
+RETURN s.name, type(r), r.verb, o.name
+ORDER BY r.confidence DESC LIMIT 20
 ```
 
 ## 專案結構

@@ -11,6 +11,7 @@ build/
 
 # Environment
 .env
+.env.*
 
 # Neo4j data
 neo4j_data/
@@ -19,10 +20,22 @@ neo4j_data/
 tmp/
 *.tmp
 
+# Personal / ephemeral scripts (hardcoded paths / file lists)
+run_reingest_failed_pdfs.py
+_test_*.py
+
+# Log files from batch scripts
+*_log.txt
+ingest_err.txt
+reingest_ocr_log.txt
+
 # IDE
 .vscode/
 .idea/
 *.swp
+
+# Claude Code auto-memory
+memory/
 
 # OS
 .DS_Store
