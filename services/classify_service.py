@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 import logging
 import shutil
 from pathlib import Path
@@ -135,6 +136,19 @@ async def assign_document_to_kg(txt_filename: str, kg_id: UUID) -> None:
     # 刷新 KG 路由層概念
     await refresh_kg_concepts(kg_id)
     logger.info(f"分配完成：{txt_filename} → KG {kg.name}（doc_id={doc.id}）")
+
+    # 自動觸發增量 SVO 提取（背景執行，不阻塞回應）
+    async def _auto_svo():
+        try:
+            from services.svo_service import build_graph_for_kg, apply_type_labels
+            async for _ in build_graph_for_kg(kg_id, doc_ids=[doc.id], force_rebuild=False):
+                pass
+            await apply_type_labels(kg_id, db_name=kg.db_name)
+            logger.info(f"自動 SVO 提取完成：{txt_filename}")
+        except Exception as e:
+            logger.warning(f"自動 SVO 提取失敗：{e}")
+
+    asyncio.create_task(_auto_svo())
 
 
 async def classify_all(

@@ -14,6 +14,10 @@ class LLMProvider(ABC):
     async def stream(self, prompt: str) -> AsyncIterator[str]:
         """串流生成，逐 token yield 字串。"""
 
+    async def generate_json(self, prompt: str) -> str:
+        """強制 JSON 輸出模式，預設 fallback 至 generate（子類別可覆寫）。"""
+        return await self.generate(prompt)
+
 
 class EmbeddingProvider(ABC):
     """Embedding 統一介面，所有 provider 必須實作 encode 與 dim。"""

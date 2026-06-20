@@ -34,6 +34,7 @@ def _build_rag_prompt(
 ) -> str:
     parts: list[str] = [
         "你是一個知識庫助手，能根據提供的知識圖譜事實與文件內容精確回答問題。\n"
+        "【重要】無論問題使用何種語言，你的所有回覆必須使用正體（繁體）中文，不得使用簡體字。\n"
     ]
 
     if svo_facts:
@@ -141,49 +142,57 @@ async def chat(req: ChatRequest):
             if svo_facts:
                 yield _sse({"svo_facts": svo_facts})
 
-            # ── Step 4：文件層（圖譜驅動優先，無圖譜時 fallback 相似度搜尋）──
+            # ── Step 4：混合搜尋（圖譜驅動 + 相似度補充）────────────────────────
             from uuid import UUID as _UUID
             contexts: list[dict] = []
             sources: list[dict] = []
+            seen_doc_ids_ctx: set[str] = set()
 
-            if graph_doc_ids:
-                # 圖譜驅動：只讀 SVO 指向的文件，不限數量
-                for doc_id_str in graph_doc_ids:
-                    try:
-                        doc = await doc_repo.get_by_id(_UUID(doc_id_str))
-                    except Exception:
-                        continue
-                    if not doc:
-                        continue
-                    snippet = (doc.content or "")[: req.max_chars_per_doc]
-                    contexts.append({"title": doc.title, "content": snippet})
-                    sources.append({"title": doc.title, "source": "graph"})
-            else:
-                # Fallback：SVO 圖譜尚未建立，改用概念相似度搜尋
-                all_doc_concepts = await concept_repo.get_all_documents_concepts()
-                allowed: set[str] = set()
-                if selected_kgs:
-                    for kg_id, _, _ in selected_kgs:
-                        for d in await kg_repo.get_documents(kg_id):
-                            allowed.add(str(d["id"]))
+            # 4a. 圖譜驅動：SVO 指向的文件
+            for doc_id_str in graph_doc_ids:
+                try:
+                    doc = await doc_repo.get_by_id(_UUID(doc_id_str))
+                except Exception:
+                    continue
+                if not doc:
+                    continue
+                snippet = (doc.content or "")[: req.max_chars_per_doc]
+                contexts.append({"title": doc.title, "content": snippet})
+                sources.append({"title": doc.title, "source": "graph"})
+                seen_doc_ids_ctx.add(doc_id_str)
 
-                scored_docs = []
-                for doc_id, dc in all_doc_concepts.items():
-                    if allowed and str(doc_id) not in allowed:
-                        continue
-                    score, matched = compute_match_score(query_concepts, dc)
-                    if score > 0:
-                        scored_docs.append((doc_id, score, matched))
+            # 4b. 相似度補充：不論是否有圖譜結果，都補充 top-k 相似度文件（去重）
+            all_doc_concepts = await concept_repo.get_all_documents_concepts()
+            allowed: set[str] = set()
+            if selected_kgs:
+                for kg_id, _, _ in selected_kgs:
+                    for d in await kg_repo.get_documents(kg_id):
+                        allowed.add(str(d["id"]))
 
-                scored_docs.sort(key=lambda x: x[1], reverse=True)
-                for doc_id, score, matched in scored_docs[:req.top_k]:
-                    doc = await doc_repo.get_by_id(doc_id)
-                    if not doc:
-                        continue
-                    snippet = (doc.content or "")[: req.max_chars_per_doc]
-                    contexts.append({"title": doc.title, "content": snippet})
-                    sources.append({"title": doc.title, "score": round(score, 3),
-                                    "matched": matched, "source": "similarity"})
+            scored_docs = []
+            for doc_id, dc in all_doc_concepts.items():
+                if allowed and str(doc_id) not in allowed:
+                    continue
+                score, matched = compute_match_score(query_concepts, dc)
+                if score > 0:
+                    scored_docs.append((doc_id, score, matched))
+
+            scored_docs.sort(key=lambda x: x[1], reverse=True)
+            sim_added = 0
+            for doc_id, score, matched in scored_docs:
+                if sim_added >= req.top_k:
+                    break
+                if str(doc_id) in seen_doc_ids_ctx:
+                    continue  # 已由圖譜納入，跳過
+                doc = await doc_repo.get_by_id(doc_id)
+                if not doc:
+                    continue
+                snippet = (doc.content or "")[: req.max_chars_per_doc]
+                contexts.append({"title": doc.title, "content": snippet})
+                sources.append({"title": doc.title, "score": round(score, 3),
+                                "matched": matched, "source": "similarity"})
+                seen_doc_ids_ctx.add(str(doc_id))
+                sim_added += 1
 
             yield _sse({"sources": sources})
 

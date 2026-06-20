@@ -15,8 +15,8 @@ from repositories.knowledge_graph_repo import KnowledgeGraphRepository
 
 logger = logging.getLogger(__name__)
 
-_CHUNK_SIZE = 1000   # 每段文字上限（字元）
-_CHUNK_OVERLAP = 100 # 段落重疊（避免三元組跨段斷裂）
+_CHUNK_SIZE = 2000   # 每段文字上限（字元）
+_CHUNK_OVERLAP = 200 # 段落重疊（避免三元組跨段斷裂）
 _SVO_CONCURRENCY = 3 # 每份文件最大平行 LLM 呼叫數
 _BFS_CACHE_TTL = 300 # BFS 查詢快取 TTL（秒）
 _bfs_cache: dict = {} # (kg_id, terms, hops, min_conf) → (facts, docs, ts)
@@ -143,7 +143,7 @@ async def build_graph_for_kg(
 
 
 async def extract_svo_from_text(text: str) -> list[SVOTriple]:
-    """呼叫 LLM 從單段文字提取本體論知識三元組（6欄格式）。"""
+    """呼叫 LLM 從單段文字提取本體論知識三元組，優先使用 JSON 模式。"""
     if not text.strip():
         return []
 
@@ -216,8 +216,30 @@ async def extract_svo_from_text(text: str) -> list[SVOTriple]:
         "Dropout|技術|PREVENTS|防止|過擬合|概念\n\n"
         f"文字：\n{text}"
     )
-    raw = await get_llm_provider().generate(prompt)
-    return _parse_svo_lines(raw)
+    import json as _json
+    llm = get_llm_provider()
+
+    # 優先嘗試 JSON 模式
+    json_prompt = prompt + (
+        "\n\n【輸出格式】請以 JSON 陣列輸出，每項為：\n"
+        '{"s":"主詞","st":"主詞類型","r":"關係類別","v":"動詞","o":"受詞","ot":"受詞類型"}\n'
+        "不要輸出任何其他文字，只輸出 JSON 陣列。"
+    )
+    try:
+        raw = await llm.generate_json(json_prompt)
+        match = re.search(r"\[[\s\S]*\]", raw)
+        if match:
+            items = _json.loads(match.group())
+            triples = _parse_svo_json(items)
+            if triples:
+                return _filter_hallucinated(triples, text)
+    except Exception as e:
+        logger.debug(f"JSON 模式失敗，回退 pipe 格式：{e}")
+
+    # Fallback：傳統 pipe-delimited 格式
+    raw = await llm.generate(prompt)
+    triples = _parse_svo_lines(raw)
+    return _filter_hallucinated(triples, text)
 
 
 async def merge_triples_to_neo4j(
@@ -454,6 +476,26 @@ async def query_svo_facts(
 
     if use_ft and seed_result.records:
         seed_ids = [r["e"].element_id for r in seed_result.records]
+
+        # 查詢展開：將 seed 節點的 1-hop 鄰居也納入種子，擴大覆蓋範圍
+        if seed_ids:
+            try:
+                expand_result = await driver.execute_query(
+                    f"""
+                    MATCH (seed)-[:{_ALL_REL_PATTERN}]-(neighbor:Entity {kg_filter})
+                    WHERE elementId(seed) IN $seed_ids
+                    RETURN DISTINCT elementId(neighbor) AS nid
+                    LIMIT 20
+                    """,
+                    seed_ids=seed_ids,
+                    **({"kg_id": kg_id_str} if not db_name else {}),
+                    **db_kw,
+                )
+                extra = [r["nid"] for r in expand_result.records]
+                seed_ids = list(dict.fromkeys(seed_ids + extra))  # 去重保序
+            except Exception:
+                pass
+
         bfs_params: dict = {"seed_ids": seed_ids, "limit": limit, "min_conf": min_confidence}
         if not db_name:
             bfs_params["kg_id"] = kg_id_str
@@ -522,7 +564,8 @@ async def query_svo_facts(
                 **fallback_params,
             )
 
-    facts = []
+    # 以 (subject, object) 為 key 收集同一對節點的所有關係，組成推理鏈
+    edge_map: dict[tuple[str, str], list[str]] = {}
     source_docs: list[str] = []
     seen_docs: set[str] = set()
 
@@ -530,15 +573,35 @@ async def query_svo_facts(
         rel_type = r.get("rel_type") or "RELATED_TO"
         verb = r.get("verb") or rel_type
         label = REL_TYPE_LABELS.get(rel_type, rel_type)
-        facts.append(
-            f"[{label}] {r['subject']}({r.get('subject_type') or '概念'})"
-            f" {verb} "
-            f"{r['object']}({r.get('object_type') or '概念'})"
-        )
+        s = r["subject"]
+        o = r["object"]
+        st = r.get("subject_type") or "概念"
+        ot = r.get("object_type") or "概念"
+        edge_str = f"{s}({st}) -[{label}:{verb}]→ {o}({ot})"
+        edge_map.setdefault((s, o), []).append(edge_str)
         doc_id = r.get("source_doc_id")
         if doc_id and doc_id not in seen_docs:
             seen_docs.add(doc_id)
             source_docs.append(doc_id)
+
+    # 輸出：單邊事實 + 多跳推理鏈（找出可串接的路徑 A→B→C）
+    facts: list[str] = []
+    for edges in edge_map.values():
+        facts.extend(edges)
+
+    # 推理鏈：嘗試把 A→B 和 B→C 串成 A→B→C
+    end_nodes: dict[str, str] = {}   # subject → edge_str（供串接）
+    start_nodes: dict[str, str] = {} # object  → edge_str
+    for (s, o), edges in edge_map.items():
+        end_nodes[o] = edges[0]
+        start_nodes[s] = edges[0]
+    chains: list[str] = []
+    for (s, o), edges in edge_map.items():
+        if o in start_nodes and (o, None) != (s, None):
+            next_edge = start_nodes[o]
+            chain = f"{edges[0]} → {next_edge.split('→', 1)[-1].strip()}"
+            chains.append(f"[推理鏈] {chain}")
+    facts.extend(chains[:10])  # 最多附加 10 條推理鏈
 
     _bfs_cache[cache_key] = (facts, source_docs, time.time())
     return facts, source_docs
@@ -702,6 +765,51 @@ REL_TYPE_LABELS = {
     "SOLVES":       "解決",
     "RELATED_TO":   "相關",
 }
+
+
+def _parse_svo_json(items: list[dict]) -> list[SVOTriple]:
+    """解析 LLM 回傳的 JSON 格式三元組陣列。"""
+    triples: list[SVOTriple] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        s = str(item.get("s", "")).strip()
+        st = str(item.get("st", "其他")).strip()
+        r = str(item.get("r", "RELATED_TO")).strip().upper()
+        v = str(item.get("v", "")).strip()
+        o = str(item.get("o", "")).strip()
+        ot = str(item.get("ot", "其他")).strip()
+        if not s or not v or not o:
+            continue
+        if len(s) > 50 or len(v) > 20 or len(o) > 50:
+            continue
+        if st not in _VALID_TYPES:
+            st = "其他"
+        if ot not in _VALID_TYPES:
+            ot = "其他"
+        if r not in _VALID_REL_TYPES:
+            r = "RELATED_TO"
+        key = (s, r, o)
+        if key in seen:
+            continue
+        seen.add(key)
+        triples.append(SVOTriple(subject=s, subject_type=st, rel_type=r, verb=v, object=o, object_type=ot))
+    return triples
+
+
+def _filter_hallucinated(triples: list[SVOTriple], source_text: str) -> list[SVOTriple]:
+    """過濾主詞與受詞皆不出現於原文的幻覺三元組（寬鬆：至少一個詞出現即保留）。"""
+    text_lower = source_text.lower()
+    kept = []
+    for t in triples:
+        s_hit = t.subject.lower() in text_lower
+        o_hit = t.object.lower() in text_lower
+        if s_hit or o_hit:
+            kept.append(t)
+        else:
+            logger.debug(f"幻覺過濾：{t.subject}|{t.rel_type}|{t.object}")
+    return kept
 
 
 def _parse_svo_lines(raw: str) -> list[SVOTriple]:

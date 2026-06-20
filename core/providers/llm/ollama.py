@@ -24,6 +24,16 @@ class OllamaLLMProvider(LLMProvider):
             res.raise_for_status()
             return res.json().get("response", "")
 
+    async def generate_json(self, prompt: str) -> str:
+        """使用 Ollama format=json 模式，強制輸出合法 JSON。"""
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            res = await client.post(
+                f"{self.base_url}/api/generate",
+                json={"model": self.model, "prompt": prompt, "stream": False, "format": "json"},
+            )
+            res.raise_for_status()
+            return res.json().get("response", "")
+
     async def stream(self, prompt: str) -> AsyncIterator[str]:
         async with httpx.AsyncClient(timeout=300.0) as client:
             async with client.stream(
