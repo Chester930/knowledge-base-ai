@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 _CHUNK_SIZE = 2000   # 每段文字上限（字元）
 _CHUNK_OVERLAP = 200 # 段落重疊（避免三元組跨段斷裂）
-_SVO_CONCURRENCY = 3 # 每份文件最大平行 LLM 呼叫數
+_SVO_CONCURRENCY = 2 # 每份文件最大平行 LLM 呼叫數（對應 OLLAMA_NUM_PARALLEL=2）
 _BFS_CACHE_TTL = 300 # BFS 查詢快取 TTL（秒）
 _bfs_cache: dict = {} # (kg_id, terms, hops, min_conf) → (facts, docs, ts)
 
