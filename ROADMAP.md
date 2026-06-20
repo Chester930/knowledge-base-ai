@@ -140,10 +140,14 @@ Phase 2b：GitHub Registry ✅
   → POST /world/federation/refresh：強制重新下載遠端 registry
   → .env GITHUB_REGISTRY_URL：指向 GitHub Raw URL，留空則只用本機
 
-Phase 2c：並行查詢引擎
-  → asyncio.gather() 同時查詢所有分片
-  → 超時設定（單一分片 5 秒），離線分片靜默跳過
-  → 結果合併、去重（同名實體保留多個 instance 來源）
+Phase 2c：並行查詢引擎 ✅
+  → services/shard_query.py：ShardResult + query_shards_parallel()
+  → asyncio.gather() 同時查詢所有分片（本機 + 遠端 AuraDB）
+  → 每個分片超時 5 秒（asyncio.wait_for），超時後靜默跳過並標記離線
+  → 遠端 BFS 使用 CONTAINS fallback（不依賴 FTS index）
+  → 事實去重：同名實體保留多個 instance 來源前綴
+  → /world/chat SSE 新增 shard_meta、shards_queried、shards_offline 欄位
+  → 遠端路由：top_concepts 關鍵字比對（本機 KG 仍用 ConceptRepository 向量路由）
 
 Phase 2d：實體對齊（可選）
   → instance_id 命名空間（必做）

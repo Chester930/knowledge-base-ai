@@ -25,7 +25,6 @@ from repositories.concept_repo import ConceptRepository
 from repositories.document_repo import DocumentRepository
 from repositories.knowledge_graph_repo import KnowledgeGraphRepository
 from services.concept_engine import build_query_concepts, compute_match_score
-from services.svo_service import query_svo_facts
 
 router = APIRouter(prefix="/world", tags=["world"])
 logger = logging.getLogger(__name__)
@@ -177,42 +176,107 @@ async def world_chat(req: dict):
             kg_scores.sort(key=lambda x: x[1], reverse=True)
             selected_kgs = kg_scores[:MAX_KG_PER_QUERY]
 
-            kg_route_info = []
+            # ── 本機路由結果整理 ──────────────────────────────────────────────
             selected_kg_objects: dict[UUID, object] = {}
+            selected_local_ids: set[str] = set()
             for kg_id, score, matched in selected_kgs:
                 kg = await kg_repo.get_by_id(kg_id)
                 if kg and kg.is_public:
                     selected_kg_objects[kg_id] = kg
+                    selected_local_ids.add(str(kg_id))
+
+            # ── 組裝 KBSkill 列表（本機 + 遠端）────────────────────────────
+            from services.federation_service import get_federation_cache
+            from services.shard_query import query_shards_parallel, route_skill_score
+            from models.kb_skill import KBSkill
+
+            merged_reg = await get_federation_cache().merged_registry()
+            query_terms = [c["name"] for c in query_concepts]
+            local_score_map = {str(kg_id): sc for kg_id, sc, _ in selected_kgs}
+
+            skills_to_query: list[KBSkill] = []
+            kg_route_info = []
+
+            for skill in merged_reg.skills:
+                kb_str = skill.kb_id
+                if skill.is_local:
+                    if kb_str not in selected_local_ids:
+                        continue
+                    sc = local_score_map.get(kb_str, 0.0)
+                    skills_to_query.append(skill)
                     kg_route_info.append({
-                        "id": str(kg_id),
-                        "name": kg.name,
-                        "score": round(score, 3),
-                        "matched_concepts": matched[:5],
-                        "is_public": True,
+                        "id": kb_str, "name": skill.name,
+                        "score": round(sc, 3),
+                        "instance_id": skill.instance_id,
+                        "is_local": True,
                     })
+                else:
+                    # 遠端分片：用 top_concepts 關鍵字路由
+                    remote_sc = route_skill_score(skill, query_terms)
+                    if remote_sc >= KG_ROUTE_THRESHOLD:
+                        skills_to_query.append(skill)
+                        kg_route_info.append({
+                            "id": kb_str, "name": skill.name,
+                            "score": round(remote_sc, 3),
+                            "instance_id": skill.instance_id,
+                            "is_local": False,
+                        })
+
+            # 本機 KG 若不在 registry 中，補上臨時 KBSkill
+            registry_local_ids = {s.kb_id for s in merged_reg.skills if s.is_local}
+            for kg_id, sc, matched in selected_kgs:
+                kg_str = str(kg_id)
+                if kg_str not in registry_local_ids:
+                    kg_obj = selected_kg_objects.get(kg_id)
+                    tmp_skill = KBSkill(
+                        instance_id="local",
+                        kb_id=kg_str,
+                        name=getattr(kg_obj, "name", kg_str),
+                        last_sync="",
+                        is_local=True,
+                        db_name=getattr(kg_obj, "db_name", None),
+                    )
+                    skills_to_query.append(tmp_skill)
+                    kg_route_info.append({
+                        "id": kg_str, "name": tmp_skill.name,
+                        "score": round(sc, 3),
+                        "instance_id": "local",
+                        "is_local": True,
+                    })
+
             yield _sse({"kg_route": kg_route_info})
 
+            # ── 並行查詢所有分片（Phase 2c）──────────────────────────────────
             svo_facts: list[str] = []
             graph_doc_ids: list[str] = []
 
-            if use_svo and selected_kgs:
-                terms = [c["name"] for c in query_concepts]
-                seen_facts: set[str] = set()
-                seen_doc_ids: set[str] = set()
-                for kg_id, _, _ in selected_kgs:
-                    kg_obj = selected_kg_objects.get(kg_id)
-                    db_name = getattr(kg_obj, "db_name", "") if kg_obj else ""
-                    facts, src_ids = await query_svo_facts(
-                        kg_id, terms, hops=svo_hops, limit=50, db_name=db_name
-                    )
-                    for f in facts:
-                        if f not in seen_facts:
-                            seen_facts.add(f)
-                            svo_facts.append(f)
-                    for doc_id in src_ids:
-                        if doc_id not in seen_doc_ids:
-                            seen_doc_ids.add(doc_id)
-                            graph_doc_ids.append(doc_id)
+            if use_svo and skills_to_query:
+                merged_facts, merged_docs, shard_results = await query_shards_parallel(
+                    skills=skills_to_query,
+                    terms=query_terms,
+                    hops=svo_hops,
+                    limit_per_shard=50,
+                )
+                svo_facts = merged_facts
+                graph_doc_ids = merged_docs
+
+                shard_meta = [
+                    {
+                        "name": sr.shard_name,
+                        "instance_id": sr.instance_id,
+                        "status": sr.status,
+                        "facts": len(sr.facts),
+                        "elapsed_ms": sr.elapsed_ms,
+                    }
+                    for sr in shard_results
+                ]
+                shards_ok = sum(1 for sr in shard_results if sr.status == "ok")
+                shards_offline = [sr.shard_name for sr in shard_results if sr.status in ("timeout", "offline")]
+                yield _sse({
+                    "shard_meta": shard_meta,
+                    "shards_queried": len(shard_results),
+                    "shards_offline": shards_offline,
+                })
 
             if svo_facts:
                 yield _sse({"svo_facts": svo_facts})
