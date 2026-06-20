@@ -127,13 +127,18 @@ World Agent 預設各自獨立呈現，未來可選擇性合併同義實體。
 #### 實作計畫
 
 ```
-Phase 2a：同步協議
+Phase 2a：同步協議 ✅
   → run_sync_public_kgs.py：將公開 KG 匯出 NDJSON 並推送到個人 AuraDB
   → 支援全量推送（初期）和 delta 推送（後期優化）
 
-Phase 2b：GitHub Registry
-  → registry.json：記錄所有貢獻者的 AuraDB 連線資訊
-  → World Agent 啟動時讀取 registry，快取連線池
+Phase 2b：GitHub Registry ✅
+  → registry.json：記錄所有貢獻者的 AuraDB 連線資訊（含 fingerprint_vector）
+  → services/federation_service.py：FederationCache 單例，30 分鐘快取
+  → World Agent 啟動時背景預取 GitHub registry，不阻塞啟動
+  → GET /world/federation/status：分片狀態（online / offline / pending）
+  → GET /world/federation/registry：合併本機 + 遠端 registry
+  → POST /world/federation/refresh：強制重新下載遠端 registry
+  → .env GITHUB_REGISTRY_URL：指向 GitHub Raw URL，留空則只用本機
 
 Phase 2c：並行查詢引擎
   → asyncio.gather() 同時查詢所有分片

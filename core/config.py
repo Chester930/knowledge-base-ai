@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     # ── 聯邦識別 ───────────────────────────────────────────────────────────────
     instance_id: str = "local"          # 用於 KB Skill 描述檔的 instance 命名空間
     registry_path: str = "./registry.json"   # 本機 registry 路徑
+    github_registry_url: str = ""       # GitHub Raw URL（Phase 2b 遠端分片發現）
 
     # 向下相容舊 .env（mapping 舊欄位名稱）
     @property

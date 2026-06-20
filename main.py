@@ -11,6 +11,7 @@ from core.database import connect, disconnect, get_driver
 from core.providers.factory import init_providers
 from repositories.concept_repo import ConceptRepository
 from routers import documents, search, agent, transcribe, knowledge_graph, staging, world
+from services.federation_service import startup_prefetch, shutdown_cleanup
 from services.file_watcher_service import start_watcher, stop_watcher
 from services.svo_service import create_entity_index
 
@@ -28,12 +29,14 @@ async def lifespan(app: FastAPI):
     await ConceptRepository(get_driver()).create_vector_index(embedding.dim)
     await create_entity_index()
     start_watcher()
+    await startup_prefetch()
     logger.info(
         f"智慧知識庫 API 啟動完成 "
         f"[LLM={settings.llm_provider}, Embedding={settings.embedding_provider}]"
     )
     yield
     stop_watcher()
+    await shutdown_cleanup()
     await disconnect()
 
 

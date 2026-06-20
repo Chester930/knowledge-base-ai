@@ -30,6 +30,34 @@ from services.svo_service import query_svo_facts
 router = APIRouter(prefix="/world", tags=["world"])
 logger = logging.getLogger(__name__)
 
+# ── GET /world/federation/status ──────────────────────────────────────────────
+
+@router.get("/federation/status", summary="聯邦分片狀態（Phase 2b）")
+async def federation_status():
+    from services.federation_service import get_federation_cache
+    return get_federation_cache().status()
+
+
+# ── GET /world/federation/registry ───────────────────────────────────────────
+
+@router.get("/federation/registry", summary="合併本機 + GitHub 遠端 registry（Phase 2b）")
+async def federation_registry():
+    from services.federation_service import get_federation_cache
+    merged = await get_federation_cache().merged_registry()
+    return merged.model_dump(exclude_none=True)
+
+
+# ── POST /world/federation/refresh ───────────────────────────────────────────
+
+@router.post("/federation/refresh", summary="強制重新下載 GitHub registry（Phase 2b）")
+async def federation_refresh():
+    from services.federation_service import get_federation_cache
+    cache = get_federation_cache()
+    cache._fetched_at = 0.0   # 使快取過期
+    await cache.get_remote_registry()
+    return cache.status()
+
+
 # ── GET /world/registry ───────────────────────────────────────────────────────
 
 @router.get("/registry", summary="取得本機 KB Registry（供 world-hub 讀取）")
