@@ -169,13 +169,24 @@ RETURN s.name, type(r), r.verb, o.name
 ORDER BY r.confidence DESC LIMIT 20
 ```
 
+## 世界知識（World Knowledge）
+
+Phase 1 已支援「公開 KG」機制：
+
+- **KG 管理** tab → 切換公開 / 私有開關
+- **🌐 世界** tab → 橫跨所有公開 KG 的 World Agent 問答
+- **實體探索** → 搜尋實體，點擊展開鄰居關係，遞迴圖探索
+
+Phase 2 計畫將支援跨 instance 的世界知識聯邦（本地維護 + 雲端 Hub 同步）。  
+詳見 [ROADMAP.md](ROADMAP.md)。
+
 ## 專案結構
 
 ```
 ├── core/               # 設定、資料庫連線、LLM/Embedding providers
 ├── models/             # Pydantic 資料模型
 ├── repositories/       # Neo4j CRUD 操作
-├── routers/            # FastAPI 路由（agent, knowledge_graph, staging, transcribe）
+├── routers/            # FastAPI 路由（agent, knowledge_graph, staging, world, transcribe）
 ├── services/           # 業務邏輯
 │   ├── svo_service.py          # SVO 抽取、圖譜建立、BFS 查詢
 │   ├── knowledge_graph_service.py  # KG CRUD、自動分群
@@ -183,3 +194,14 @@ ORDER BY r.confidence DESC LIMIT 20
 │   └── concept_engine.py       # ConceptNode 路由層
 └── ui/templates/       # 前端單頁應用（Vanilla JS）
 ```
+
+## 文件
+
+| 文件 | 說明 |
+|------|------|
+| [docs/SETUP.md](docs/SETUP.md) | Docker + 本地安裝指南 |
+| [docs/PROVIDERS.md](docs/PROVIDERS.md) | LLM / Embedding Provider 設定 |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 系統架構深度說明 |
+| [docs/API.md](docs/API.md) | REST API 完整參考 |
+| [ROADMAP.md](ROADMAP.md) | 開發路線圖與 Phase 2 計畫 |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | 貢獻指南 |
