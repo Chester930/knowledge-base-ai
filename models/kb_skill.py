@@ -6,7 +6,7 @@ from pydantic import BaseModel
 class ConceptScore(BaseModel):
     name: str
     score: float
-    vector: list[float] = []        # embedding 向量，供 world-hub 路由比對
+    # 注意：不在 registry 中儲存個別向量（太大），改用 fingerprint_vector 聚合
 
 
 class KBSkill(BaseModel):
@@ -26,7 +26,8 @@ class KBSkill(BaseModel):
 
     # ── Agent 路由用 metadata（無需 DB 連線即可判斷相關性）────────────────────
     tags: list[str] = []
-    top_concepts: list[ConceptScore] = []
+    top_concepts: list[ConceptScore] = []   # 名稱 + score（供人類閱讀與關鍵字比對）
+    fingerprint_vector: list[float] = []    # 所有 concept 向量的平均，供 embedding 路由
 
     # ── 統計（讓 Agent 評估 KB 深度）─────────────────────────────────────────
     entity_count: int = 0

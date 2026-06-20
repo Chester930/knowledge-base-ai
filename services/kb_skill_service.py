@@ -73,22 +73,35 @@ async def generate_skill(kg_id: UUID, driver: AsyncDriver) -> KBSkill:
     if not kg:
         raise ValueError(f"KG 不存在：{kg_id}")
 
-    # 讀取 top ConceptNode（含 embedding 向量）
+    # 讀取 top ConceptNode（含 embedding 向量，用於計算指紋）
     raw_concepts = await concept_repo.get_kg_concepts(kg_id)
     top_concepts: list[ConceptScore] = []
+    all_vectors: list[list[float]] = []
+
     for c in raw_concepts[:20]:
         score = (
             (c.get("interest_score") or 0) + (c.get("professional_score") or 0)
         ) / 2
-        vec = c.get("q_vector") or []
-        if hasattr(vec, "tolist"):
-            vec = vec.tolist()
         top_concepts.append(ConceptScore(
             name=c["name"],
             score=round(score, 4),
-            vector=list(vec),
         ))
+        vec = c.get("q_vector") or []
+        if hasattr(vec, "tolist"):
+            vec = vec.tolist()
+        if vec:
+            all_vectors.append(list(vec))
+
     top_concepts.sort(key=lambda x: x.score, reverse=True)
+
+    # 計算指紋向量：所有 concept 向量的平均（4 位小數，大幅縮減 registry 大小）
+    fingerprint: list[float] = []
+    if all_vectors:
+        dim = len(all_vectors[0])
+        fingerprint = [
+            round(sum(v[i] for v in all_vectors) / len(all_vectors), 4)
+            for i in range(dim)
+        ]
 
     return KBSkill(
         instance_id=settings.instance_id,
@@ -101,6 +114,7 @@ async def generate_skill(kg_id: UUID, driver: AsyncDriver) -> KBSkill:
         db_name=kg.db_name or None,
         tags=[],
         top_concepts=top_concepts,
+        fingerprint_vector=fingerprint,
         entity_count=kg.entity_count,
         relation_count=kg.relation_count,
         document_count=kg.doc_count,
