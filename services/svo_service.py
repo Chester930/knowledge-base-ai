@@ -103,25 +103,39 @@ async def build_graph_for_kg(
             message=f"[{_doc_title}] 並行處理 {total_chunks} 個段落…",
         )
 
+        _MAX_CHUNK_RETRIES = 2
+
         async def _process_chunk(
             idx: int, chunk: str,
             __doc_id=_doc_id, __doc_title=_doc_title,
         ):
             async with sem:
-                try:
-                    triples = await extract_svo_from_text(chunk)
-                    merged = await merge_triples_to_neo4j(triples, kg_id, __doc_id, db_name)
-                    return idx, triples, merged, None
-                except Exception as e:
-                    logger.warning(f"SVO 提取失敗 [{__doc_title} chunk {idx}]: {e}")
-                    return idx, [], 0, e
+                last_err = None
+                for attempt in range(1 + _MAX_CHUNK_RETRIES):
+                    try:
+                        triples = await extract_svo_from_text(chunk)
+                        merged = await merge_triples_to_neo4j(triples, kg_id, __doc_id, db_name)
+                        return idx, triples, merged, None
+                    except Exception as e:
+                        last_err = e
+                        if attempt < _MAX_CHUNK_RETRIES:
+                            wait = 2 ** attempt  # 1s → 2s
+                            logger.warning(
+                                f"SVO 提取重試 [{__doc_title} chunk {idx}] "
+                                f"第 {attempt + 1} 次（等 {wait}s）：{e}"
+                            )
+                            await asyncio.sleep(wait)
+                logger.warning(f"SVO 提取失敗 [{__doc_title} chunk {idx}]（已重試 {_MAX_CHUNK_RETRIES} 次）：{last_err}")
+                return idx, [], 0, last_err
 
         chunk_results = await asyncio.gather(
             *[_process_chunk(i, c) for i, c in enumerate(chunks, 1)]
         )
 
+        doc_has_error = False
         for idx, triples, merged, err in sorted(chunk_results, key=lambda x: x[0]):
             if err:
+                doc_has_error = True
                 yield BuildProgress(event="error", chunk_idx=idx, message=str(err))
             else:
                 total_merged += merged
@@ -132,7 +146,14 @@ async def build_graph_for_kg(
                     message=f"[{_doc_title}] 第 {idx} 段完成：{len(triples)} 組三元組",
                 )
 
-        await _set_doc_svo_processed(_doc_id)
+        if doc_has_error:
+            failed_count = sum(1 for _, _, _, e in chunk_results if e)
+            logger.warning(
+                f"[{_doc_title}] {failed_count} 個 chunk 最終失敗，"
+                f"svo_processed_at 保留 null → 下次增量跑自動補提取"
+            )
+        else:
+            await _set_doc_svo_processed(_doc_id)
 
     await kg_repo.refresh_counts(kg_id)
     yield BuildProgress(
