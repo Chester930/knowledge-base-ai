@@ -314,6 +314,47 @@ html.dark #auto-cluster-panel > div { background: var(--bg-secondary) !important
 html.dark #cluster-cards > div  { background: var(--bg-card) !important; border-color: var(--border) !important; }
 html.dark #cluster-cards input  { background: var(--bg-secondary) !important; color: var(--text) !important; border-color: var(--border) !important; }
 html.dark #cluster-cards span[style] { background: var(--bg-secondary) !important; color: var(--text-muted) !important; }
+
+/* ══════════════════════════════════
+   WORLD TAB
+══════════════════════════════════ */
+.world-wrap { flex:1; display:flex; flex-direction:column; overflow:hidden; }
+.world-header { display:flex; align-items:center; gap:10px; padding:10px 18px; border-bottom:1px solid var(--border); background:var(--bg-card); flex-shrink:0; }
+.world-title { font-size:1rem; font-weight:700; }
+.world-stat-pill { background:var(--bg-stat); border:1px solid var(--border); border-radius:20px; padding:2px 10px; font-size:0.74rem; color:var(--text-muted); }
+.world-body { flex:1; display:flex; overflow:hidden; }
+.world-kg-panel { width:210px; border-right:1px solid var(--border); overflow-y:auto; padding:10px; flex-shrink:0; }
+.world-kg-panel h4 { font-size:0.7rem; text-transform:uppercase; letter-spacing:.05em; color:var(--text-muted); margin-bottom:8px; }
+.world-kg-card { background:var(--bg-card); border:1px solid var(--border); border-radius:8px; padding:8px 10px; margin-bottom:6px; cursor:pointer; transition:border-color .15s; }
+.world-kg-card:hover,.world-kg-card.active { border-color:#6c5ce7; background:var(--bg-routing); }
+.world-kg-card-name { font-size:0.82rem; font-weight:600; margin-bottom:3px; }
+.world-kg-card-stats { font-size:0.7rem; color:var(--text-muted); display:flex; gap:8px; }
+.world-right { flex:1; display:flex; flex-direction:column; overflow:hidden; }
+.world-sub-tabs { display:flex; border-bottom:1px solid var(--border); background:var(--bg-card); flex-shrink:0; }
+.world-sub-tab { padding:8px 16px; font-size:0.82rem; cursor:pointer; color:var(--text-muted); border-bottom:2px solid transparent; transition:all .15s; }
+.world-sub-tab.active { color:#6c5ce7; border-bottom-color:#6c5ce7; font-weight:600; }
+.world-chat-wrap { flex:1; display:flex; flex-direction:column; overflow:hidden; }
+.world-chat-history { flex:1; overflow-y:auto; padding:18px 22px; display:flex; flex-direction:column; gap:18px; }
+.world-chat-input-bar { display:flex; gap:8px; padding:10px 16px; border-top:1px solid var(--border); background:var(--bg-card); flex-shrink:0; }
+.world-explore-panel { flex:1; display:flex; flex-direction:column; overflow:hidden; padding:14px 18px; gap:10px; }
+.world-explore-search { display:flex; gap:8px; flex-shrink:0; }
+.world-explore-results { flex:1; overflow-y:auto; }
+.entity-card { display:flex; align-items:center; gap:8px; padding:6px 10px; border-radius:7px; border:1px solid var(--border); margin-bottom:5px; cursor:pointer; transition:border-color .15s; background:var(--bg-card); }
+.entity-card:hover { border-color:#6c5ce7; }
+.entity-name { font-size:0.84rem; font-weight:500; flex:1; }
+.entity-type-tag { font-size:0.68rem; padding:1px 6px; border-radius:8px; background:var(--bg-tag); color:#0984e3; }
+.entity-kg-tag { font-size:0.68rem; color:var(--text-muted); }
+.neighbor-panel { background:var(--bg-secondary); border-radius:8px; padding:10px 12px; margin-top:6px; }
+.neighbor-panel h4 { font-size:0.78rem; font-weight:600; margin-bottom:6px; }
+.neighbor-edge { display:flex; align-items:center; gap:6px; font-size:0.78rem; padding:3px 0; border-bottom:1px solid var(--border-light); }
+.neighbor-verb { color:#6c5ce7; font-style:italic; min-width:100px; font-size:0.74rem; }
+.kg-public-row { display:flex; align-items:center; gap:8px; }
+.toggle-switch { position:relative; display:inline-block; width:34px; height:18px; flex-shrink:0; }
+.toggle-switch input { opacity:0; width:0; height:0; }
+.toggle-slider { position:absolute; cursor:pointer; top:0; left:0; right:0; bottom:0; background:#b2bec3; border-radius:18px; transition:.2s; }
+.toggle-slider:before { position:absolute; content:""; height:12px; width:12px; left:3px; bottom:3px; background:white; border-radius:50%; transition:.2s; }
+input:checked + .toggle-slider { background:#6c5ce7; }
+input:checked + .toggle-slider:before { transform:translateX(16px); }
 </style>
 </head>
 <body>
@@ -328,6 +369,7 @@ html.dark #cluster-cards span[style] { background: var(--bg-secondary) !importan
     <div class="nav-tab"        data-tab="kg"      onclick="switchTab('kg')">🗂️ 知識圖譜</div>
     <div class="nav-tab"        data-tab="staging" onclick="switchTab('staging')">📥 暫存區</div>
     <div class="nav-tab"        data-tab="add"     onclick="switchTab('add')">＋ 新增</div>
+    <div class="nav-tab"        data-tab="world"   onclick="switchTab('world')">🌐 世界</div>
   </div>
   <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="切換明暗模式">🌙</button>
   <span class="subtitle" id="stats-summary">連線中…</span>
@@ -512,6 +554,60 @@ html.dark #cluster-cards span[style] { background: var(--bg-secondary) !importan
       </div>
     </div>
 
+    <!-- ══ World Tab ══ -->
+    <div id="tab-world" class="tab-page">
+      <div class="world-wrap">
+        <div class="world-header">
+          <span style="font-size:1.2rem">🌐</span>
+          <span class="world-title">世界知識</span>
+          <span class="world-stat-pill" id="world-stat-kgs">公開 KG: -</span>
+          <span class="world-stat-pill" id="world-stat-entities">實體: -</span>
+          <span class="world-stat-pill" id="world-stat-relations">關係: -</span>
+          <button class="btn btn-sm btn-secondary" style="margin-left:auto" onclick="loadWorldTab()">重新整理</button>
+        </div>
+        <div class="world-body">
+          <!-- Left: Public KG list -->
+          <div class="world-kg-panel">
+            <h4>公開知識庫</h4>
+            <div id="world-kg-list"><div class="loading"><div class="spinner"></div></div></div>
+          </div>
+          <!-- Right: Chat + Explore -->
+          <div class="world-right">
+            <div class="world-sub-tabs">
+              <div class="world-sub-tab active" onclick="switchWorldSubTab('chat',this)">💬 世界問答</div>
+              <div class="world-sub-tab" onclick="switchWorldSubTab('explore',this)">🔭 實體探索</div>
+            </div>
+            <!-- World Chat -->
+            <div id="world-sub-chat" class="world-chat-wrap">
+              <div class="world-chat-history" id="world-chat-history">
+                <div class="chat-welcome">
+                  <div class="icon">🌐</div>
+                  <h2>世界知識助手</h2>
+                  <p>向我提問，我會橫跨所有公開知識庫，整合 SVO 知識事實與文件回答。</p>
+                </div>
+              </div>
+              <div class="world-chat-input-bar">
+                <textarea class="chat-input" id="world-chat-input" placeholder="向所有公開知識庫提問…" rows="1" style="flex:1"></textarea>
+                <button class="btn btn-purple" id="world-send-btn" onclick="doWorldChat()">送出</button>
+              </div>
+            </div>
+            <!-- Entity Explorer -->
+            <div id="world-sub-explore" class="world-explore-panel" style="display:none">
+              <div class="world-explore-search">
+                <input class="form-input" id="entity-search-input" placeholder="輸入實體名稱關鍵字…" style="flex:1"
+                       onkeydown="if(event.key==='Enter')exploreEntities()">
+                <button class="btn btn-purple btn-sm" onclick="exploreEntities()">搜尋</button>
+                <button class="btn btn-secondary btn-sm" onclick="exploreEntities('')">全部高頻</button>
+              </div>
+              <div class="world-explore-results" id="entity-results">
+                <div class="empty-state"><div class="empty-icon">🔭</div><p>搜尋實體，或點擊「全部高頻」查看關係最多的實體</p></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
   </div><!-- /main -->
 </div><!-- /app-body -->
 
@@ -569,6 +665,7 @@ function switchTab(name) {
   if (name === 'docs')    loadDocs();
   if (name === 'kg')      loadKgList();
   if (name === 'staging') loadStaging();
+  if (name === 'world')   loadWorldTab();
 }
 
 // ══════════════════════════════════
@@ -857,6 +954,13 @@ async function renderKgDetail(id) {
     detail.innerHTML = `
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
         <h2 style="font-size:1.1rem;font-weight:700;flex:1">${esc(kg.name)}</h2>
+        <div class="kg-public-row">
+          <label class="toggle-switch" title="${kg.is_public ? '公開（點擊改私有）' : '私有（點擊改公開）'}">
+            <input type="checkbox" ${kg.is_public ? 'checked' : ''} onchange="toggleKgPublic('${id}', this.checked)">
+            <span class="toggle-slider"></span>
+          </label>
+          <span style="font-size:0.76rem;color:var(--text-muted)">${kg.is_public ? '公開' : '私有'}</span>
+        </div>
         <button class="btn btn-sm btn-secondary" onclick="refreshKg('${id}')">🔄 刷新概念</button>
         <button class="btn btn-sm btn-danger" onclick="deleteKg('${id}')">🗑️</button>
       </div>
@@ -1267,6 +1371,243 @@ async function loadSidebar() {
       `<span class="concept-tag" onclick="filterByConcept('${esc(c.name)}')">${esc(c.name)}</span>`
     ).join('') || '<span style="color:#b2bec3;font-size:0.76rem">尚無概念</span>';
   } catch { document.getElementById('stats-summary').textContent='無法連線'; }
+}
+
+// ══════════════════════════════════
+// WORLD TAB
+// ══════════════════════════════════
+let isWorldStreaming = false;
+
+document.getElementById('world-chat-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doWorldChat(); }
+});
+document.getElementById('world-chat-input').addEventListener('input', function() {
+  this.style.height = 'auto';
+  this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+});
+
+function switchWorldSubTab(name, el) {
+  document.querySelectorAll('.world-sub-tab').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('world-sub-chat').style.display    = name === 'chat'    ? 'flex' : 'none';
+  document.getElementById('world-sub-explore').style.display = name === 'explore' ? 'flex' : 'none';
+}
+
+async function loadWorldTab() {
+  try {
+    const res = await fetch(`${API}/world/stats`);
+    const stats = await res.json();
+    document.getElementById('world-stat-kgs').textContent      = `公開 KG: ${stats.public_kg_count}`;
+    document.getElementById('world-stat-entities').textContent  = `實體: ${stats.total_entities.toLocaleString()}`;
+    document.getElementById('world-stat-relations').textContent = `關係: ${stats.total_relations.toLocaleString()}`;
+
+    const listEl = document.getElementById('world-kg-list');
+    if (!stats.public_kgs.length) {
+      listEl.innerHTML = '<p style="font-size:0.78rem;color:var(--text-muted)">尚無公開知識庫<br>在「知識圖譜」tab 將 KG 設為公開</p>';
+      return;
+    }
+    listEl.innerHTML = stats.public_kgs.map(kg => `
+      <div class="world-kg-card" onclick="filterExploreByKg('${kg.id}')">
+        <div class="world-kg-card-name">${esc(kg.name)}</div>
+        <div class="world-kg-card-stats"><span>🔗 ${kg.entity_count}</span></div>
+      </div>`).join('');
+  } catch(e) {
+    document.getElementById('world-kg-list').innerHTML = '<p style="font-size:0.78rem;color:#d63031">載入失敗</p>';
+  }
+}
+
+async function toggleKgPublic(id, isPublic) {
+  try {
+    const res = await fetch(`${API}/knowledge-graphs/${id}`, {
+      method: 'PUT',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({is_public: isPublic}),
+    });
+    if (res.ok) {
+      toast(isPublic ? '✅ 已設為公開，World Agent 可存取此 KG' : '🔒 已設為私有');
+      renderKgDetail(id);
+    } else toast('更新失敗','error');
+  } catch { toast('連線失敗','error'); }
+}
+
+// ── World Agent Chat ──────────────────────────────────────────────────────────
+
+function appendWorldAiMsg() {
+  const h = document.getElementById('world-chat-history');
+  const uid = 'w-' + Date.now();
+  const d = document.createElement('div');
+  d.className = 'msg-row ai';
+  d.innerHTML = `
+    <div class="msg-avatar ai">🌐</div>
+    <div class="msg-body">
+      <div class="msg-routing" id="${uid}-routing" style="display:none">
+        <div class="msg-routing-label">公開 KG：</div>
+        <div class="msg-routing-kgs" id="${uid}-kgs"></div>
+      </div>
+      <div class="msg-svo" id="${uid}-svo" style="display:none">
+        <div class="svo-toggle" onclick="toggleSvo('${uid}')">
+          <span>🧠</span>
+          <span id="${uid}-svo-count">知識事實 0 條</span>
+          <span style="margin-left:auto;font-size:0.7rem" id="${uid}-svo-arrow">▸ 展開</span>
+        </div>
+        <div class="svo-list" id="${uid}-svo-list"></div>
+      </div>
+      <div class="msg-bubble" id="${uid}-bubble"><span class="msg-status">🔍 查詢公開知識庫中…</span><span class="cursor"></span></div>
+      <div class="msg-sources" id="${uid}-sources"></div>
+    </div>`;
+  h.appendChild(d); h.scrollTop = h.scrollHeight;
+  return uid;
+}
+
+async function doWorldChat() {
+  if (isWorldStreaming) return;
+  const question = document.getElementById('world-chat-input').value.trim();
+  if (!question) return;
+
+  const welcome = document.querySelector('#world-chat-history .chat-welcome');
+  if (welcome) welcome.remove();
+
+  const h = document.getElementById('world-chat-history');
+  const userRow = document.createElement('div');
+  userRow.className = 'msg-row user';
+  userRow.innerHTML = `<div class="msg-avatar user">👤</div><div class="msg-body"><div class="msg-bubble">${esc(question)}</div></div>`;
+  h.appendChild(userRow); h.scrollTop = h.scrollHeight;
+
+  document.getElementById('world-chat-input').value = '';
+  document.getElementById('world-chat-input').style.height = 'auto';
+
+  const uid = appendWorldAiMsg();
+  isWorldStreaming = true;
+  document.getElementById('world-send-btn').disabled = true;
+  const bubble = document.getElementById(uid + '-bubble');
+  let fullText = '';
+
+  try {
+    const res = await fetch(`${API}/world/chat`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({question, top_k: 3, max_chars_per_doc: 1500, use_svo: true}),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream:true});
+      const parts = buf.split('\n\n'); buf = parts.pop();
+      for (const part of parts) {
+        const line = part.trim();
+        if (!line.startsWith('data:')) continue;
+        let evt; try { evt = JSON.parse(line.slice(5).trim()); } catch { continue; }
+
+        if (evt.status === 'searching') {
+          bubble.innerHTML = '<span class="msg-status">🔍 路由公開知識庫中…</span><span class="cursor"></span>';
+        } else if (evt.kg_route) {
+          setKgRoute(uid, evt.kg_route);
+          bubble.innerHTML = '<span class="msg-status">🧠 提取知識事實…</span><span class="cursor"></span>';
+        } else if (evt.svo_facts) {
+          setSvoFacts(uid, evt.svo_facts);
+          bubble.innerHTML = '<span class="msg-status">📄 比對文件…</span><span class="cursor"></span>';
+        } else if (evt.sources) {
+          renderSources(uid, evt.sources);
+        } else if (evt.status === 'generating') {
+          bubble.innerHTML = '<span class="cursor"></span>';
+        } else if (evt.token) {
+          fullText += evt.token;
+          bubble.textContent = fullText;
+          const cur = document.createElement('span'); cur.className = 'cursor';
+          bubble.appendChild(cur);
+          document.getElementById('world-chat-history').scrollTop = 999999;
+        } else if (evt.done) {
+          bubble.textContent = fullText;
+        } else if (evt.error) {
+          bubble.innerHTML = `<span style="color:#d63031">❌ ${esc(evt.error)}</span>`;
+        }
+      }
+    }
+    bubble.textContent = fullText || bubble.textContent;
+  } catch(e) {
+    bubble.innerHTML = `<span style="color:#d63031">❌ 連線失敗：${esc(e.message)}</span>`;
+  } finally {
+    isWorldStreaming = false;
+    document.getElementById('world-send-btn').disabled = false;
+    document.getElementById('world-chat-history').scrollTop = 999999;
+  }
+}
+
+// ── Entity Explorer ───────────────────────────────────────────────────────────
+
+async function exploreEntities(q) {
+  const query = q !== undefined ? q : document.getElementById('entity-search-input').value.trim();
+  const el = document.getElementById('entity-results');
+  el.innerHTML = '<div class="loading"><div class="spinner"></div><p>搜尋中…</p></div>';
+  try {
+    const res = await fetch(`${API}/world/explore/entities?q=${encodeURIComponent(query)}&limit=40`);
+    const data = await res.json();
+    if (!data.entities.length) {
+      el.innerHTML = '<div class="empty-state"><div class="empty-icon">📭</div><p>找不到符合的實體</p></div>';
+      return;
+    }
+    el.innerHTML = data.entities.map(e => `
+      <div class="entity-card" onclick="exploreNeighbors('${esc(e.name)}','${e.kg_id}','${esc(e.kg_name)}')">
+        <span class="entity-name">${esc(e.name)}</span>
+        <span class="entity-type-tag">${esc(e.type || 'Entity')}</span>
+        <span class="entity-kg-tag">${esc(e.kg_name)}</span>
+        <span style="font-size:0.7rem;color:var(--text-faint)">↔${e.degree}</span>
+      </div>`).join('');
+  } catch(e) {
+    el.innerHTML = '<div class="empty-state"><div class="empty-icon">⚠️</div><p>搜尋失敗</p></div>';
+  }
+}
+
+let _neighborEl = null;
+
+async function exploreNeighbors(entityName, kgId, kgName) {
+  // Toggle: if same entity already open, collapse
+  if (_neighborEl && _neighborEl.dataset.entity === entityName) {
+    _neighborEl.remove(); _neighborEl = null; return;
+  }
+  if (_neighborEl) { _neighborEl.remove(); _neighborEl = null; }
+
+  const cards = document.getElementById('entity-results');
+  const panel = document.createElement('div');
+  panel.className = 'neighbor-panel';
+  panel.dataset.entity = entityName;
+  panel.innerHTML = `<h4>🔭 ${esc(entityName)} <span style="font-weight:400;color:var(--text-muted)">（${esc(kgName)}）</span></h4><div class="loading" style="padding:8px 0"><div class="spinner"></div></div>`;
+  cards.insertAdjacentElement('afterbegin', panel);
+  _neighborEl = panel;
+
+  try {
+    const res = await fetch(`${API}/world/explore/neighbors?entity=${encodeURIComponent(entityName)}&kg_id=${kgId}&limit=30`);
+    const data = await res.json();
+    if (data.error || !data.edges.length) {
+      panel.innerHTML = `<h4>🔭 ${esc(entityName)}</h4><p style="font-size:0.78rem;color:var(--text-muted)">無關係資料</p>`;
+      return;
+    }
+    const edgesHtml = data.edges.map(e => `
+      <div class="neighbor-edge">
+        <span style="font-weight:500">${esc(e.src === entityName ? '' : e.src)}</span>
+        <span class="neighbor-verb">[${esc(e.rel_type)}] ${esc(e.verb !== e.rel_type ? e.verb : '')}</span>
+        <span style="flex:1">${esc(e.src === entityName ? e.dst : e.src)}</span>
+        <span style="font-size:0.68rem;color:var(--text-faint);cursor:pointer" onclick="exploreNeighbors('${esc(e.src === entityName ? e.dst : e.src)}','${kgId}','${esc(kgName)}')">展開 ▸</span>
+      </div>`).join('');
+    panel.innerHTML = `
+      <h4>🔭 ${esc(entityName)} <span style="font-weight:400;color:var(--text-muted)">（${esc(kgName)}，${data.edges.length} 條關係）</span>
+        <span style="cursor:pointer;float:right;font-weight:400;color:var(--text-muted)" onclick="_neighborEl&&_neighborEl.remove();_neighborEl=null">✕</span>
+      </h4>
+      ${edgesHtml}`;
+  } catch(e) {
+    panel.innerHTML = `<h4>🔭 ${esc(entityName)}</h4><p style="color:#d63031;font-size:0.78rem">載入失敗</p>`;
+  }
+}
+
+function filterExploreByKg(kgId) {
+  switchWorldSubTab('explore', document.querySelectorAll('.world-sub-tab')[1]);
+  document.getElementById('entity-search-input').value = '';
+  exploreEntities('');
 }
 
 // ── Init ─────────────────────────────────────────────────────────────────────

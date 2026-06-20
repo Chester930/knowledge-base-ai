@@ -10,7 +10,7 @@ from core.config import settings
 from core.database import connect, disconnect, get_driver
 from core.providers.factory import init_providers
 from repositories.concept_repo import ConceptRepository
-from routers import documents, search, agent, transcribe, knowledge_graph, staging
+from routers import documents, search, agent, transcribe, knowledge_graph, staging, world
 from services.file_watcher_service import start_watcher, stop_watcher
 from services.svo_service import create_entity_index
 
@@ -50,6 +50,7 @@ app.include_router(agent.router)
 app.include_router(transcribe.router)
 app.include_router(knowledge_graph.router)
 app.include_router(staging.router)
+app.include_router(world.router)
 
 templates = Jinja2Templates(directory="ui/templates")
 

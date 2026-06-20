@@ -170,6 +170,23 @@ class ConceptRepository:
             result_map.setdefault(kg_id, []).append(dict(r))
         return result_map
 
+    async def get_public_kgs_concepts(self) -> dict[UUID, list[dict]]:
+        """取得所有 is_public=true 的 KG 的 EFFECTIVE 概念（World Agent 專用）。"""
+        result = await self.driver.execute_query(
+            """
+            MATCH (kg:KnowledgeGraph {is_public: true})-[e:EFFECTIVE]->(c:ConceptNode)
+            RETURN kg.id AS kg_id, c.id AS concept_id, c.name AS name,
+                   c.q_vector AS q_vector,
+                   e.interest_score AS interest_score,
+                   e.professional_score AS professional_score
+            """
+        )
+        result_map: dict[UUID, list[dict]] = {}
+        for r in result.records:
+            kg_id = UUID(r["kg_id"])
+            result_map.setdefault(kg_id, []).append(dict(r))
+        return result_map
+
     async def get_all_concepts(self) -> list[dict]:
         result = await self.driver.execute_query(
             """
