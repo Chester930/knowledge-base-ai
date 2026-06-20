@@ -116,29 +116,68 @@ async def extract_svo_from_text(text: str) -> list[SVOTriple]:
         "請從以下文字中提取知識關係，以六欄格式輸出，每行一組：\n"
         "主詞|主詞類型|關係類別|動詞|受詞|受詞類型\n\n"
         "【實體類型】選最接近：概念、算法、技術、方法、工具、框架、模型、系統、人物、組織、資料集、指標、其他\n\n"
-        "【關係類別】必須從以下 8 種選一，不可自造：\n"
-        "  IS_A       → 階層歸屬（是一種、屬於、屬於類別）\n"
-        "  PART_OF    → 組成關係（是...的部分、包含於）\n"
-        "  USES       → 功能依賴（使用、調用、依賴、需要、基於）\n"
-        "  ENABLES    → 賦能關係（使...成為可能、支援、允許、提供）\n"
-        "  CAUSES     → 因果關係（導致、引起、造成、觸發）\n"
-        "  HAS_PROPERTY → 屬性描述（具有特性、是...的特點）\n"
-        "  PRECEDES   → 時序關係（先於、之前執行、觸發後才有）\n"
-        "  RELATED_TO → 其他相關（無法歸入以上類別時使用）\n\n"
+        "【關係類別】必須從以下 30 種選一，不可自造：\n"
+        "層級/組成：\n"
+        "  IS_A        → 是一種、屬於、屬類\n"
+        "  PART_OF     → 是...的部分、隸屬於\n"
+        "  CONTAINS    → 包含、涵蓋、由...組成\n"
+        "  INSTANCE_OF → 是...的例子、如、例如\n"
+        "因果/效應：\n"
+        "  CAUSES      → 導致、引起、造成、觸發\n"
+        "  PREVENTS    → 防止、阻止、避免\n"
+        "  ENABLES     → 使能、支援、允許、實現\n"
+        "  IMPROVES    → 優化、提升、改進、增強\n"
+        "  INHIBITS    → 降低、妨礙、限制、抑制\n"
+        "功能/操作：\n"
+        "  USES        → 使用、調用、依賴、基於\n"
+        "  REQUIRES    → 需要、依賴於、前提是\n"
+        "  PRODUCES    → 輸出、生成、產生、建立\n"
+        "  IMPLEMENTS  → 實現、實作、落地、執行\n"
+        "  REPLACES    → 取代、替換、棄用\n"
+        "  EXTENDS     → 擴展、延伸、建構於、衍生自\n"
+        "比較：\n"
+        "  CONTRASTS   → 不同於、相比、相對於\n"
+        "  SIMILAR_TO  → 類似、相似、等同於\n"
+        "  OUTPERFORMS → 優於、超越、勝過\n"
+        "描述/定義：\n"
+        "  DEFINED_AS  → 定義為、稱為、指的是\n"
+        "  HAS_PROPERTY → 具有、是...的特點、特性為\n"
+        "  MEASURED_BY → 用...衡量、以...評估、指標為\n"
+        "  APPLIES_TO  → 應用於、適用於、用於\n"
+        "時序：\n"
+        "  PRECEDES    → 先於、之前執行、前置步驟\n"
+        "  FOLLOWS     → 接著、後於、之後發生\n"
+        "  CO_OCCURS   → 伴隨、同時、共同出現\n"
+        "資料流：\n"
+        "  INPUTS      → 接收、輸入、讀取\n"
+        "  TRANSFORMS  → 轉換、處理、映射、編碼\n"
+        "歸屬/解決：\n"
+        "  CREATED_BY  → 由...提出、由...開發、創建者為\n"
+        "  SOLVES      → 解決、處理、應對、克服\n"
+        "  RELATED_TO  → 其他相關（以上皆不符時才用）\n\n"
         "規則：\n"
         "- 主詞與受詞為名詞或名詞短語（2-15字）\n"
-        "- 動詞欄位直接從原文提取最能代表關係的核心動詞或動詞短語（2-6字），"
-        "如：使用、導致、屬於、包含、提供、改善、基於、需要、支援、觸發\n"
+        "- 動詞欄位盡量引用原文中的實際措辭（2-8字），"
+        "忠實反映原文用語，不要自行概括替換\n"
         "- 只輸出六欄格式，不加說明、序號、標點\n"
         "- 行數上限 30 行，優先抽取最重要的知識關係\n\n"
         "範例：\n"
         "Q-Learning|算法|IS_A|屬於|強化學習|概念\n"
         "工具呼叫|方法|PART_OF|包含於|代理迴圈|概念\n"
-        "提示快取|技術|ENABLES|使能|效能優化|指標\n"
-        "Context 超限|概念|CAUSES|導致|回應延遲|指標\n"
-        "Transformer|模型|USES|使用|注意力機制|技術\n"
-        "並行執行|技術|HAS_PROPERTY|具有|非阻塞特性|概念\n"
-        "路由層|系統|PRECEDES|先於|SVO 查詢|方法\n\n"
+        "注意力機制|技術|PART_OF|組成|Transformer|模型\n"
+        "提示快取|技術|ENABLES|使能|跨請求重用|技術\n"
+        "Context 超限|概念|CAUSES|導致|回應延遲增加|指標\n"
+        "Transformer|模型|USES|使用|多頭注意力|技術\n"
+        "GPT-4|模型|OUTPERFORMS|超越|GPT-3.5|模型\n"
+        "梯度消失|概念|PREVENTS|阻止|深層網路收斂|概念\n"
+        "BatchNorm|技術|IMPROVES|穩定|訓練過程|概念\n"
+        "ResNet|模型|EXTENDS|建構於|CNN|框架\n"
+        "Adam|算法|REPLACES|取代|SGD|算法\n"
+        "損失函數|概念|MEASURED_BY|衡量|模型表現|指標\n"
+        "反向傳播|算法|PRECEDES|先於|權重更新|方法\n"
+        "Tokenizer|工具|TRANSFORMS|將文字轉換為|Token|資料集\n"
+        "BERT|模型|CREATED_BY|由 Google 提出|Google|組織\n"
+        "Dropout|技術|PREVENTS|防止|過擬合|概念\n\n"
         f"文字：\n{text}"
     )
     raw = await get_llm_provider().generate(prompt)
@@ -558,22 +597,67 @@ _VALID_TYPES = {
 }
 
 _VALID_REL_TYPES = {
-    "IS_A", "PART_OF", "USES", "ENABLES",
-    "CAUSES", "HAS_PROPERTY", "PRECEDES", "RELATED_TO",
+    # 層級/組成
+    "IS_A", "PART_OF", "CONTAINS", "INSTANCE_OF",
+    # 因果/效應
+    "CAUSES", "PREVENTS", "ENABLES", "IMPROVES", "INHIBITS",
+    # 功能/操作
+    "USES", "REQUIRES", "PRODUCES", "IMPLEMENTS", "REPLACES", "EXTENDS",
+    # 比較
+    "CONTRASTS", "SIMILAR_TO", "OUTPERFORMS",
+    # 描述/定義
+    "DEFINED_AS", "HAS_PROPERTY", "MEASURED_BY", "APPLIES_TO",
+    # 時序
+    "PRECEDES", "FOLLOWS", "CO_OCCURS",
+    # 資料流
+    "INPUTS", "TRANSFORMS",
+    # 歸屬/解決
+    "CREATED_BY", "SOLVES", "RELATED_TO",
 }
 
 # Cypher relationship type pattern（供 MATCH 使用）
-_ALL_REL_PATTERN = "IS_A|PART_OF|USES|ENABLES|CAUSES|HAS_PROPERTY|PRECEDES|RELATED_TO"
+_ALL_REL_PATTERN = (
+    "IS_A|PART_OF|CONTAINS|INSTANCE_OF|"
+    "CAUSES|PREVENTS|ENABLES|IMPROVES|INHIBITS|"
+    "USES|REQUIRES|PRODUCES|IMPLEMENTS|REPLACES|EXTENDS|"
+    "CONTRASTS|SIMILAR_TO|OUTPERFORMS|"
+    "DEFINED_AS|HAS_PROPERTY|MEASURED_BY|APPLIES_TO|"
+    "PRECEDES|FOLLOWS|CO_OCCURS|"
+    "INPUTS|TRANSFORMS|"
+    "CREATED_BY|SOLVES|RELATED_TO"
+)
 
 # 關係類別的中文顯示名稱（供 UI 顯示）
 REL_TYPE_LABELS = {
     "IS_A":         "階層",
     "PART_OF":      "組成",
-    "USES":         "依賴",
-    "ENABLES":      "賦能",
+    "CONTAINS":     "包含",
+    "INSTANCE_OF":  "實例",
     "CAUSES":       "因果",
+    "PREVENTS":     "阻止",
+    "ENABLES":      "賦能",
+    "IMPROVES":     "改善",
+    "INHIBITS":     "抑制",
+    "USES":         "使用",
+    "REQUIRES":     "需求",
+    "PRODUCES":     "產出",
+    "IMPLEMENTS":   "實作",
+    "REPLACES":     "取代",
+    "EXTENDS":      "延伸",
+    "CONTRASTS":    "對比",
+    "SIMILAR_TO":   "相似",
+    "OUTPERFORMS":  "優越",
+    "DEFINED_AS":   "定義",
     "HAS_PROPERTY": "屬性",
-    "PRECEDES":     "時序",
+    "MEASURED_BY":  "量測",
+    "APPLIES_TO":   "應用",
+    "PRECEDES":     "前置",
+    "FOLLOWS":      "後置",
+    "CO_OCCURS":    "共現",
+    "INPUTS":       "輸入",
+    "TRANSFORMS":   "轉換",
+    "CREATED_BY":   "歸屬",
+    "SOLVES":       "解決",
     "RELATED_TO":   "相關",
 }
 
@@ -618,7 +702,7 @@ def _parse_svo_lines(raw: str) -> list[SVOTriple]:
 
         if not s or not v or not o:
             continue
-        if len(s) > 50 or len(v) > 15 or len(o) > 50:
+        if len(s) > 50 or len(v) > 20 or len(o) > 50:
             continue
         key = (s, rel_type, o)   # 用 rel_type 去重（同類別的同主受詞只保留一條）
         if key in seen:

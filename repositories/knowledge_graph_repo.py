@@ -183,7 +183,10 @@ class KnowledgeGraphRepository:
         )
         doc_c = doc_result.records[0]["doc_c"] if doc_result.records else 0
 
-        _REL = "IS_A|PART_OF|USES|ENABLES|CAUSES|HAS_PROPERTY|PRECEDES|RELATED_TO"
+        _REL = ("IS_A|PART_OF|CONTAINS|INSTANCE_OF|CAUSES|PREVENTS|ENABLES|IMPROVES|INHIBITS|"
+                "USES|REQUIRES|PRODUCES|IMPLEMENTS|REPLACES|EXTENDS|CONTRASTS|SIMILAR_TO|OUTPERFORMS|"
+                "DEFINED_AS|HAS_PROPERTY|MEASURED_BY|APPLIES_TO|PRECEDES|FOLLOWS|CO_OCCURS|"
+                "INPUTS|TRANSFORMS|CREATED_BY|SOLVES|RELATED_TO")
 
         # entity / relation count：per-KG db 或 main db
         if db_name:
@@ -233,7 +236,10 @@ class KnowledgeGraphRepository:
         )
         top_concepts = [r["name"] for r in concepts_result.records]
 
-        _REL = "IS_A|PART_OF|USES|ENABLES|CAUSES|HAS_PROPERTY|PRECEDES|RELATED_TO"
+        _REL = ("IS_A|PART_OF|CONTAINS|INSTANCE_OF|CAUSES|PREVENTS|ENABLES|IMPROVES|INHIBITS|"
+                "USES|REQUIRES|PRODUCES|IMPLEMENTS|REPLACES|EXTENDS|CONTRASTS|SIMILAR_TO|OUTPERFORMS|"
+                "DEFINED_AS|HAS_PROPERTY|MEASURED_BY|APPLIES_TO|PRECEDES|FOLLOWS|CO_OCCURS|"
+                "INPUTS|TRANSFORMS|CREATED_BY|SOLVES|RELATED_TO")
         db_name = kg.db_name
         if db_name:
             entities_result = await self.driver.execute_query(
