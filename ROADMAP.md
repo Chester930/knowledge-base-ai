@@ -1,6 +1,6 @@
 # 路線圖 · Roadmap
 
-> 最後更新：2026-06-21（Phase 3b 互動式圖視覺化完成）
+> 最後更新：2026-06-21（Phase 3 全部完成）
 
 本文件記錄「智慧知識庫」的長期願景與開發計畫。  
 若你對某個階段的方向有興趣，歡迎填寫下方意願表單或直接開 Issue 討論。
@@ -163,7 +163,7 @@ Phase 2d：實體對齊 ✅
 
 ## 計畫中
 
-### 🔄 Phase 3 — 知識深化（Knowledge Deepening）
+### ✅ Phase 3 — 知識深化（Knowledge Deepening）
 
 Phase 3 聚焦於「讓知識更可信、更可視、更可追蹤、更易共享」，分為四個子階段：
 
@@ -210,32 +210,42 @@ Phase 3 聚焦於「讓知識更可信、更可視、更可追蹤、更易共享
 
 ---
 
-#### Phase 3c：KG 版本控制（Version Control）
+#### Phase 3c：KG 版本控制（Version Control）✅
 
 **目標**：像 Git 一樣追蹤 KG 的每次變更。
 
 Neo4j 邊上已有 `created_at`，Phase 3c 補充：
 
 ```
-→ 邊新增 updated_at 欄位（MERGE 時更新）
-→ GET /kg/{id}/changelog：列出近期新增/修改的 SVO 事實（含時間戳）
-→ GET /kg/{id}/diff?since=ISO8601：指定時間點之後的所有變更
-→ GET /kg/{id}/snapshot?at=ISO8601：某時間點的知識快照（過濾 created_at）
+→ 邊 MERGE 時 ON MATCH SET updated_at = datetime()（已在 svo_service.py 實作）
+→ GET /kg/{id}/changelog?limit=50&offset=0：近期 SVO 變更（updated_at/created_at 降序）
+→ GET /kg/{id}/diff?since=ISO8601：指定時間點之後的所有新增或更新事實
+→ GET /kg/{id}/snapshot?at=ISO8601：某時間點的知識快照（created_at ≤ at）
+→ routers/versioning.py：三端點 + Enterprise/Community DB 雙路徑
+→ change_type 欄位："created" | "updated"
 ```
 
 ---
 
-#### Phase 3d：KG 訂閱 / 自動同步（Subscription）
+#### Phase 3d：KG 訂閱 / 自動同步（Subscription）✅
 
 **目標**：訂閱別人的公開 KG，定時拉取並合併到本機。
 
 ```
-→ subscriptions.json：本機訂閱清單（instance_id + kb_id + 上次同步時間）
-→ POST /world/subscribe：新增訂閱
-→ DELETE /world/subscribe/{kb_id}：取消訂閱
-→ GET /world/subscriptions：列出所有訂閱 + 同步狀態
-→ POST /world/sync-subscriptions：手動觸發全部訂閱同步
-→ 背景排程（APScheduler）：每 N 小時自動同步
+→ subscriptions.json：本機訂閱清單（instance_id + kb_id + 上次同步時間 + status）
+→ services/subscription_service.py：SubscriptionManager 單例
+   - add() / remove() / list_all() / set_status() / set_last_sync()
+   - sync_subscription()：從遠端 AuraDB 分批拉取 SVO，寫入本機 MERGE
+   - sync_all_subscriptions()：APScheduler 定時呼叫
+→ routers/subscription.py：
+   - GET  /world/subscriptions             列出所有訂閱 + 狀態
+   - POST /world/subscribe                 新增訂閱
+   - DELETE /world/subscribe/{kb_id}       取消訂閱
+   - PATCH /world/subscribe/{kb_id}/pause  暫停 / 恢復
+   - POST /world/sync-subscriptions        手動觸發全部同步
+   - POST /world/sync-subscriptions/{kb_id} 同步單一訂閱
+→ main.py：APScheduler 每 6 小時自動同步 active 訂閱
+→ 60 秒超時防止單一訂閱掛死整個 sync 流程
 ```
 
 ---
@@ -273,3 +283,4 @@ Neo4j 邊上已有 `created_at`，Phase 3c 補充：
 | v0.3 | 2026-06-21 | Phase 2 全部完成（2a 同步協議 / 2b GitHub Registry / 2c 並行查詢 / 2d 實體對齊）|
 | v0.4 | 2026-06-21 | Phase 3 規劃：知識溯源 / 圖視覺化 / 版本控制 / 訂閱同步 |
 | v0.5 | 2026-06-21 | Phase 3a 知識溯源 + Phase 3b 互動式 D3.js 力導向圖完成 |
+| v0.6 | 2026-06-21 | Phase 3c KG 版本控制 + Phase 3d 訂閱自動同步完成（Phase 3 全部完成）|
