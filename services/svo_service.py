@@ -1,6 +1,8 @@
 from __future__ import annotations
+import asyncio
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import AsyncIterator
 from uuid import UUID, uuid4
@@ -15,6 +17,9 @@ logger = logging.getLogger(__name__)
 
 _CHUNK_SIZE = 1000   # 每段文字上限（字元）
 _CHUNK_OVERLAP = 100 # 段落重疊（避免三元組跨段斷裂）
+_SVO_CONCURRENCY = 3 # 每份文件最大平行 LLM 呼叫數
+_BFS_CACHE_TTL = 300 # BFS 查詢快取 TTL（秒）
+_bfs_cache: dict = {} # (kg_id, terms, hops, min_conf) → (facts, docs, ts)
 
 
 # ── 進度事件（供 SSE 串流使用）────────────────────────────────────────────────
@@ -41,10 +46,13 @@ async def build_graph_for_kg(
     kg_id: UUID,
     doc_ids: list[UUID] | None = None,
     force_rebuild: bool = False,
+    rebuild_relations_only: bool = False,
 ) -> AsyncIterator[BuildProgress]:
     """
-    對 KG 下的所有（或指定）文件逐一執行 SVO 提取，直接 MERGE 進 Neo4j。
-    以 AsyncIterator[BuildProgress] 回報進度，供 SSE 端點消費。
+    對 KG 下的所有（或指定）文件執行 SVO 提取，直接 MERGE 進 Neo4j。
+    - force_rebuild=True: 清除後重建（rebuild_relations_only=True 時只清關係保留節點）
+    - force_rebuild=False: 增量模式，跳過已有 svo_processed_at 的文件
+    - 平行處理：每份文件的 chunks 以 _SVO_CONCURRENCY 限流並行送 LLM
     """
     kg_repo = KnowledgeGraphRepository(get_driver())
     doc_repo = DocumentRepository(get_driver())
@@ -54,9 +62,8 @@ async def build_graph_for_kg(
         yield BuildProgress(event="error", message=f"KG 不存在：{kg_id}")
         return
 
-    db_name = kg.db_name  # "" = 使用主資料庫 + kg_id 隔離
+    db_name = kg.db_name
 
-    # 決定要處理的文件清單
     if doc_ids:
         docs = [d for d in [await doc_repo.get_by_id(did) for did in doc_ids] if d]
     else:
@@ -69,35 +76,63 @@ async def build_graph_for_kg(
         return
 
     if force_rebuild:
-        await _clear_kg_entities(kg_id, db_name)
+        if rebuild_relations_only:
+            await _clear_kg_relations(kg_id, db_name)
+        else:
+            await _clear_kg_entities(kg_id, db_name)
+        await _reset_docs_svo_processed(kg_id)
+    else:
+        docs = await _filter_unprocessed_docs(docs)
+        if not docs:
+            yield BuildProgress(event="done", message="所有文件已是最新，無需重建")
+            return
 
+    sem = asyncio.Semaphore(_SVO_CONCURRENCY)
     total_merged = 0
+
     for doc in docs:
         text = doc.content or ""
         chunks = _chunk_text(text)
         total_chunks = len(chunks)
+        _doc_id = doc.id
+        _doc_title = doc.title
 
-        for i, chunk in enumerate(chunks, 1):
-            yield BuildProgress(
-                event="chunk_start",
-                chunk_idx=i, total_chunks=total_chunks,
-                message=f"[{doc.title}] 提取第 {i}/{total_chunks} 段…",
-            )
-            try:
-                triples = await extract_svo_from_text(chunk)
-            except Exception as e:
-                logger.warning(f"SVO 提取失敗 [{doc.title} chunk {i}]: {e}")
-                yield BuildProgress(event="error", chunk_idx=i, message=str(e))
-                continue
+        yield BuildProgress(
+            event="chunk_start",
+            chunk_idx=0, total_chunks=total_chunks,
+            message=f"[{_doc_title}] 並行處理 {total_chunks} 個段落…",
+        )
 
-            merged = await merge_triples_to_neo4j(triples, kg_id, doc.id, db_name)
-            total_merged += merged
-            yield BuildProgress(
-                event="chunk_done",
-                chunk_idx=i, total_chunks=total_chunks,
-                triples_extracted=len(triples), triples_merged=merged,
-                message=f"[{doc.title}] 第 {i} 段完成：{len(triples)} 組三元組",
-            )
+        async def _process_chunk(
+            idx: int, chunk: str,
+            __doc_id=_doc_id, __doc_title=_doc_title,
+        ):
+            async with sem:
+                try:
+                    triples = await extract_svo_from_text(chunk)
+                    merged = await merge_triples_to_neo4j(triples, kg_id, __doc_id, db_name)
+                    return idx, triples, merged, None
+                except Exception as e:
+                    logger.warning(f"SVO 提取失敗 [{__doc_title} chunk {idx}]: {e}")
+                    return idx, [], 0, e
+
+        chunk_results = await asyncio.gather(
+            *[_process_chunk(i, c) for i, c in enumerate(chunks, 1)]
+        )
+
+        for idx, triples, merged, err in sorted(chunk_results, key=lambda x: x[0]):
+            if err:
+                yield BuildProgress(event="error", chunk_idx=idx, message=str(err))
+            else:
+                total_merged += merged
+                yield BuildProgress(
+                    event="chunk_done",
+                    chunk_idx=idx, total_chunks=total_chunks,
+                    triples_extracted=len(triples), triples_merged=merged,
+                    message=f"[{_doc_title}] 第 {idx} 段完成：{len(triples)} 組三元組",
+                )
+
+        await _set_doc_svo_processed(_doc_id)
 
     await kg_repo.refresh_counts(kg_id)
     yield BuildProgress(
@@ -154,11 +189,12 @@ async def extract_svo_from_text(text: str) -> list[SVOTriple]:
         "歸屬/解決：\n"
         "  CREATED_BY  → 由...提出、由...開發、創建者為\n"
         "  SOLVES      → 解決、處理、應對、克服\n"
-        "  RELATED_TO  → 其他相關（以上皆不符時才用）\n\n"
+        "  RELATED_TO  → 【絕對最後手段】以上 29 種皆完全不適用時才能用，目標使用率 < 5%\n\n"
         "規則：\n"
-        "- 主詞與受詞為名詞或名詞短語（2-15字）\n"
+        "- 主詞與受詞為名詞或名詞短語（2-15字），去除冗餘後綴（如「XX技術」→「XX」、「XX方法」→「XX」）\n"
         "- 動詞欄位盡量引用原文中的實際措辭（2-8字），"
         "忠實反映原文用語，不要自行概括替換\n"
+        "- 嚴禁濫用 RELATED_TO：有明確語意關係必須選精確類別，每段文字最多使用 1 次\n"
         "- 只輸出六欄格式，不加說明、序號、標點\n"
         "- 行數上限 30 行，優先抽取最重要的知識關係\n\n"
         "範例：\n"
@@ -370,15 +406,22 @@ async def query_svo_facts(
     hops: int = 2,
     limit: int = 50,
     db_name: str | None = None,
+    min_confidence: int = 1,
 ) -> tuple[list[str], list[str]]:
     """
     BFS 遍歷 SVO 圖，回傳：
     - facts:       知識事實字串清單（供 LLM prompt 使用）
-    - source_docs: 這些事實來源的 doc_id 字串清單（供圖譜驅動文件選取）
-    seed 搜尋優先使用 fulltext index（entity_name_ft），失敗時回退 CONTAINS。
+    - source_docs: 這些事實來源的 doc_id 字串清單
+    - min_confidence: 只回傳 confidence >= 此值的邊（過濾低品質單次抽取）
+    結果快取 _BFS_CACHE_TTL 秒，key = (kg_id, sorted_terms, hops, min_confidence)。
     """
     if not terms:
         return [], []
+
+    cache_key = (str(kg_id), tuple(sorted(terms)), hops, min_confidence)
+    cached = _bfs_cache.get(cache_key)
+    if cached and time.time() - cached[2] < _BFS_CACHE_TTL:
+        return cached[0], cached[1]
 
     if db_name is None:
         db_name = await _get_kg_db(kg_id)
@@ -387,10 +430,6 @@ async def query_svo_facts(
     db_kw = {"database_": db_name} if db_name else {}
     kg_id_str = str(kg_id)
     ft_query_str = _build_ft_query(terms)
-
-    # ── 嘗試 fulltext seed 搜尋 ───────────────────────────────────────────────
-    seed_cypher_ft: str
-    seed_params_ft: dict
 
     if db_name:
         seed_cypher_ft = (
@@ -411,12 +450,11 @@ async def query_svo_facts(
     except Exception:
         use_ft = False
 
-    # ── BFS 展開（共用，seed 來源不同）──────────────────────────────────────────
     kg_filter = "" if db_name else "{kg_id: $kg_id}"
 
     if use_ft and seed_result.records:
         seed_ids = [r["e"].element_id for r in seed_result.records]
-        bfs_params: dict = {"seed_ids": seed_ids, "limit": limit}
+        bfs_params: dict = {"seed_ids": seed_ids, "limit": limit, "min_conf": min_confidence}
         if not db_name:
             bfs_params["kg_id"] = kg_id_str
         result = await driver.execute_query(
@@ -428,6 +466,7 @@ async def query_svo_facts(
             MATCH path = (seed)-[:{_ALL_REL_PATTERN}*1..{hops}]-(neighbor:Entity {kg_filter})
             UNWIND relationships(path) AS r
             WITH startNode(r) AS s, r, endNode(r) AS o
+            WHERE r.confidence >= $min_conf
             RETURN DISTINCT s.name AS subject, s.type AS subject_type,
                    type(r) AS rel_type, r.verb AS verb,
                    o.name AS object, o.type AS object_type,
@@ -437,12 +476,12 @@ async def query_svo_facts(
             **bfs_params, **db_kw,
         )
     else:
-        # fallback：CONTAINS 全表掃描
         where_clauses = " OR ".join(
             f"toLower(e.name) CONTAINS toLower($term{i})" for i in range(len(terms))
         )
         fallback_params: dict = {f"term{i}": t for i, t in enumerate(terms)}
         fallback_params["limit"] = limit
+        fallback_params["min_conf"] = min_confidence
         if db_name:
             result = await driver.execute_query(
                 f"""
@@ -453,6 +492,7 @@ async def query_svo_facts(
                 MATCH path = (seed)-[:{_ALL_REL_PATTERN}*1..{hops}]-(neighbor:Entity)
                 UNWIND relationships(path) AS r
                 WITH startNode(r) AS s, r, endNode(r) AS o
+                WHERE r.confidence >= $min_conf
                 RETURN DISTINCT s.name AS subject, s.type AS subject_type,
                        type(r) AS rel_type, r.verb AS verb,
                        o.name AS object, o.type AS object_type,
@@ -472,6 +512,7 @@ async def query_svo_facts(
                 MATCH path = (seed)-[:{_ALL_REL_PATTERN}*1..{hops}]-(neighbor:Entity {{kg_id: $kg_id}})
                 UNWIND relationships(path) AS r
                 WITH startNode(r) AS s, r, endNode(r) AS o
+                WHERE r.confidence >= $min_conf
                 RETURN DISTINCT s.name AS subject, s.type AS subject_type,
                        type(r) AS rel_type, r.verb AS verb,
                        o.name AS object, o.type AS object_type,
@@ -499,6 +540,7 @@ async def query_svo_facts(
             seen_docs.add(doc_id)
             source_docs.append(doc_id)
 
+    _bfs_cache[cache_key] = (facts, source_docs, time.time())
     return facts, source_docs
 
 
@@ -732,3 +774,62 @@ async def _clear_kg_entities(kg_id: UUID, db_name: str = "") -> None:
             kg_id=str(kg_id),
         )
     logger.info(f"KG {kg_id} Entity 清除完成（force_rebuild）")
+
+
+async def _clear_kg_relations(kg_id: UUID, db_name: str = "") -> None:
+    """rebuild_relations_only 時只清除關係邊，保留 Entity 節點。"""
+    driver = get_driver()
+    if db_name:
+        await driver.execute_query(
+            f"MATCH ()-[r:{_ALL_REL_PATTERN}]->() DELETE r",
+            database_=db_name,
+        )
+    else:
+        await driver.execute_query(
+            f"MATCH (s:Entity {{kg_id: $kg_id}})-[r:{_ALL_REL_PATTERN}]->() DELETE r",
+            kg_id=str(kg_id),
+        )
+    logger.info(f"KG {kg_id} 關係邊清除完成（rebuild_relations_only）")
+
+
+async def _filter_unprocessed_docs(docs: list) -> list:
+    """增量模式：回傳尚未標記 svo_processed_at 的文件清單。"""
+    if not docs:
+        return []
+    driver = get_driver()
+    result = await driver.execute_query(
+        """
+        UNWIND $ids AS doc_id
+        MATCH (d:Document {id: doc_id})
+        WHERE d.svo_processed_at IS NULL
+        RETURN d.id AS id
+        """,
+        ids=[str(d.id) for d in docs],
+    )
+    unprocessed_ids = {r["id"] for r in result.records}
+    return [d for d in docs if str(d.id) in unprocessed_ids]
+
+
+async def _set_doc_svo_processed(doc_id: UUID) -> None:
+    """文件 SVO 處理完畢後，記錄時間戳以供增量跳過。"""
+    try:
+        await get_driver().execute_query(
+            "MATCH (d:Document {id: $id}) SET d.svo_processed_at = datetime()",
+            id=str(doc_id),
+        )
+    except Exception as e:
+        logger.warning(f"設定 svo_processed_at 失敗：{e}")
+
+
+async def _reset_docs_svo_processed(kg_id: UUID) -> None:
+    """force_rebuild 時清除 KG 下所有文件的 svo_processed_at，讓增量追蹤重置。"""
+    try:
+        await get_driver().execute_query(
+            """
+            MATCH (kg:KnowledgeGraph {id: $kg_id})-[:CONTAINS]->(d:Document)
+            SET d.svo_processed_at = null
+            """,
+            kg_id=str(kg_id),
+        )
+    except Exception as e:
+        logger.warning(f"重置 svo_processed_at 失敗：{e}")

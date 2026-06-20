@@ -61,11 +61,19 @@ async def create_kg(
     db_name = _make_db_name(name)
     try:
         await create_kg_database(db_name)
-        # 建立 Entity 索引於新資料庫
+        # 建立 Entity 索引與全文索引於新資料庫
         await get_driver().execute_query(
             "CREATE INDEX entity_name IF NOT EXISTS FOR (e:Entity) ON (e.name)",
             database_=db_name,
         )
+        try:
+            await get_driver().execute_query(
+                "CREATE FULLTEXT INDEX entity_name_ft IF NOT EXISTS "
+                "FOR (e:Entity) ON EACH [e.name]",
+                database_=db_name,
+            )
+        except Exception as _ft_err:
+            logger.debug(f"KG 全文索引建立跳過：{_ft_err}")
         logger.info(f"KG 資料庫已建立：{db_name}")
     except Exception as e:
         logger.warning(f"Neo4j 資料庫建立失敗（可能非 Enterprise 版）：{e}，改用主資料庫模式")
