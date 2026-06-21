@@ -37,6 +37,12 @@ reingest_ocr_log.txt
 # Claude Code auto-memory
 memory/
 
+# Personal workspace documents (user data, not source code)
+workspace/
+
+# Local KB registry (contains personal KG metadata)
+registry.json
+
 # OS
 .DS_Store
 Thumbs.db
