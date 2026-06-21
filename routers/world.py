@@ -117,6 +117,65 @@ async def provenance_facts(
     return report.to_dict()
 
 
+# ── GET /world/instance ───────────────────────────────────────────────────────
+
+@router.get("/instance", summary="本實例的連線拓樸與子層資訊")
+async def world_instance():
+    """
+    回傳 World Agent 查詢的資料來源拓樸：
+    - 實例識別（instance_id）
+    - Neo4j 連線類型與顯示名稱（本機 / AuraDB / 遠端）
+    - 管道說明（資料如何進入這個 Neo4j）
+    - 唯讀模式（World Agent 永遠只讀）
+    - 雲端同步設定（是否已設定同步目標）
+    - 子層（公開 KG 清單，含實體 / 關係數，不含文件數）
+    """
+    from core.config import settings as _s
+
+    uri = _s.neo4j_uri
+    if "aura" in uri or uri.startswith("neo4j+s://") or uri.startswith("neo4j+ssc://"):
+        neo4j_type = "aura"
+        neo4j_display = "Neo4j AuraDB（雲端）"
+        pipeline = "雲端 AuraDB 直連（唯讀）"
+    elif "localhost" in uri or "127.0.0.1" in uri or uri.startswith("bolt://neo4j"):
+        neo4j_type = "local"
+        neo4j_display = "本機 Neo4j"
+        pipeline = "本地文件建圖 → 本機 Neo4j"
+    else:
+        neo4j_type = "remote"
+        neo4j_display = "遠端 Neo4j"
+        pipeline = f"遠端 Neo4j（{uri.split('@')[-1].split('/')[0]}）"
+
+    sync_enabled = bool(_s.github_registry_url)
+    sync_target = _s.github_registry_url if sync_enabled else None
+
+    kg_repo = KnowledgeGraphRepository(get_driver())
+    public_kgs = [kg for kg in await kg_repo.list_all(include_private=True) if kg.is_public]
+
+    return {
+        "instance_id": _s.instance_id,
+        "neo4j_type": neo4j_type,
+        "neo4j_display": neo4j_display,
+        "pipeline": pipeline,
+        "mode": "read-only",
+        "sync": {
+            "enabled": sync_enabled,
+            "target": sync_target,
+        },
+        "sub_layers": [
+            {
+                "id": str(kg.id),
+                "name": kg.name,
+                "description": kg.description,
+                "entity_count": kg.entity_count,
+                "relation_count": kg.relation_count,
+                "db_name": kg.db_name or "主資料庫",
+            }
+            for kg in public_kgs
+        ],
+    }
+
+
 # ── GET /world/registry ───────────────────────────────────────────────────────
 
 @router.get("/registry", summary="取得本機 KB Registry（供 world-hub 讀取）")
