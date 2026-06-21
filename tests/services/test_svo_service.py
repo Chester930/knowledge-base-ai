@@ -1,0 +1,266 @@
+"""
+svo_service 純函數測試 — Phase 1
+
+不依賴 Neo4j / LLM，只測試：
+- _parse_svo_lines : pipe 分隔格式解析（6/5/3 欄）
+- _parse_svo_json  : JSON 格式解析
+- _filter_hallucinated : 幻覺過濾
+- _build_ft_query  : Lucene OR 查詢字串建構
+- _chunk_text      : 長文切段
+"""
+from __future__ import annotations
+import pytest
+
+from services.svo_service import (
+    _build_ft_query,
+    _chunk_text,
+    _filter_hallucinated,
+    _parse_svo_json,
+    _parse_svo_lines,
+)
+from models.knowledge_graph import SVOTriple
+
+
+# ── _build_ft_query ───────────────────────────────────────────────────────────
+
+class TestBuildFtQuery:
+    def test_single_term(self):
+        result = _build_ft_query(["機器學習"])
+        assert '"機器學習"' in result
+
+    def test_multiple_terms_joined_by_or(self):
+        result = _build_ft_query(["AI", "ML"])
+        assert " OR " in result
+        assert '"AI"' in result
+        assert '"ML"' in result
+
+    def test_special_chars_escaped(self):
+        result = _build_ft_query(["C++", "hello:world"])
+        # colons and plus signs should be escaped
+        assert "+" not in result.replace('"', "").replace("\\+", "")
+        assert ":" not in result.replace('"', "").replace("\\:", "")
+
+    def test_empty_list_gives_empty_string(self):
+        result = _build_ft_query([])
+        assert result == ""
+
+
+# ── _chunk_text ───────────────────────────────────────────────────────────────
+
+class TestChunkText:
+    def test_short_text_not_split(self):
+        text = "短文件不需要分割。"
+        chunks = _chunk_text(text)
+        assert len(chunks) == 1
+        assert chunks[0] == text
+
+    def test_long_text_is_split(self):
+        text = "A" * 5000
+        chunks = _chunk_text(text)
+        assert len(chunks) > 1
+
+    def test_chunks_cover_all_content(self):
+        text = "句子一。" * 1000
+        chunks = _chunk_text(text)
+        # 所有 chunk 合起來長度 >= 原文（有重疊）
+        total = sum(len(c) for c in chunks)
+        assert total >= len(text)
+
+    def test_cuts_at_sentence_boundary(self):
+        sentence = "這是一個句子。" * 300
+        chunks = _chunk_text(sentence)
+        for chunk in chunks[:-1]:
+            assert chunk.endswith("。") or len(chunk) > 1900
+
+
+# ── _parse_svo_lines ─────────────────────────────────────────────────────────
+
+class TestParseSvoLines:
+    def test_six_column_format(self):
+        raw = "強化學習|算法|USES|使用|神經網路|模型"
+        triples = _parse_svo_lines(raw)
+        assert len(triples) == 1
+        t = triples[0]
+        assert t.subject == "強化學習"
+        assert t.subject_type == "算法"
+        assert t.rel_type == "USES"
+        assert t.verb == "使用"
+        assert t.object == "神經網路"
+        assert t.object_type == "模型"
+
+    def test_five_column_format(self):
+        raw = "Python|工具|用於|機器學習|概念"
+        triples = _parse_svo_lines(raw)
+        assert len(triples) == 1
+        t = triples[0]
+        assert t.subject == "Python"
+        assert t.rel_type == "RELATED_TO"
+
+    def test_three_column_format(self):
+        raw = "Docker|容器化|應用程式"
+        triples = _parse_svo_lines(raw)
+        assert len(triples) == 1
+        t = triples[0]
+        assert t.subject == "Docker"
+        assert t.rel_type == "RELATED_TO"
+
+    def test_invalid_rel_type_normalized_to_related_to(self):
+        raw = "A|概念|INVALID_REL|描述|B|概念"
+        triples = _parse_svo_lines(raw)
+        assert triples[0].rel_type == "RELATED_TO"
+
+    def test_invalid_entity_type_normalized_to_other(self):
+        raw = "A|UNKNOWN_TYPE|IS_A|是|B|ANOTHER_INVALID"
+        triples = _parse_svo_lines(raw)
+        assert triples[0].subject_type == "其他"
+        assert triples[0].object_type == "其他"
+
+    def test_subject_too_long_skipped(self):
+        long_subject = "A" * 51
+        raw = f"{long_subject}|概念|IS_A|是|B|概念"
+        triples = _parse_svo_lines(raw)
+        assert len(triples) == 0
+
+    def test_verb_too_long_skipped(self):
+        raw = "A|概念|IS_A|" + "v" * 21 + "|B|概念"
+        triples = _parse_svo_lines(raw)
+        assert len(triples) == 0
+
+    def test_object_too_long_skipped(self):
+        raw = "A|概念|IS_A|是|" + "B" * 51 + "|概念"
+        triples = _parse_svo_lines(raw)
+        assert len(triples) == 0
+
+    def test_duplicate_subject_rel_object_deduplicated(self):
+        raw = "A|概念|IS_A|是|B|概念\nA|概念|IS_A|不同描述|B|概念"
+        triples = _parse_svo_lines(raw)
+        assert len(triples) == 1
+
+    def test_empty_lines_and_comments_skipped(self):
+        raw = "\n# 這是注釋\n\nA|概念|IS_A|是|B|概念"
+        triples = _parse_svo_lines(raw)
+        assert len(triples) == 1
+
+    def test_multiple_valid_triples(self):
+        raw = (
+            "深度學習|算法|USES|使用|GPU|工具\n"
+            "Transformer|模型|DEFINED_AS|定義為|注意力機制|算法\n"
+            "BERT|模型|EXTENDS|延伸|Transformer|模型"
+        )
+        triples = _parse_svo_lines(raw)
+        assert len(triples) == 3
+
+    def test_fullwidth_pipe_separator(self):
+        raw = "A｜概念｜IS_A｜是｜B｜算法"
+        triples = _parse_svo_lines(raw)
+        assert len(triples) == 1
+        assert triples[0].subject == "A"
+
+    def test_all_valid_rel_types_accepted(self):
+        valid_rels = ["IS_A", "PART_OF", "CAUSES", "USES", "REQUIRES",
+                      "IMPLEMENTS", "SIMILAR_TO", "DEFINED_AS", "SOLVES"]
+        for rel in valid_rels:
+            raw = f"A|概念|{rel}|動詞|B|概念"
+            triples = _parse_svo_lines(raw)
+            assert triples[0].rel_type == rel, f"Expected {rel}, got {triples[0].rel_type}"
+
+
+# ── _parse_svo_json ───────────────────────────────────────────────────────────
+
+class TestParseSvoJson:
+    def _item(self, **kwargs):
+        base = {"s": "主詞", "st": "概念", "r": "IS_A", "v": "是", "o": "受詞", "ot": "概念"}
+        base.update(kwargs)
+        return base
+
+    def test_valid_item_parsed(self):
+        items = [self._item()]
+        triples = _parse_svo_json(items)
+        assert len(triples) == 1
+        assert triples[0].subject == "主詞"
+
+    def test_missing_subject_skipped(self):
+        triples = _parse_svo_json([self._item(s="")])
+        assert len(triples) == 0
+
+    def test_missing_verb_skipped(self):
+        triples = _parse_svo_json([self._item(v="")])
+        assert len(triples) == 0
+
+    def test_missing_object_skipped(self):
+        triples = _parse_svo_json([self._item(o="")])
+        assert len(triples) == 0
+
+    def test_invalid_rel_type_normalized(self):
+        triples = _parse_svo_json([self._item(r="BOGUS_REL")])
+        assert triples[0].rel_type == "RELATED_TO"
+
+    def test_invalid_entity_type_normalized(self):
+        triples = _parse_svo_json([self._item(st="INVALID", ot="ALSO_INVALID")])
+        assert triples[0].subject_type == "其他"
+        assert triples[0].object_type == "其他"
+
+    def test_long_subject_skipped(self):
+        triples = _parse_svo_json([self._item(s="X" * 51)])
+        assert len(triples) == 0
+
+    def test_duplicate_s_r_o_deduplicated(self):
+        item = self._item()
+        triples = _parse_svo_json([item, item])
+        assert len(triples) == 1
+
+    def test_non_dict_items_skipped(self):
+        triples = _parse_svo_json(["not a dict", 42, None, self._item()])
+        assert len(triples) == 1
+
+    def test_multiple_valid_items(self):
+        items = [
+            self._item(s="A", o="B"),
+            self._item(s="C", o="D"),
+            self._item(s="E", o="F"),
+        ]
+        triples = _parse_svo_json(items)
+        assert len(triples) == 3
+
+
+# ── _filter_hallucinated ──────────────────────────────────────────────────────
+
+def _triple(s: str, o: str) -> SVOTriple:
+    return SVOTriple(subject=s, subject_type="概念", rel_type="IS_A", verb="是",
+                     object=o, object_type="概念")
+
+
+class TestFilterHallucinated:
+    def test_both_in_source_kept(self):
+        t = _triple("深度學習", "神經網路")
+        result = _filter_hallucinated([t], "深度學習是一種神經網路技術")
+        assert len(result) == 1
+
+    def test_subject_in_source_kept(self):
+        t = _triple("深度學習", "幻覺受詞ZZZZ")
+        result = _filter_hallucinated([t], "深度學習是重要技術")
+        assert len(result) == 1
+
+    def test_object_in_source_kept(self):
+        t = _triple("幻覺主詞ZZZZ", "神經網路")
+        result = _filter_hallucinated([t], "使用神經網路")
+        assert len(result) == 1
+
+    def test_neither_in_source_filtered(self):
+        t = _triple("完全幻覺A", "完全幻覺B")
+        result = _filter_hallucinated([t], "毫不相關的文字")
+        assert len(result) == 0
+
+    def test_case_insensitive_match(self):
+        t = _triple("Python", "Library")
+        result = _filter_hallucinated([t], "python library is great")
+        assert len(result) == 1
+
+    def test_empty_triples_returns_empty(self):
+        result = _filter_hallucinated([], "any text")
+        assert result == []
+
+    def test_empty_source_filters_all(self):
+        t = _triple("A", "B")
+        result = _filter_hallucinated([t], "")
+        assert len(result) == 0

@@ -190,7 +190,7 @@ async def query_shards_parallel(
     limit_per_shard: int = 30,
     timeout: float = SHARD_TIMEOUT,
     expand_synonyms: bool = True,
-) -> tuple[list[str], list[str], list[ShardResult]]:
+) -> tuple[list[str], list[str], list[ShardResult], list]:
     """
     並行查詢所有分片，回傳：
     - merged_facts   : 去重後的知識事實清單（遠端事實帶 instance 前綴）
@@ -200,7 +200,7 @@ async def query_shards_parallel(
     expand_synonyms=True（Phase 2d）：查詢前自動展開同義詞（zh↔en 術語對照）。
     """
     if not skills or not terms:
-        return [], [], []
+        return [], [], [], []
 
     if expand_synonyms:
         from services.entity_alignment import expand_terms

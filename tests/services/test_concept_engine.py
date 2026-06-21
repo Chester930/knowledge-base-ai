@@ -133,20 +133,16 @@ class TestComputeMatchScore:
 
 # ── extract_concepts ────────────────────────────────────────────────────────
 
-class TestExtractConcepts:
-    def _make_http_mock(self, response_text: str):
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_response.json.return_value = {"response": response_text}
-        mock_client = AsyncMock()
-        mock_client.post.return_value = mock_response
-        return mock_client
+def _mock_llm(response_text: str):
+    """回傳 mock LLM provider，generate() 回傳指定文字。"""
+    provider = MagicMock()
+    provider.generate = AsyncMock(return_value=response_text)
+    return provider
 
+
+class TestExtractConcepts:
     async def test_parses_newline_separated_concepts(self):
-        mock_client = self._make_http_mock("機器學習\n深度學習\n神經網路")
-        with patch("httpx.AsyncClient") as mock_cls:
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=None)
+        with patch("services.concept_engine.get_llm_provider", return_value=_mock_llm("機器學習\n深度學習\n神經網路")):
             result = await extract_concepts("人工智慧文件")
 
         assert "機器學習" in result
@@ -154,10 +150,7 @@ class TestExtractConcepts:
         assert "神經網路" in result
 
     async def test_empty_lines_are_filtered(self):
-        mock_client = self._make_http_mock("概念A\n\n\n概念B\n")
-        with patch("httpx.AsyncClient") as mock_cls:
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=None)
+        with patch("services.concept_engine.get_llm_provider", return_value=_mock_llm("概念A\n\n\n概念B\n")):
             result = await extract_concepts("text")
 
         assert "" not in result
@@ -165,34 +158,26 @@ class TestExtractConcepts:
 
     async def test_respects_max_concept_count(self):
         many = "\n".join(f"概念{i}" for i in range(20))
-        mock_client = self._make_http_mock(many)
-        with patch("httpx.AsyncClient") as mock_cls:
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=None)
+        with patch("services.concept_engine.get_llm_provider", return_value=_mock_llm(many)):
             result = await extract_concepts("text")
 
         assert len(result) <= 8  # concept_extraction_max default
 
-    async def test_http_error_returns_empty_list(self):
-        mock_client = AsyncMock()
-        mock_client.post.side_effect = Exception("連線失敗")
-        with patch("httpx.AsyncClient") as mock_cls:
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=None)
+    async def test_llm_error_returns_empty_list(self):
+        provider = MagicMock()
+        provider.generate = AsyncMock(side_effect=Exception("LLM 連線失敗"))
+        with patch("services.concept_engine.get_llm_provider", return_value=provider):
             result = await extract_concepts("text")
 
         assert result == []
 
     async def test_text_truncated_to_3000_chars(self):
-        # The 3001st character onward is a unique marker — should not appear in the prompt
         long_text = "a" * 3000 + "TRUNCATION_SENTINEL_XYZ" + "b" * 1000
-        mock_client = self._make_http_mock("概念A")
-        with patch("httpx.AsyncClient") as mock_cls:
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=None)
+        provider = _mock_llm("概念A")
+        with patch("services.concept_engine.get_llm_provider", return_value=provider):
             await extract_concepts(long_text)
 
-        sent_prompt = mock_client.post.call_args[1]["json"]["prompt"]
+        sent_prompt = provider.generate.call_args[0][0]
         assert "TRUNCATION_SENTINEL_XYZ" not in sent_prompt
 
 
@@ -200,10 +185,10 @@ class TestExtractConcepts:
 
 class TestBuildQueryConcepts:
     async def test_returns_list_of_dicts_with_required_keys(self):
-        mock_svc = MagicMock()
-        mock_svc.encode.return_value = [0.1] * 384
+        mock_emb = MagicMock()
+        mock_emb.encode.return_value = [0.1] * 384
 
-        with patch("services.concept_engine.get_embedding_service", return_value=mock_svc), \
+        with patch("services.concept_engine.get_embedding_provider", return_value=mock_emb), \
              patch("services.concept_engine.extract_concepts", new=AsyncMock(return_value=["概念A", "概念B"])):
             result = await build_query_concepts("test query")
 
@@ -215,13 +200,12 @@ class TestBuildQueryConcepts:
             assert "professional_score" in item
 
     async def test_fallback_when_no_concepts_extracted(self):
-        mock_svc = MagicMock()
-        mock_svc.encode.return_value = [0.1] * 384
+        mock_emb = MagicMock()
+        mock_emb.encode.return_value = [0.1] * 384
 
-        with patch("services.concept_engine.get_embedding_service", return_value=mock_svc), \
+        with patch("services.concept_engine.get_embedding_provider", return_value=mock_emb), \
              patch("services.concept_engine.extract_concepts", new=AsyncMock(return_value=[])):
             result = await build_query_concepts("fallback text")
 
-        # Should fall back to using the raw text
         assert len(result) == 1
         assert result[0]["name"] == "fallback text"[:50]

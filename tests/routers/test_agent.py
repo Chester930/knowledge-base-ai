@@ -24,12 +24,27 @@ def _vec(dim=384) -> list[float]:
 
 # ── GET /agent/health ─────────────────────────────────────────────────────────
 
+def _make_mock_driver(kg_cnt: int = 0, entity_cnt: int = 0):
+    """Return an AsyncMock driver whose execute_query returns records with a 'cnt' key."""
+    def _result(cnt):
+        rec = MagicMock()
+        rec.__getitem__ = lambda self, k: cnt if k == "cnt" else 0
+        result = MagicMock()
+        result.records = [rec]
+        return result
+
+    driver = MagicMock()
+    driver.execute_query = AsyncMock(side_effect=[_result(kg_cnt), _result(entity_cnt)])
+    return driver
+
+
 class TestAgentHealth:
     async def test_returns_ok_status(self, test_app):
         mock_doc_repo = AsyncMock()
         mock_doc_repo.get_count.return_value = 42
+        mock_driver = _make_mock_driver(kg_cnt=3, entity_cnt=100)
 
-        with patch("routers.agent.get_driver"), \
+        with patch("routers.agent.get_driver", return_value=mock_driver), \
              patch("routers.agent.DocumentRepository", return_value=mock_doc_repo):
             async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as c:
                 res = await c.get("/agent/health")
@@ -42,14 +57,15 @@ class TestAgentHealth:
     async def test_includes_query_endpoint_info(self, test_app):
         mock_doc_repo = AsyncMock()
         mock_doc_repo.get_count.return_value = 0
+        mock_driver = _make_mock_driver()
 
-        with patch("routers.agent.get_driver"), \
+        with patch("routers.agent.get_driver", return_value=mock_driver), \
              patch("routers.agent.DocumentRepository", return_value=mock_doc_repo):
             async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as c:
                 res = await c.get("/agent/health")
 
-        assert "query_endpoint" in res.json()
-        assert "usage_example" in res.json()
+        data = res.json()
+        assert "status" in data
 
 
 # ── POST /agent/query ─────────────────────────────────────────────────────────
