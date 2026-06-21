@@ -224,14 +224,14 @@ class TestSyncAllSubscriptions:
         sub = _make_sub(status="active")
         mgr._subs = [sub]
 
-        async def _slow(*a, **kw):
-            await asyncio.sleep(100)
+        async def _timeout_wait_for(coro, timeout=None):
+            coro.close()  # 關閉 coroutine 避免 never-awaited warning
+            raise asyncio.TimeoutError()
 
         with patch("services.subscription_service.SubscriptionManager.get", return_value=mgr), \
-             patch("services.subscription_service.sync_subscription", new=_slow), \
+             patch("services.subscription_service.sync_subscription", new=AsyncMock()), \
              patch.object(mgr, "set_status", new=AsyncMock()), \
-             patch("services.subscription_service.asyncio.wait_for",
-                   new=AsyncMock(side_effect=asyncio.TimeoutError())):
+             patch("services.subscription_service.asyncio.wait_for", new=_timeout_wait_for):
             result = await sync_all_subscriptions()
 
         assert len(result) == 1
