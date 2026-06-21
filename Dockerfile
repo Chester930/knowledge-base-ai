@@ -2,9 +2,13 @@ FROM python:3.13-slim
 
 WORKDIR /app
 
-# 系統依賴（sentence-transformers 需要 libgomp）
+# 系統依賴
+# libgomp1: sentence-transformers
+# libgl1 + libglib2.0-0: PaddleOCR / OpenCV
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libgomp1 \
+        libgl1 \
+        libglib2.0-0 \
         wget \
     && rm -rf /var/lib/apt/lists/*
 

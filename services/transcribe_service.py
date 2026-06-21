@@ -216,10 +216,11 @@ _ocr_reader = None
 def _get_ocr_reader():
     global _ocr_reader
     if _ocr_reader is None:
-        import easyocr
-        logger.info("初始化 OCR 引擎（繁中 + 英文）…")
-        _ocr_reader = easyocr.Reader(["ch_tra", "en"], gpu=True, verbose=False)
-        logger.info("OCR 引擎載入完成")
+        from paddleocr import PaddleOCR
+        logger.info("初始化 PaddleOCR（中文 + 英文）…")
+        # lang='ch' 支援繁/簡中文與英文；show_log=False 抑制冗長輸出
+        _ocr_reader = PaddleOCR(use_angle_cls=True, lang="ch", show_log=False, use_gpu=True)
+        logger.info("PaddleOCR 載入完成（GPU）")
     return _ocr_reader
 
 
@@ -231,13 +232,22 @@ def _ocr_pdf(path: Path) -> str:
     doc = fitz.open(str(path))
     parts: list[str] = []
     for i, page in enumerate(doc, 1):
+        # 2x 縮放提升 OCR 準確度
         mat = fitz.Matrix(2.0, 2.0)
         pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
         img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, 3)
-        results = reader.readtext(img, detail=0, paragraph=True)
-        page_text = "\n".join(r for r in results if r.strip())
-        if page_text:
-            parts.append(f"[第 {i} 頁]\n{page_text}")
+
+        result = reader.ocr(img, cls=True)
+        page_lines: list[str] = []
+        if result and result[0]:
+            for line in result[0]:
+                if line and len(line) >= 2:
+                    text, _conf = line[1]
+                    if text.strip():
+                        page_lines.append(text)
+
+        if page_lines:
+            parts.append(f"[第 {i} 頁]\n" + "\n".join(page_lines))
         logger.debug(f"OCR {i}/{len(doc)}: {path.name}")
     doc.close()
     return _sanitize("\n\n".join(parts))
@@ -274,6 +284,56 @@ def _read_pptx(path: Path) -> str:
                         slide_texts.append(row_text)
         if slide_texts:
             parts.append(f"[第 {i} 頁]\n" + "\n".join(slide_texts))
+
+    text = _sanitize("\n\n".join(parts))
+
+    # OCR fallback：圖片型投影片（純圖、無文字框）
+    if len(text.strip()) < 50:
+        try:
+            logger.info(f"啟動 PPTX OCR：{path.name}")
+            ocr_text = _ocr_pptx(path)
+            if len(ocr_text.strip()) > len(text.strip()):
+                text = ocr_text
+                logger.info(f"PPTX OCR 完成：{path.name}，{len(text):,} 字")
+        except Exception as e:
+            logger.warning(f"PPTX OCR 失敗 [{path.name}]: {e}")
+
+    return text
+
+
+def _ocr_pptx(path: Path) -> str:
+    """從 PPTX 圖片形狀提取文字（適用純圖投影片）。"""
+    import io
+    import numpy as np
+    from PIL import Image
+    from pptx import Presentation
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+    reader = _get_ocr_reader()
+    prs = Presentation(str(path))
+    parts: list[str] = []
+
+    for i, slide in enumerate(prs.slides, 1):
+        page_lines: list[str] = []
+        for shape in slide.shapes:
+            if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                try:
+                    img = Image.open(io.BytesIO(shape.image.blob)).convert("RGB")
+                    img_arr = np.array(img)
+                    result = reader.ocr(img_arr, cls=True)
+                    if result and result[0]:
+                        for line in result[0]:
+                            if line and len(line) >= 2:
+                                text, _conf = line[1]
+                                if text.strip():
+                                    page_lines.append(text)
+                except Exception as e:
+                    logger.debug(f"PPTX 形狀 OCR 失敗 [{path.name} p{i}]: {e}")
+
+        if page_lines:
+            parts.append(f"[第 {i} 頁]\n" + "\n".join(page_lines))
+        logger.debug(f"PPTX OCR {i}/{len(prs.slides)}: {path.name}")
+
     return _sanitize("\n\n".join(parts))
 
 
