@@ -56,7 +56,7 @@ def test_app():
     async def noop_lifespan(app):
         yield
 
-    from routers import documents, search, agent, versioning, subscription, knowledge_graph, world, staging
+    from routers import documents, search, agent, versioning, subscription, knowledge_graph, world, staging, transcribe
 
     app = FastAPI(lifespan=noop_lifespan)
     app.include_router(documents.router)
@@ -67,4 +67,5 @@ def test_app():
     app.include_router(knowledge_graph.router)
     app.include_router(world.router)
     app.include_router(staging.router)
+    app.include_router(transcribe.router)
     return app
