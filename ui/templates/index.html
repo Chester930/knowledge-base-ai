@@ -372,6 +372,47 @@ input:checked + .toggle-slider:before { transform:translateX(16px); }
 .graph-controls { position:absolute; top:8px; right:10px; display:flex; gap:4px; }
 .graph-ctrl-btn { background:var(--bg-card); border:1px solid var(--border); border-radius:5px; padding:2px 7px; font-size:0.72rem; cursor:pointer; color:var(--text-muted); transition:all .15s; }
 .graph-ctrl-btn:hover { background:var(--bg-secondary); }
+
+/* ── Phase 3a: Provenance Panel ── */
+.msg-provenance { margin-top:6px; }
+.prov-toggle { display:flex; align-items:center; gap:6px; font-size:0.74rem; color:var(--text-muted); cursor:pointer; padding:3px 0; }
+.prov-toggle:hover { color:#6c5ce7; }
+.prov-list { display:none; margin-top:4px; background:var(--bg-secondary); border-radius:6px; padding:6px 8px; }
+.prov-list.open { display:block; }
+.prov-cite { display:flex; align-items:center; gap:6px; font-size:0.74rem; padding:3px 0; border-bottom:1px solid var(--border-light); }
+.prov-cite:last-child { border:none; }
+.prov-cite-title { flex:1; color:var(--text-primary); }
+.prov-cite-count { font-size:0.68rem; color:#6c5ce7; background:var(--bg-tag); padding:1px 5px; border-radius:8px; }
+.shard-pills { display:flex; flex-wrap:wrap; gap:4px; margin-top:4px; }
+.shard-pill { font-size:0.66rem; padding:1px 7px; border-radius:8px; border:1px solid var(--border); }
+.shard-pill.ok { color:#00b894; border-color:#00b894; }
+.shard-pill.timeout,.shard-pill.offline { color:#d63031; border-color:#d63031; }
+.shard-pill.error { color:#e17055; border-color:#e17055; }
+
+/* ── Phase 3c: Changelog ── */
+.changelog-entry { display:flex; align-items:baseline; gap:6px; font-size:0.76rem; padding:4px 0; border-bottom:1px solid var(--border-light); }
+.changelog-entry:last-child { border:none; }
+.changelog-type { font-size:0.66rem; padding:1px 6px; border-radius:8px; flex-shrink:0; }
+.changelog-type.created { background:#e8f5e9; color:#00b894; }
+.changelog-type.updated { background:#fff3e0; color:#e17055; }
+html.dark .changelog-type.created { background:#1a3a2a; }
+html.dark .changelog-type.updated { background:#3a2a10; }
+.changelog-ts { font-size:0.65rem; color:var(--text-faint); white-space:nowrap; }
+.changelog-fact { flex:1; color:var(--text-primary); }
+
+/* ── Phase 3d: Subscription Management ── */
+.world-sub-panel { flex:1; overflow-y:auto; padding:14px 18px; display:none; }
+.sub-row { display:flex; align-items:center; gap:8px; padding:9px 12px; border:1px solid var(--border); border-radius:8px; margin-bottom:6px; background:var(--bg-card); }
+.sub-row-info { flex:1; min-width:0; }
+.sub-row-name { font-size:0.84rem; font-weight:600; margin-bottom:2px; }
+.sub-row-meta { font-size:0.7rem; color:var(--text-muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.sub-status { font-size:0.68rem; padding:1px 7px; border-radius:8px; border:1px solid; white-space:nowrap; }
+.sub-status.active { color:#00b894; border-color:#00b894; }
+.sub-status.paused { color:var(--text-muted); border-color:var(--border); }
+.sub-status.error { color:#d63031; border-color:#d63031; }
+.sub-add-form { background:var(--bg-secondary); border-radius:10px; border:1px solid var(--border); padding:14px 16px; margin-bottom:14px; }
+.sub-add-form h4 { font-size:0.84rem; font-weight:600; margin-bottom:10px; }
+.sub-form-grid { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-bottom:8px; }
 </style>
 </head>
 <body>
@@ -593,6 +634,7 @@ input:checked + .toggle-slider:before { transform:translateX(16px); }
             <div class="world-sub-tabs">
               <div class="world-sub-tab active" onclick="switchWorldSubTab('chat',this)">💬 世界問答</div>
               <div class="world-sub-tab" onclick="switchWorldSubTab('explore',this)">🔭 實體探索</div>
+              <div class="world-sub-tab" onclick="switchWorldSubTab('subscriptions',this)">📋 訂閱管理</div>
             </div>
             <!-- World Chat -->
             <div id="world-sub-chat" class="world-chat-wrap">
@@ -608,6 +650,27 @@ input:checked + .toggle-slider:before { transform:translateX(16px); }
                 <button class="btn btn-purple" id="world-send-btn" onclick="doWorldChat()">送出</button>
               </div>
             </div>
+            <!-- Subscription Management — Phase 3d -->
+            <div id="world-sub-subscriptions" class="world-sub-panel">
+              <div class="sub-add-form">
+                <h4>➕ 訂閱新知識庫</h4>
+                <div class="sub-form-grid">
+                  <input class="form-input" id="sub-instance-id" placeholder="Instance ID（對方帳號）">
+                  <input class="form-input" id="sub-kb-id" placeholder="KB UUID（遠端 KG ID）">
+                  <input class="form-input" id="sub-kb-name" placeholder="顯示名稱">
+                  <input class="form-input" id="sub-aura-uri" placeholder="AuraDB URI (neo4j+s://…)">
+                  <input class="form-input" id="sub-read-token" placeholder="Read Token（選填）">
+                  <input class="form-input" id="sub-local-kg-id" placeholder="本機 KG ID（選填）">
+                </div>
+                <div style="display:flex;gap:8px">
+                  <button class="btn btn-purple btn-sm" onclick="addSubscription()">訂閱</button>
+                  <button class="btn btn-secondary btn-sm" onclick="syncAllSubscriptions()">🔄 全部同步</button>
+                  <button class="btn btn-secondary btn-sm" onclick="loadSubscriptions()">重新整理</button>
+                </div>
+              </div>
+              <div id="sub-list"><div class="loading"><div class="spinner"></div></div></div>
+            </div>
+
             <!-- Entity Explorer -->
             <div id="world-sub-explore" class="world-explore-panel" style="display:none">
               <div class="world-explore-search">
@@ -1034,6 +1097,15 @@ async function renderKgDetail(id) {
           ${kg.top_concepts.map(c=>`<span class="concept-tag">${esc(c)}</span>`).join('')}
         </div>
       </div>` : ''}
+
+      <div class="kg-section">
+        <h4>版本歷史 <span style="font-weight:400;color:var(--text-muted);font-size:0.72rem">（Phase 3c）</span></h4>
+        <div style="display:flex;gap:8px;margin-bottom:8px">
+          <button class="btn btn-sm btn-secondary" onclick="loadKgChangelog('${id}')">載入近期變更</button>
+          <button class="btn btn-sm btn-secondary" onclick="loadKgDiff('${id}')">今日新增</button>
+        </div>
+        <div id="kg-changelog-${id}"></div>
+      </div>
     `;
     fetch(`${API}/knowledge-graphs/${id}/documents`)
       .then(r => r.json())
@@ -1422,8 +1494,10 @@ document.getElementById('world-chat-input').addEventListener('input', function()
 function switchWorldSubTab(name, el) {
   document.querySelectorAll('.world-sub-tab').forEach(t => t.classList.remove('active'));
   el.classList.add('active');
-  document.getElementById('world-sub-chat').style.display    = name === 'chat'    ? 'flex' : 'none';
-  document.getElementById('world-sub-explore').style.display = name === 'explore' ? 'flex' : 'none';
+  document.getElementById('world-sub-chat').style.display          = name === 'chat'          ? 'flex'  : 'none';
+  document.getElementById('world-sub-explore').style.display       = name === 'explore'       ? 'flex'  : 'none';
+  document.getElementById('world-sub-subscriptions').style.display = name === 'subscriptions' ? 'block' : 'none';
+  if (name === 'subscriptions') loadSubscriptions();
 }
 
 async function loadWorldTab() {
@@ -1485,11 +1559,46 @@ function appendWorldAiMsg() {
         </div>
         <div class="svo-list" id="${uid}-svo-list"></div>
       </div>
+      <div class="msg-shard" id="${uid}-shard" style="display:none"></div>
       <div class="msg-bubble" id="${uid}-bubble"><span class="msg-status">🔍 查詢公開知識庫中…</span><span class="cursor"></span></div>
       <div class="msg-sources" id="${uid}-sources"></div>
+      <div class="msg-provenance" id="${uid}-prov" style="display:none">
+        <div class="prov-toggle" onclick="toggleProv('${uid}')">
+          <span>📎</span><span id="${uid}-prov-label">來源引用</span>
+          <span style="margin-left:auto;font-size:0.7rem" id="${uid}-prov-arrow">▸ 展開</span>
+        </div>
+        <div class="prov-list" id="${uid}-prov-list"></div>
+      </div>
     </div>`;
   h.appendChild(d); h.scrollTop = h.scrollHeight;
   return uid;
+}
+
+function setShardMeta(uid, meta, offline) {
+  const el = document.getElementById(uid + '-shard');
+  if (!el) return;
+  const pills = meta.map(s => `<span class="shard-pill ${s.status}" title="${esc(s.instance_id)}: ${s.facts} facts, ${s.elapsed_ms}ms">${esc(s.name)}</span>`).join('');
+  el.style.display = 'block';
+  el.innerHTML = `<div style="font-size:0.7rem;color:var(--text-muted);margin-bottom:3px">分片查詢 ${meta.length} 個${offline.length ? `，離線 ${offline.length} 個` : ''}：</div><div class="shard-pills">${pills}</div>`;
+}
+
+function setProvenance(uid, citations) {
+  const el = document.getElementById(uid + '-prov');
+  const list = document.getElementById(uid + '-prov-list');
+  const label = document.getElementById(uid + '-prov-label');
+  if (!el || !list || !citations.length) return;
+  label.textContent = `來源引用（${citations.length} 份文件）`;
+  list.innerHTML = citations.map(c =>
+    `<div class="prov-cite"><span class="prov-cite-title">📄 ${esc(c.title || c.doc_id)}</span><span class="prov-cite-count">${c.fact_count} 條事實</span></div>`
+  ).join('');
+  el.style.display = 'block';
+}
+
+function toggleProv(uid) {
+  const list = document.getElementById(uid + '-prov-list');
+  const arrow = document.getElementById(uid + '-prov-arrow');
+  const open = list.classList.toggle('open');
+  if (arrow) arrow.textContent = open ? '▾ 收合' : '▸ 展開';
 }
 
 async function doWorldChat() {
@@ -1541,9 +1650,13 @@ async function doWorldChat() {
         } else if (evt.kg_route) {
           setKgRoute(uid, evt.kg_route);
           bubble.innerHTML = '<span class="msg-status">🧠 提取知識事實…</span><span class="cursor"></span>';
+        } else if (evt.shard_meta) {
+          setShardMeta(uid, evt.shard_meta, evt.shards_offline || []);
         } else if (evt.svo_facts) {
           setSvoFacts(uid, evt.svo_facts);
           bubble.innerHTML = '<span class="msg-status">📄 比對文件…</span><span class="cursor"></span>';
+        } else if (evt.provenance) {
+          setProvenance(uid, evt.provenance);
         } else if (evt.sources) {
           renderSources(uid, evt.sources);
         } else if (evt.status === 'generating') {
@@ -1858,6 +1971,150 @@ function filterExploreByKg(kgId) {
   switchWorldSubTab('explore', document.querySelectorAll('.world-sub-tab')[1]);
   document.getElementById('entity-search-input').value = '';
   exploreEntities('');
+}
+
+// ── Phase 3d: Subscription Management ─────────────────────────────────────────
+
+async function loadSubscriptions() {
+  const el = document.getElementById('sub-list');
+  if (!el) return;
+  el.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
+  try {
+    const res = await fetch(`${API}/world/subscriptions`);
+    const data = await res.json();
+    if (!data.subscriptions.length) {
+      el.innerHTML = '<p style="font-size:0.82rem;color:var(--text-muted);padding:10px 0">尚無訂閱。填寫上方表單訂閱他人的公開 KG。</p>';
+      return;
+    }
+    el.innerHTML = data.subscriptions.map(s => `
+      <div class="sub-row">
+        <div class="sub-row-info">
+          <div class="sub-row-name">${esc(s.kb_name)} <span style="font-size:0.7rem;color:var(--text-muted)">(${esc(s.instance_id)})</span></div>
+          <div class="sub-row-meta">上次同步：${s.last_sync_at ? new Date(s.last_sync_at).toLocaleString() : '從未'}
+            ${s.error_msg ? ` · <span style="color:#d63031">${esc(s.error_msg)}</span>` : ''}
+          </div>
+        </div>
+        <span class="sub-status ${s.status}">${s.status}</span>
+        <button class="btn btn-sm btn-secondary" onclick="syncOneSubscription('${esc(s.kb_id)}')" title="立即同步">🔄</button>
+        <button class="btn btn-sm btn-secondary" onclick="pauseSubscription('${esc(s.kb_id)}', ${s.status !== 'paused'})" title="${s.status === 'paused' ? '恢復' : '暫停'}">${s.status === 'paused' ? '▶' : '⏸'}</button>
+        <button class="btn btn-sm btn-danger" onclick="removeSubscription('${esc(s.kb_id)}')" title="取消訂閱">✕</button>
+      </div>`).join('');
+  } catch(e) {
+    el.innerHTML = `<p style="color:#d63031;font-size:0.82rem">載入失敗：${esc(e.message)}</p>`;
+  }
+}
+
+async function addSubscription() {
+  const body = {
+    instance_id: document.getElementById('sub-instance-id').value.trim(),
+    kb_id:       document.getElementById('sub-kb-id').value.trim(),
+    kb_name:     document.getElementById('sub-kb-name').value.trim(),
+    aura_uri:    document.getElementById('sub-aura-uri').value.trim(),
+    read_token:  document.getElementById('sub-read-token').value.trim(),
+    local_kg_id: document.getElementById('sub-local-kg-id').value.trim(),
+  };
+  if (!body.instance_id || !body.kb_id || !body.kb_name || !body.aura_uri) {
+    toast('請填寫必填欄位（Instance ID / KB UUID / 名稱 / AuraDB URI）','error'); return;
+  }
+  try {
+    const res = await fetch(`${API}/world/subscribe`, {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body),
+    });
+    if (res.status === 409) { toast('已訂閱該 KB','error'); return; }
+    if (!res.ok) throw new Error(await res.text());
+    toast(`已訂閱 ${body.kb_name}`);
+    ['sub-instance-id','sub-kb-id','sub-kb-name','sub-aura-uri','sub-read-token','sub-local-kg-id']
+      .forEach(id => { const el = document.getElementById(id); if(el) el.value=''; });
+    loadSubscriptions();
+  } catch(e) { toast(`訂閱失敗：${e.message}`,'error'); }
+}
+
+async function removeSubscription(kbId) {
+  if (!confirm('確定取消訂閱？')) return;
+  const res = await fetch(`${API}/world/subscribe/${encodeURIComponent(kbId)}`, {method:'DELETE'});
+  res.ok ? (toast('已取消訂閱'), loadSubscriptions()) : toast('取消失敗','error');
+}
+
+async function pauseSubscription(kbId, paused) {
+  const res = await fetch(`${API}/world/subscribe/${encodeURIComponent(kbId)}/pause`, {
+    method:'PATCH', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({paused}),
+  });
+  res.ok ? (toast(paused ? '已暫停' : '已恢復'), loadSubscriptions()) : toast('操作失敗','error');
+}
+
+async function syncOneSubscription(kbId) {
+  toast('同步中…');
+  try {
+    const res = await fetch(`${API}/world/sync-subscriptions/${encodeURIComponent(kbId)}`, {method:'POST'});
+    const data = await res.json();
+    data.error ? toast(`同步失敗：${data.error}`,'error') : toast(`同步完成，合併 ${data.merged} 條關係`);
+    loadSubscriptions();
+  } catch(e) { toast(`連線失敗：${e.message}`,'error'); }
+}
+
+async function syncAllSubscriptions() {
+  toast('同步所有訂閱中…');
+  try {
+    const res = await fetch(`${API}/world/sync-subscriptions`, {method:'POST'});
+    const data = await res.json();
+    toast(`同步完成：${data.synced} 個訂閱，共 ${data.total_merged} 條關係${data.errors ? `，${data.errors} 個錯誤` : ''}`);
+    loadSubscriptions();
+  } catch(e) { toast(`連線失敗：${e.message}`,'error'); }
+}
+
+// ── Phase 3c: KG Changelog ────────────────────────────────────────────────────
+
+async function loadKgDiff(id) {
+  const el = document.getElementById(`kg-changelog-${id}`);
+  if (!el) return;
+  el.innerHTML = '<div class="loading" style="padding:4px 0"><div class="spinner"></div></div>';
+  const since = new Date(Date.now() - 86400000).toISOString().slice(0,19); // 24h ago
+  try {
+    const res = await fetch(`${API}/kg/${id}/diff?since=${since}`);
+    const data = await res.json();
+    if (!data.facts || !data.facts.length) {
+      el.innerHTML = '<p style="font-size:0.78rem;color:var(--text-muted)">過去 24 小時無新增或更新</p>';
+      return;
+    }
+    const summaryHtml = `<div style="font-size:0.74rem;color:var(--text-muted);margin-bottom:6px">新增 ${data.created_count} 條，更新 ${data.updated_count} 條</div>`;
+    el.innerHTML = summaryHtml + data.facts.slice(0,20).map(f => {
+      const ts = f.updated_at || f.created_at || '';
+      const tsShort = ts ? ts.replace('T',' ').slice(0,16) : '';
+      return `<div class="changelog-entry">
+        <span class="changelog-type ${f.change_type}">${f.change_type === 'created' ? '新增' : '更新'}</span>
+        <span class="changelog-fact">${esc(f.subject)} → <em>${esc(f.verb || f.rel_type)}</em> → ${esc(f.object)}</span>
+        <span class="changelog-ts">${tsShort}</span>
+      </div>`;
+    }).join('');
+  } catch(e) {
+    el.innerHTML = `<p style="color:#d63031;font-size:0.78rem">載入失敗：${esc(e.message)}</p>`;
+  }
+}
+
+async function loadKgChangelog(id) {
+  const el = document.getElementById(`kg-changelog-${id}`);
+  if (!el) return;
+  el.innerHTML = '<div class="loading" style="padding:4px 0"><div class="spinner"></div></div>';
+  try {
+    const res = await fetch(`${API}/kg/${id}/changelog?limit=20`);
+    const data = await res.json();
+    if (!data.facts || !data.facts.length) {
+      el.innerHTML = '<p style="font-size:0.78rem;color:var(--text-muted)">尚無變更記錄（可能知識圖譜還未建立）</p>';
+      return;
+    }
+    el.innerHTML = data.facts.map(f => {
+      const ts = f.updated_at || f.created_at || '';
+      const tsShort = ts ? ts.replace('T',' ').slice(0,16) : '';
+      return `<div class="changelog-entry">
+        <span class="changelog-type ${f.change_type}">${f.change_type === 'created' ? '新增' : '更新'}</span>
+        <span class="changelog-fact">${esc(f.subject)} → <em>${esc(f.verb || f.rel_type)}</em> → ${esc(f.object)}</span>
+        <span class="changelog-ts">${tsShort}</span>
+      </div>`;
+    }).join('');
+  } catch(e) {
+    el.innerHTML = `<p style="color:#d63031;font-size:0.78rem">載入失敗：${esc(e.message)}</p>`;
+  }
 }
 
 // ── Init ─────────────────────────────────────────────────────────────────────

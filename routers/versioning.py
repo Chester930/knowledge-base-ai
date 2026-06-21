@@ -28,8 +28,12 @@ _ALL_REL = (
 
 
 async def _get_kg_or_404(kg_id: str):
+    try:
+        uid = UUID(kg_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="kg_id 格式錯誤（需為 UUID）")
     repo = KnowledgeGraphRepository(get_driver())
-    kg = await repo.get_by_id(UUID(kg_id))
+    kg = await repo.get_by_id(uid)
     if not kg:
         raise HTTPException(status_code=404, detail="KG 不存在")
     return kg
