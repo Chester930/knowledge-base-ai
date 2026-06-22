@@ -106,11 +106,24 @@ async def list_documents(kg_id: UUID):
 
 @router.post("/{kg_id}/refresh", status_code=200, summary="刷新 KG 路由層概念")
 async def refresh(kg_id: UUID):
-    """重新聚合 KG 下所有文件的概念，更新路由層 EFFECTIVE 邊。"""
-    repo = KnowledgeGraphRepository(get_driver())
-    if not await repo.get_by_id(kg_id):
+    """重新聚合 KG 下所有文件的概念，更新路由層 EFFECTIVE 邊，並自動同步 registry。"""
+    driver = get_driver()
+    repo = KnowledgeGraphRepository(driver)
+    kg = await repo.get_by_id(kg_id)
+    if kg is None:
         raise HTTPException(status_code=404, detail=f"KG 不存在：{kg_id}")
     await refresh_kg_concepts(kg_id)
+
+    # 若 KG 為公開，自動更新 registry fingerprint
+    if kg.is_public:
+        try:
+            from services.kb_skill_service import generate_skill, upsert_skill
+            skill = await generate_skill(kg_id, driver)
+            upsert_skill(skill)
+            logger.info(f"KG {kg_id} 概念刷新後 registry 已自動更新")
+        except Exception as e:
+            logger.warning(f"registry 自動更新失敗 [{kg_id}]：{e}")
+
     return {"status": "ok", "kg_id": str(kg_id)}
 
 
@@ -156,6 +169,18 @@ async def build_graph(kg_id: UUID, body: BuildGraphRequest = BuildGraphRequest()
                 except Exception as e:
                     logger.warning(f"標籤套用失敗：{e}")
                     yield f"data: {json.dumps({'event': 'labels_error', 'message': str(e)}, ensure_ascii=False)}\n\n"
+
+                # 建圖完成後自動更新 registry（若 KG 為公開）
+                try:
+                    from services.kb_skill_service import generate_skill, upsert_skill
+                    _kg = await KnowledgeGraphRepository(get_driver()).get_by_id(kg_id)
+                    if _kg and _kg.is_public:
+                        skill = await generate_skill(kg_id, get_driver())
+                        upsert_skill(skill)
+                        logger.info(f"build-graph 完成，registry 已自動更新：{kg_id}")
+                        yield f"data: {json.dumps({'event': 'registry_updated', 'kb_id': str(kg_id)}, ensure_ascii=False)}\n\n"
+                except Exception as e:
+                    logger.warning(f"build-graph 後 registry 更新失敗：{e}")
 
     return StreamingResponse(
         event_stream(),
