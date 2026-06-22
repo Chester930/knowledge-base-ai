@@ -1114,68 +1114,121 @@ async function autoClusterPreview() {
   const actions = document.getElementById('cluster-actions');
 
   panel.style.display = 'block';
-  cards.innerHTML = '<div class="loading"><div class="spinner"></div><p>LLM 分析中，請稍候…</p></div>';
+  cards.innerHTML = '<div class="loading"><div class="spinner"></div><p>LLM 分析中，請稍候…（依文件數量約需 10-60 秒）</p></div>';
   status.textContent = '';
   actions.style.display = 'none';
 
   try {
-    const res = await fetch(`${API}/knowledge-graphs/auto-cluster/preview?min_docs=2`);
+    const res = await fetch(`${API}/staging/suggest-kgs`, { method: 'POST' });
     if (!res.ok) {
       const e = await res.json().catch(() => ({}));
       cards.innerHTML = `<p style="color:#e74c3c">${e.detail || '分析失敗'}</p>`;
       return;
     }
-    const data = await res.json();
-    _clusterPlan = data.clusters;
-    status.textContent = `共 ${data.clusters.length} 個群組，${data.total_files} 份文件`;
+    const suggestions = await res.json();
+    _clusterPlan = suggestions.map(s => ({
+      name: s.suggested_name,
+      description: s.suggested_description,
+      files: s.files,
+      top_concepts: s.top_concepts,
+      intra_similarity: s.intra_similarity,
+    }));
 
-    cards.innerHTML = _clusterPlan.map((c, i) => {
-      const total = (c.files||[]).length + (c.doc_ids||[]).length;
-      const allKeys = [...(c.files||[]), ...(c.doc_ids||[])];
-      return `
+    if (!_clusterPlan.length) {
+      cards.innerHTML = '<p style="color:#636e72;font-size:0.85rem">沒有找到明顯關聯的文件群組。可能所有文件都已可分配到現有 KG，或暫存區文件不足。</p>';
+      return;
+    }
+
+    const totalFiles = [...new Set(_clusterPlan.flatMap(c => c.files))].length;
+    status.textContent = `找到 ${_clusterPlan.length} 個群組，涵蓋 ${totalFiles} 份文件`;
+
+    cards.innerHTML = _clusterPlan.map((c, i) => `
       <div style="background:#fff;border:1px solid #dfe6e9;border-radius:8px;padding:12px">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
           <input value="${esc(c.name)}" oninput="_clusterPlan[${i}].name=this.value"
             style="font-weight:700;font-size:0.9rem;border:1px solid #dfe6e9;border-radius:5px;padding:3px 7px;flex:1">
-          <span style="font-size:0.75rem;color:#636e72">${total} 份文件</span>
+          <span style="font-size:0.72rem;color:#6c5ce7;background:#f0eeff;padding:2px 8px;border-radius:8px">
+            相似度 ${Math.round(c.intra_similarity * 100)}%
+          </span>
+          <span style="font-size:0.75rem;color:#636e72">${c.files.length} 份文件</span>
+          <button class="btn btn-sm btn-secondary" onclick="_rejectCluster(${i})" title="排除此群組">✕</button>
         </div>
         <input value="${esc(c.description)}" oninput="_clusterPlan[${i}].description=this.value"
-          style="font-size:0.78rem;color:#636e72;border:1px solid #eee;border-radius:5px;padding:2px 7px;width:100%;margin-bottom:6px">
+          style="font-size:0.78rem;color:#636e72;border:1px solid #eee;border-radius:5px;padding:2px 7px;width:100%;margin-bottom:8px">
+        <div style="font-size:0.7rem;color:#b2bec3;margin-bottom:4px">關鍵概念：${c.top_concepts.slice(0,8).map(t => esc(t)).join('、')}</div>
         <div style="display:flex;flex-wrap:wrap;gap:4px">
-          ${allKeys.map(k => `<span style="background:#f0f0f0;border-radius:4px;padding:2px 7px;font-size:0.74rem" title="${esc(k)}">${esc(k.length > 30 ? k.slice(0,30)+'…' : k)}</span>`).join('')}
+          ${c.files.map(k => `<span style="background:#f0f0f0;border-radius:4px;padding:2px 7px;font-size:0.74rem" title="${esc(k)}">${esc(k.length > 35 ? k.slice(0,35)+'…' : k)}</span>`).join('')}
         </div>
-      </div>`;
-    }).join('');
+      </div>`).join('');
+
     actions.style.display = 'flex';
   } catch (err) {
     cards.innerHTML = `<p style="color:#e74c3c">錯誤：${err.message}</p>`;
   }
 }
 
+function _rejectCluster(idx) {
+  _clusterPlan.splice(idx, 1);
+  // re-render by re-triggering preview with cached plan
+  const cards = document.getElementById('cluster-cards');
+  const status = document.getElementById('cluster-status');
+  const actions = document.getElementById('cluster-actions');
+  if (!_clusterPlan.length) {
+    cards.innerHTML = '<p style="color:#636e72;font-size:0.85rem">所有建議已排除。</p>';
+    actions.style.display = 'none';
+    return;
+  }
+  const totalFiles = [...new Set(_clusterPlan.flatMap(c => c.files))].length;
+  status.textContent = `${_clusterPlan.length} 個群組，${totalFiles} 份文件`;
+  cards.innerHTML = _clusterPlan.map((c, i) => `
+    <div style="background:#fff;border:1px solid #dfe6e9;border-radius:8px;padding:12px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+        <input value="${esc(c.name)}" oninput="_clusterPlan[${i}].name=this.value"
+          style="font-weight:700;font-size:0.9rem;border:1px solid #dfe6e9;border-radius:5px;padding:3px 7px;flex:1">
+        <span style="font-size:0.72rem;color:#6c5ce7;background:#f0eeff;padding:2px 8px;border-radius:8px">
+          相似度 ${Math.round(c.intra_similarity * 100)}%
+        </span>
+        <span style="font-size:0.75rem;color:#636e72">${c.files.length} 份文件</span>
+        <button class="btn btn-sm btn-secondary" onclick="_rejectCluster(${i})" title="排除此群組">✕</button>
+      </div>
+      <input value="${esc(c.description)}" oninput="_clusterPlan[${i}].description=this.value"
+        style="font-size:0.78rem;color:#636e72;border:1px solid #eee;border-radius:5px;padding:2px 7px;width:100%;margin-bottom:8px">
+      <div style="font-size:0.7rem;color:#b2bec3;margin-bottom:4px">關鍵概念：${c.top_concepts.slice(0,8).map(t => esc(t)).join('、')}</div>
+      <div style="display:flex;flex-wrap:wrap;gap:4px">
+        ${c.files.map(k => `<span style="background:#f0f0f0;border-radius:4px;padding:2px 7px;font-size:0.74rem" title="${esc(k)}">${esc(k.length > 35 ? k.slice(0,35)+'…' : k)}</span>`).join('')}
+      </div>
+    </div>`).join('');
+}
+
 async function confirmAutoCluster() {
+  if (!_clusterPlan.length) return;
   const actions = document.getElementById('cluster-actions');
   const status = document.getElementById('cluster-status');
   actions.style.display = 'none';
   status.textContent = '建立中…';
 
-  const res = await fetch(`${API}/knowledge-graphs/auto-cluster/confirm`, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(_clusterPlan),
-  });
-
-  if (res.ok) {
-    const data = await res.json();
-    toast(`✅ 已建立 ${data.created} 個 KG`);
-    closeClusterPanel();
-    loadStaging(); loadSidebar();
-    switchTab('kg');
-  } else {
-    const e = await res.json().catch(() => ({}));
-    status.textContent = '建立失敗';
-    toast(e.detail || '建立失敗', 'error');
-    actions.style.display = 'flex';
+  let created = 0, failed = 0;
+  for (const c of _clusterPlan) {
+    try {
+      const res = await fetch(`${API}/staging/approve-suggestion`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          suggested_name: c.name,
+          suggested_description: c.description,
+          files: c.files,
+        }),
+      });
+      if (res.ok) created++;
+      else failed++;
+    } catch { failed++; }
   }
+
+  if (created) toast(`✅ 已建立 ${created} 個新 KG${failed ? `，${failed} 個失敗` : ''}`);
+  else toast('建立失敗', 'error');
+  closeClusterPanel();
+  loadStaging(); loadSidebar();
+  if (created) switchTab('kg');
 }
 
 function closeClusterPanel() {

@@ -75,6 +75,22 @@ class MoveDocumentRequest(BaseModel):
     move_file: bool = True
 
 
+# ── Staging 分群建議 ──────────────────────────────────────────────────────────
+
+class ClusterSuggestion(BaseModel):
+    suggested_name: str
+    suggested_description: str
+    files: list[str]
+    top_concepts: list[str]
+    intra_similarity: float
+
+
+class ApproveSuggestionRequest(BaseModel):
+    suggested_name: str
+    suggested_description: str = ""
+    files: list[str]
+
+
 # ── SVO 知識層 ────────────────────────────────────────────────────────────────
 
 class SVOTriple(BaseModel):
