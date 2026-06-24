@@ -15,11 +15,15 @@ class OllamaLLMProvider(LLMProvider):
         self.base_url = base_url.rstrip("/")
         self.model = model
 
+    # RAG prompt 通常 8000-20000 字元，需要足夠的 context window
+    _NUM_CTX = 8192
+
     async def generate(self, prompt: str) -> str:
         async with httpx.AsyncClient(timeout=120.0) as client:
             res = await client.post(
                 f"{self.base_url}/api/generate",
-                json={"model": self.model, "prompt": prompt, "stream": False},
+                json={"model": self.model, "prompt": prompt, "stream": False,
+                      "options": {"num_ctx": self._NUM_CTX}},
             )
             res.raise_for_status()
             return res.json().get("response", "")
@@ -29,7 +33,8 @@ class OllamaLLMProvider(LLMProvider):
         async with httpx.AsyncClient(timeout=120.0) as client:
             res = await client.post(
                 f"{self.base_url}/api/generate",
-                json={"model": self.model, "prompt": prompt, "stream": False, "format": "json"},
+                json={"model": self.model, "prompt": prompt, "stream": False,
+                      "format": "json", "options": {"num_ctx": self._NUM_CTX}},
             )
             res.raise_for_status()
             return res.json().get("response", "")
@@ -39,7 +44,8 @@ class OllamaLLMProvider(LLMProvider):
             async with client.stream(
                 "POST",
                 f"{self.base_url}/api/generate",
-                json={"model": self.model, "prompt": prompt, "stream": True},
+                json={"model": self.model, "prompt": prompt, "stream": True,
+                      "options": {"num_ctx": self._NUM_CTX}},
             ) as r:
                 async for line in r.aiter_lines():
                     if not line:
