@@ -270,7 +270,7 @@ Neo4j 邊上已有 `created_at`，Phase 3c 補充：
 >
 > 📋 **[意願調查表單 — 連結待補]**
 
-或直接在 GitHub 開 Issue 留言：[github.com/Chester930/knowledge-base-ai/issues](https://github.com/Chester930/knowledge-base-ai/issues)
+或直接在 GitHub 開 Issue 留言。
 
 ---
 

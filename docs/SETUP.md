@@ -16,7 +16,7 @@
 ### 1. 下載專案
 
 ```bash
-git clone https://github.com/Chester930/knowledge-base-ai.git
+git clone <your-repo-url>
 cd knowledge-base-ai
 ```
 
@@ -87,7 +87,7 @@ docker exec -it kg-api bash
 ### 1. 下載專案
 
 ```bash
-git clone https://github.com/Chester930/knowledge-base-ai.git
+git clone <your-repo-url>
 cd knowledge-base-ai
 ```
 
