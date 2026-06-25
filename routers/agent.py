@@ -33,6 +33,7 @@ _CONFIDENCE_THRESHOLD = 0.65  # 達到此信心值即停止精煉
 _MAX_REFINE_ROUNDS = 3        # 最多補充幾輪
 _CHUNKS_PER_ROUND = 3         # 每輪補充的 chunk 數
 _CONFIDENCE_RE = re.compile(r'\{"confidence":\s*([\d.]+)[^}]*\}\s*$', re.DOTALL)
+_NO_INFO_RE = re.compile(r"知識庫目前無此資訊|找不到相關|無法回答|沒有相關資訊", re.IGNORECASE)
 
 
 def _cosine(v1: list[float], v2: list[float]) -> float:
@@ -197,17 +198,28 @@ def _sse(payload: dict) -> str:
 def _extract_confidence(text: str) -> tuple[str, float]:
     """
     從 LLM 輸出末尾剝離 {"confidence": x} JSON，
-    回傳 (乾淨答案文字, 信心分數)。
-    若未找到，預設信心 0.5。
+    回傳 (乾淨答案文字, 校準後信心分數)。
+    校準（☆9）：無資訊答案強制下調；全域係數再縮放。
     """
     m = _CONFIDENCE_RE.search(text)
     if m:
         try:
             conf = float(m.group(1))
-            return text[:m.start()].rstrip(), max(0.0, min(1.0, conf))
+            clean = text[:m.start()].rstrip()
         except ValueError:
-            pass
-    return text, 0.5
+            clean, conf = text, 0.5
+    else:
+        clean, conf = text, 0.5
+
+    # 若答案明確表示無資訊，強制下調信心（避免 LLM 自報高分但實際無答）
+    if _NO_INFO_RE.search(clean):
+        conf = min(conf, 0.35)
+
+    # 全域校準係數（預設 0.9，讓模型稍微保守）
+    from core.config import settings
+    conf *= settings.confidence_calibration
+
+    return clean, max(0.0, min(1.0, conf))
 
 
 _TRIPLE_RE = __import__("re").compile(
@@ -508,8 +520,14 @@ async def chat(req: ChatRequest):
                         history=req.history,
                     )
                     try:
-                        raw = await llm.generate(prompt)
+                        # ☆3：改用 stream() 收集，讓前端即時看到精煉中間結果
+                        raw_parts: list[str] = []
+                        async for tok in llm.stream(prompt):
+                            raw_parts.append(tok)
+                        raw = "".join(raw_parts)
                         clean, confidence = _extract_confidence(raw)
+                        # 送出本輪的預覽答案（信心 JSON 已剝離）
+                        yield _sse({"refine_preview": {"round": round_num + 1, "answer": clean}})
                     except Exception as e:
                         logger.warning(f"精煉 round {round_num} 失敗：{e}")
                         break

@@ -3,6 +3,7 @@ import asyncio
 import logging
 import re
 import time
+import unicodedata as _unicodedata
 from dataclasses import dataclass, field
 from typing import AsyncIterator
 from uuid import UUID, uuid4
@@ -285,6 +286,12 @@ async def extract_svo_from_text(text: str) -> list[SVOTriple]:
     return _filter_hallucinated(triples, text)
 
 
+def _normalize_entity(name: str) -> str:
+    """正規化實體名稱（☆8）：NFKC + 去頭尾空白 + 合併連續空格，減少同義實體碎片。"""
+    name = _unicodedata.normalize("NFKC", name).strip()
+    return re.sub(r"\s+", " ", name)
+
+
 async def merge_triples_to_neo4j(
     triples: list[SVOTriple],
     kg_id: UUID,
@@ -311,9 +318,9 @@ async def merge_triples_to_neo4j(
     groups: dict[str, list[dict]] = defaultdict(list)
     for t in triples:
         groups[t.rel_type].append({
-            "subject": t.subject,
+            "subject": _normalize_entity(t.subject),
             "s_type":  t.subject_type,
-            "object":  t.object,
+            "object":  _normalize_entity(t.object),
             "o_type":  t.object_type,
             "verb":    t.verb,
             "s_id":    str(uuid4()),

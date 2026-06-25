@@ -20,11 +20,13 @@ from routers.agent import _build_rag_prompt, _extract_confidence, _ENUM_RE
 # ══════════════════════════════════════════════════════════════════════════════
 
 class TestExtractConfidence:
+    # ☆9 校準係數（對應 settings.confidence_calibration 預設值 0.9）
+    _CAL = 0.9
 
     def test_standard_format_extracted(self):
         text = '這是答案正文。\n{"confidence": 0.85}'
         clean, conf = _extract_confidence(text)
-        assert conf == pytest.approx(0.85)
+        assert conf == pytest.approx(0.85 * self._CAL)
         assert "confidence" not in clean
 
     def test_clean_text_trailing_whitespace_stripped(self):
@@ -36,56 +38,60 @@ class TestExtractConfidence:
         text = "答案文字，沒有附加信心 JSON。"
         clean, conf = _extract_confidence(text)
         assert clean == text
-        assert conf == pytest.approx(0.5)
+        assert conf == pytest.approx(0.5 * self._CAL)
 
     def test_confidence_1_0(self):
         _, conf = _extract_confidence('答案。\n{"confidence": 1.0}')
-        assert conf == pytest.approx(1.0)
+        assert conf == pytest.approx(1.0 * self._CAL)
 
     def test_confidence_0_0(self):
         _, conf = _extract_confidence('答案。\n{"confidence": 0.0}')
         assert conf == pytest.approx(0.0)
 
     def test_confidence_clamped_above_1(self):
+        # 1.5 * 0.9 = 1.35，夾緊後 → 1.0
         _, conf = _extract_confidence('答案。\n{"confidence": 1.5}')
         assert conf == pytest.approx(1.0)
 
     def test_confidence_negative_unmatched_returns_default(self):
         # regex [\d.]+ 不匹配負號，負值視為格式非法 → 回傳預設 0.5
         _, conf = _extract_confidence('答案。\n{"confidence": -0.3}')
-        assert conf == pytest.approx(0.5)
+        assert conf == pytest.approx(0.5 * self._CAL)
 
     def test_confidence_with_extra_fields(self):
-        # JSON 中有額外欄位時應仍能解析
         _, conf = _extract_confidence('答案。\n{"confidence": 0.72, "note": "partial"}')
-        assert conf == pytest.approx(0.72)
+        assert conf == pytest.approx(0.72 * self._CAL)
 
     def test_confidence_in_middle_of_text_not_extracted(self):
-        # 信心 JSON 必須在尾端（regex 用 $ 錨定）
         text = '{"confidence": 0.9} 這是正文，不在尾端。'
         clean, conf = _extract_confidence(text)
-        assert conf == pytest.approx(0.5)
-        assert clean == text  # 原文未被截斷
+        assert conf == pytest.approx(0.5 * self._CAL)
+        assert clean == text
 
     def test_empty_string_returns_default(self):
         clean, conf = _extract_confidence("")
         assert clean == ""
-        assert conf == pytest.approx(0.5)
+        assert conf == pytest.approx(0.5 * self._CAL)
 
     def test_only_confidence_json(self):
         clean, conf = _extract_confidence('{"confidence": 0.60}')
-        assert conf == pytest.approx(0.60)
+        assert conf == pytest.approx(0.60 * self._CAL)
         assert clean == ""
 
     def test_malformed_json_returns_default(self):
         text = '答案。\n{"confidence": not_a_number}'
         clean, conf = _extract_confidence(text)
-        # 解析失敗 → 預設 0.5，原文不修改
-        assert conf == pytest.approx(0.5)
+        assert conf == pytest.approx(0.5 * self._CAL)
 
     def test_confidence_with_spaces_around_colon(self):
         _, conf = _extract_confidence('答案。\n{"confidence":   0.88}')
-        assert conf == pytest.approx(0.88)
+        assert conf == pytest.approx(0.88 * self._CAL)
+
+    def test_no_info_answer_caps_confidence(self):
+        # 「知識庫目前無此資訊」→ 強制 ≤ 0.35，再乘校準係數
+        text = '知識庫目前無此資訊。\n{"confidence": 0.9}'
+        _, conf = _extract_confidence(text)
+        assert conf == pytest.approx(0.35 * self._CAL)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

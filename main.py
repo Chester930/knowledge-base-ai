@@ -13,6 +13,7 @@ from core.providers.factory import init_providers
 from repositories.concept_repo import ConceptRepository
 from routers import documents, search, agent, transcribe, knowledge_graph, staging, world
 from routers import versioning, subscription
+from services.classify_service import classify_all
 from services.federation_service import startup_prefetch, shutdown_cleanup
 from services.file_watcher_service import start_watcher, stop_watcher
 from services.svo_service import create_entity_index
@@ -44,6 +45,25 @@ async def lifespan(app: FastAPI):
         replace_existing=True,
         misfire_grace_time=300,
     )
+    # ☆7：暫存區自動分類 Cron（staging_cron_interval > 0 才啟用）
+    if settings.staging_cron_interval > 0:
+        async def _staging_auto_classify():
+            try:
+                from core.constants import CLASSIFY_AUTO_THRESHOLD
+                results = await classify_all(threshold=CLASSIFY_AUTO_THRESHOLD, auto_assign=True)
+                if results:
+                    logger.info(f"[StagingCron] 自動分配 {len(results)} 份暫存文件")
+            except Exception as e:
+                logger.warning(f"[StagingCron] 例外：{e}")
+        _scheduler.add_job(
+            _staging_auto_classify,
+            trigger="interval",
+            minutes=settings.staging_cron_interval,
+            id="staging_auto_classify",
+            replace_existing=True,
+            misfire_grace_time=60,
+        )
+        logger.info(f"[StagingCron] 自動分類排程已啟動（每 {settings.staging_cron_interval} 分鐘）")
     _scheduler.start()
     logger.info(
         f"智慧知識庫 API 啟動完成 "

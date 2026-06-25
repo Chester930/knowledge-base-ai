@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     workspace_dir: str = "./workspace"
     chunk_store_dir: str = "./chunk_store"
 
+    # ── 優化參數 ───────────────────────────────────────────────────────────────
+    confidence_calibration: float = 0.9   # LLM 信心校準係數（< 1.0 讓模型更保守）
+    staging_cron_interval: int = 0        # 暫存區自動分類間隔（分鐘，0 = 停用）
+
     # ── 聯邦識別 ───────────────────────────────────────────────────────────────
     instance_id: str = "local"          # 用於 KB Skill 描述檔的 instance 命名空間
     registry_path: str = "./registry.json"   # 本機 registry 路徑

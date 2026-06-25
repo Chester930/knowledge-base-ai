@@ -766,6 +766,10 @@ async function doChat() {
           bubble.innerHTML = '<span class="msg-status">📄 比對相關文件…</span><span class="cursor"></span>';
         } else if (evt.sources) {
           renderSources(uid, evt.sources);
+        } else if (evt.refine_preview) {
+          // ☆3：精煉中間預覽
+          bubble.innerHTML = `<span style="opacity:0.65;font-style:italic">${esc(evt.refine_preview.answer)}</span><span class="cursor"></span>`;
+          document.getElementById('chat-history').scrollTop = 999999;
         } else if (evt.refine) {
           addRefineNote(uid, evt.refine);
           const pct = Math.round(evt.refine.confidence_before * 100);
