@@ -100,17 +100,26 @@ class ChunkStore:
 
     # ── 寫入 ──────────────────────────────────────────────────────────────────
 
-    async def write(self, kg_id: UUID, doc_id: UUID, chunks: list[SentenceChunk]) -> None:
+    async def write(
+        self,
+        kg_id: UUID,
+        doc_id: UUID,
+        chunks: list[SentenceChunk],
+        vectors: list[list[float]] | None = None,
+    ) -> None:
+        """
+        持久化 SentenceChunk 列表。
+        vectors: 與 chunks 等長的 embedding 向量列表（☆6 優化）；None 則不儲存向量。
+        """
         kg_str = str(kg_id)
         doc_str = str(doc_id)
         chunk_dir = self._base / kg_str / doc_str
         chunk_dir.mkdir(parents=True, exist_ok=True)
 
-        # 清除舊 chunk 檔，確保重建時不殘留過期資料
         for old in chunk_dir.glob("chunk_*.json"):
             old.unlink(missing_ok=True)
 
-        for sc in chunks:
+        for i, sc in enumerate(chunks):
             data = {
                 "chunk_id": sc.chunk_id,
                 "idx": sc.idx,
@@ -120,6 +129,7 @@ class ChunkStore:
                 "text": sc.text,
                 "char_start": sc.char_start,
                 "char_end": sc.char_end,
+                "vector": vectors[i] if vectors and i < len(vectors) else None,
             }
             self._chunk_path(kg_str, doc_str, sc.idx).write_text(
                 json.dumps(data, ensure_ascii=False), encoding="utf-8"
@@ -128,7 +138,7 @@ class ChunkStore:
         self._docs_dir.mkdir(parents=True, exist_ok=True)
         self._doc_ref_path(doc_str).write_text(kg_str, encoding="utf-8")
 
-        logger.debug(f"ChunkStore: 已儲存 {len(chunks)} 個 chunks（doc={doc_str}）")
+        logger.debug(f"ChunkStore: 已儲存 {len(chunks)} 個 chunks（doc={doc_str}, vectors={'有' if vectors else '無'}）")
 
     # ── 讀取 ──────────────────────────────────────────────────────────────────
 
@@ -171,6 +181,33 @@ class ChunkStore:
             *[loop.run_in_executor(None, self.read, cid) for cid in chunk_ids]
         )
         return [r for r in results if r is not None]
+
+    async def read_ranked(
+        self, chunk_ids: list[str], query_vector: list[float]
+    ) -> list[dict]:
+        """
+        讀取 chunks 並依 cosine 相似度排序（☆6 優化）。
+        有向量的 chunk 按語意相似度排前面；無向量的 chunk 排後面保底。
+        """
+        chunks = await self.read_many(chunk_ids)
+        if not chunks or not query_vector:
+            return chunks
+
+        def _cos(v1: list[float], v2: list[float]) -> float:
+            dot = sum(a * b for a, b in zip(v1, v2))
+            n1 = sum(a * a for a in v1) ** 0.5
+            n2 = sum(b * b for b in v2) ** 0.5
+            if n1 < 1e-9 or n2 < 1e-9:
+                return 0.0
+            return dot / (n1 * n2)
+
+        scored = []
+        for c in chunks:
+            vec = c.get("vector")
+            score = _cos(vec, query_vector) if vec else -1.0
+            scored.append((score, c))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [c for _, c in scored]
 
     # ── 刪除 ──────────────────────────────────────────────────────────────────
 

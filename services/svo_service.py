@@ -100,8 +100,19 @@ async def build_graph_for_kg(
         sent_chunks = sentence_chunk(str(_doc_id), text)
         total_chunks = len(sent_chunks)
 
-        # 持久化 Chunk 檔案（Phase 2）
-        await chunk_store.write(kg_id, _doc_id, sent_chunks)
+        # 持久化 Chunk 檔案，同時計算並儲存 embedding 向量（☆6 優化）
+        try:
+            from core.providers.factory import get_embedding_provider
+            _emb = get_embedding_provider()
+            _texts = [c.text for c in sent_chunks]
+            if hasattr(_emb, "encode_batch"):
+                _vectors = _emb.encode_batch(_texts)
+            else:
+                _vectors = [_emb.encode(t) for t in _texts]
+        except Exception as _e:
+            logger.warning(f"Chunk 向量計算失敗，略過持久化向量：{_e}")
+            _vectors = None
+        await chunk_store.write(kg_id, _doc_id, sent_chunks, vectors=_vectors)
 
         yield BuildProgress(
             event="chunk_start",

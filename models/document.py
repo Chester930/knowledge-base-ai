@@ -63,10 +63,16 @@ class AgentQueryResponse(BaseModel):
     sources: list[str]
 
 
+class ChatMessage(BaseModel):
+    role: str    # "user" | "assistant"
+    content: str
+
+
 class ChatRequest(BaseModel):
     question: str
     top_k: int = Field(default=5, ge=1, le=10)
     max_chars_per_doc: int = Field(default=8000, ge=500, le=12000)
     owner_id: str = "default"
-    use_svo: bool = True          # False 可停用 SVO 知識層（純文件 RAG）
+    use_svo: bool = True
     svo_hops: int = Field(default=2, ge=1, le=3)
+    history: list[ChatMessage] | None = None  # 多輪對話歷史（☆10）

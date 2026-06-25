@@ -11,7 +11,7 @@ from core.constants import KG_ROUTE_THRESHOLD, MAX_KG_PER_QUERY
 from core.database import get_driver
 from core.config import settings
 from core.providers.factory import get_llm_provider, get_embedding_provider
-from models.document import AgentQueryRequest, AgentQueryResponse, AgentContext, ChatRequest
+from models.document import AgentQueryRequest, AgentQueryResponse, AgentContext, ChatMessage, ChatRequest
 from repositories.concept_repo import ConceptRepository
 from repositories.document_repo import DocumentRepository
 from repositories.knowledge_graph_repo import KnowledgeGraphRepository
@@ -259,16 +259,29 @@ def _svo_to_sentences(facts: list[str]) -> str:
     return "\n".join(sentences)
 
 
+_HISTORY_TURNS = 4  # 納入 prompt 的最近對話輪數
+
+
 def _build_rag_prompt(
     question: str,
     svo_facts: list[str],
     contexts: list[dict],
     extra_chunks: list[str] | None = None,
+    history: list[ChatMessage] | None = None,
 ) -> str:
     import unicodedata as _ud
     svo_facts = [_ud.normalize("NFKC", f) for f in svo_facts]
 
     parts: list[str] = ["你是知識庫問答助手，請用繁體中文回答。\n\n"]
+
+    # 多輪對話歷史（☆10）：最近 N 輪，避免 context 過長
+    if history:
+        recent = history[-_HISTORY_TURNS * 2:]  # 每輪2條（user+assistant）
+        parts.append("=== 對話歷史（供理解追問用）===\n")
+        for msg in recent:
+            role = "使用者" if msg.role == "user" else "助手"
+            parts.append(f"{role}：{msg.content}\n\n")
+        parts.append("=== 以上為歷史對話 ===\n\n")
 
     if contexts:
         graph_docs = [c for c in contexts if c.get("source") == "graph"]
@@ -492,6 +505,7 @@ async def chat(req: ChatRequest):
                     prompt = _build_rag_prompt(
                         req.question, svo_facts, contexts,
                         extra_chunks if extra_chunks else None,
+                        history=req.history,
                     )
                     try:
                         raw = await llm.generate(prompt)
@@ -505,16 +519,20 @@ async def chat(req: ChatRequest):
                         logger.info(f"精煉 round {round_num}：信心={confidence:.2f} ≥ 門檻，停止")
                         break
 
-                    # 信心不足 → 取下一批 chunk
-                    next_ids = [c for c in svo_chunk_ids if c not in used_cids][:_CHUNKS_PER_ROUND]
-                    if not next_ids:
+                    # 信心不足 → 依語意相似度選下一批 chunk（☆6 優化）
+                    remaining_ids = [c for c in svo_chunk_ids if c not in used_cids]
+                    if not remaining_ids:
                         final_answer = clean
                         logger.info(f"精煉 round {round_num}：無更多 chunk 可補充，停止")
                         break
 
-                    chunks_data = await chunk_store.read_many(next_ids)
-                    extra_chunks.extend(c["text"] for c in chunks_data)
+                    q_vec = query_concepts[0]["q_vector"] if query_concepts else []
+                    ranked_chunks = await chunk_store.read_ranked(remaining_ids, q_vec)
+                    top_chunks = ranked_chunks[:_CHUNKS_PER_ROUND]
+                    next_ids = [c["chunk_id"] for c in top_chunks]
+                    extra_chunks.extend(c["text"] for c in top_chunks)
                     used_cids.update(next_ids)
+                    chunks_data = top_chunks
                     logger.info(
                         f"精煉 round {round_num+1}：信心={confidence:.2f}，"
                         f"補充 {len(chunks_data)} 個 chunk"
@@ -538,6 +556,7 @@ async def chat(req: ChatRequest):
                 prompt = _build_rag_prompt(
                     req.question, svo_facts, contexts,
                     extra_chunks if extra_chunks else None,
+                    history=req.history,
                 )
                 async for token in llm.stream(prompt):
                     yield _sse({"token": token})

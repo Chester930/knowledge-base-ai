@@ -393,6 +393,7 @@ html.dark .changelog-type.updated { background:#3a2a10; }
             <input type="hidden" id="chat-svo" value="true">
           </div>
           <button class="chat-send-btn" id="chat-send-btn" onclick="doChat()">送出</button>
+          <button class="chat-send-btn" id="chat-new-btn" onclick="newConversation()" title="清除歷史，開始新對話" style="background:var(--bg-secondary);color:var(--text-secondary);border:1px solid var(--border)">新對話</button>
         </div>
       </div>
     </div>
@@ -601,6 +602,7 @@ function switchTab(name) {
 // CHAT
 // ══════════════════════════════════
 let isChatStreaming = false;
+let chatHistory = [];  // 多輪對話歷史（☆10）
 
 document.getElementById('chat-input').addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doChat(); }
@@ -733,7 +735,7 @@ async function doChat() {
     const res = await fetch(`${API}/agent/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question, top_k: topK, max_chars_per_doc: maxChars, use_svo: useSvo }),
+      body: JSON.stringify({ question, top_k: topK, max_chars_per_doc: maxChars, use_svo: useSvo, history: chatHistory.length ? chatHistory : null }),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
@@ -786,6 +788,13 @@ async function doChat() {
       }
     }
     bubble.textContent = fullText || bubble.textContent;
+    // 記錄本輪到對話歷史
+    if (fullText) {
+      chatHistory.push({ role: 'user', content: question });
+      chatHistory.push({ role: 'assistant', content: fullText });
+      if (chatHistory.length > 16) chatHistory = chatHistory.slice(-16); // 最多 8 輪
+      document.getElementById('chat-new-btn').title = `新對話（目前 ${chatHistory.length / 2} 輪歷史）`;
+    }
   } catch (e) {
     bubble.innerHTML = `<span style="color:#d63031">❌ 連線失敗：${esc(e.message)}</span>`;
   } finally {
@@ -793,6 +802,13 @@ async function doChat() {
     document.getElementById('chat-send-btn').disabled = false;
     document.getElementById('chat-history').scrollTop = 999999;
   }
+}
+
+function newConversation() {
+  chatHistory = [];
+  const hist = document.getElementById('chat-history');
+  hist.innerHTML = `<div class="chat-welcome"><div class="chat-welcome-icon">💬</div><h3>知識圖譜問答</h3><p>向我提問，我會路由到相關知識圖譜，從 SVO 知識事實與文件中整合回答。</p></div>`;
+  document.getElementById('chat-new-btn').title = '新對話';
 }
 
 // ══════════════════════════════════
