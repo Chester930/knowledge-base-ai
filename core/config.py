@@ -5,7 +5,7 @@ class Settings(BaseSettings):
     # ── Neo4j ──────────────────────────────────────────────────────────────────
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_user: str = "neo4j"
-    neo4j_password: str = "knowledge123"
+    neo4j_password: str = ""
 
     # ── Provider 選擇 ──────────────────────────────────────────────────────────
     llm_provider: str = "ollama"        # ollama | openai | anthropic | gemini | grok
@@ -42,7 +42,6 @@ class Settings(BaseSettings):
     # ── 系統行為 ───────────────────────────────────────────────────────────────
     concept_extraction_max: int = 8
     score_threshold: float = 0.70
-    docs_dir: str = "./docs"
     workspace_dir: str = "./workspace"
     chunk_store_dir: str = "./chunk_store"
 
