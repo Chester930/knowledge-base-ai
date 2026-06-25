@@ -1,78 +1,70 @@
 # 智慧知識庫
 
-基於本體論的多資料庫知識圖譜系統，以 FastAPI + Neo4j + Ollama 構建，支援文件匯入、SVO 知識抽取、雙層路由 RAG 問答。
+多場景知識圖譜 RAG 系統。將文件轉化為結構化 SVO 知識圖譜，透過雙層路由（ConceptNode + BFS 圖遍歷）提供精準問答，支援自我精煉迴圈與多 LLM Provider。
 
-## 架構概覽
+## 核心特性
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                     neo4j（主資料庫）                     │
-│  KnowledgeGraph 節點  ←→  Document 節點                  │
-│  ConceptNode 路由層（帶 embedding 向量）                  │
-└──────────────────────┬──────────────────────────────────┘
-                       │ db_name
-          ┌────────────┼────────────┐
-          ▼            ▼            ▼
-   kgxxxxxx01    kgxxxxxx02    kgxxxxxx03     （Neo4j Enterprise 專用 DB）
-   Entity 節點   Entity 節點   Entity 節點
-   RELATION 邊   RELATION 邊   RELATION 邊
-   （SVO 知識層）
-```
+| 特性 | 說明 |
+|------|------|
+| **多場景 KG** | 每個知識圖譜獨立管理，Neo4j Enterprise 下各有專屬資料庫 |
+| **30 種語意關係** | SVO 三元組以精確語意類型儲存（IS_A / CAUSES / USES…），非模糊向量 |
+| **雙層 RAG 路由** | ConceptNode embedding 路由 → BFS 圖遍歷 → 圖譜驅動文件選取 |
+| **自我精煉迴圈** | 低信心時自動補充原文 chunk，最多 3 輪，停止門檻 0.65 |
+| **Sentence-Aware Chunking** | 按句子邊界切分並持久化，SVO 節點記錄來源 chunk 座標 |
+| **多 Provider** | Ollama / OpenAI / Anthropic / Gemini / Grok，本地雲端自由切換 |
+| **自動分群建 KG** | LLM 分析暫存區文件，自動命名分群，確認後一鍵建立並觸發建圖 |
+| **PDF OCR 三層備援** | pypdf → pdfminer → EasyOCR（繁中+英），無損轉換掃描版 PDF |
 
-### 雙層路由問答流程
+## 系統架構
 
 ```
 使用者問題
   │
   ▼
-[路由層] ConceptNode embedding 比對 → 選出最相關 KG
+[E1] 問題概念提取（LLM + embedding，LRU 快取）
   │
   ▼
-[SVO 知識層] BFS 圖遍歷 → 取出結構化知識事實 + 來源文件 ID
+[E2] KG 路由（ConceptNode cosine × alignment × magnitude 加權分）
   │
   ▼
-[文件層] 依圖譜指向取出原文片段（圖譜驅動，非相似度搜尋）
+[E3] BFS 圖遍歷（多 KG 並行，in-memory TTL=300s 快取）
+  │   facts / source_doc_ids / chunk_ids
+  ▼
+[E4] 混合文件檢索
+  ├── Graph-Driven：SVO 指向文件 → _pick_relevant_chunks()
+  │     batch_embed + keyword boost + SVO entity boost + enum bonus
+  └── Similarity Fallback：concept match 補充
   │
   ▼
-RAG Prompt → LLM → 串流回答
+[E5] 自我精煉迴圈（max 3 rounds，ChunkStore 補充原文）
+  │
+  ▼
+[E6] LLM 串流輸出（SSE token stream）
 ```
 
-## 知識圖譜本體論結構
+### Neo4j 資料庫分層
 
-每條關係邊直接以語意類型作為 Neo4j relationship type（30 種）：
+```
+主資料庫
+├── KnowledgeGraph 節點（KG 元資料）
+├── Document 節點（文件元資料）
+└── ConceptNode 路由層（帶 embedding 向量）
 
-| 群組 | 類型 |
-|------|------|
-| 層級/組成 | `IS_A` `PART_OF` `CONTAINS` `INSTANCE_OF` |
-| 因果/效應 | `CAUSES` `PREVENTS` `ENABLES` `IMPROVES` `INHIBITS` |
-| 功能/操作 | `USES` `REQUIRES` `PRODUCES` `IMPLEMENTS` `REPLACES` `EXTENDS` |
-| 比較 | `CONTRASTS` `SIMILAR_TO` `OUTPERFORMS` |
-| 描述/定義 | `DEFINED_AS` `HAS_PROPERTY` `MEASURED_BY` `APPLIES_TO` |
-| 時序 | `PRECEDES` `FOLLOWS` `CO_OCCURS` |
-| 資料流 | `INPUTS` `TRANSFORMS` |
-| 歸屬/解決 | `CREATED_BY` `SOLVES` |
-| 其他 | `RELATED_TO`（最後手段，目標使用率 < 5%）|
-
-## 功能
-
-- **文件匯入**：PDF / DOCX / PPTX / TXT / MD，支援資料夾批次匯入
-- **OCR 轉譯**：上傳原始檔至暫存區，LLM 轉為純文字
-- **自動分群建立 KG**：LLM 分析暫存區文件，自動命名並分群（可預覽編輯後確認）
-- **手動分配**：暫存區文件逐篇分類，或批次自動分配
-- **SVO 知識抽取**：6 欄本體論格式抽取，跨文章相同實體自動融合
-- **多資料庫隔離**：每個 KG 使用獨立 Neo4j 資料庫（Enterprise 功能），Community 版自動 fallback
-- **雙層 RAG 問答**：ConceptNode 路由 + SVO 圖遍歷 + 圖譜驅動文件選取
-- **知識圖譜視覺化**：Entity 節點 + RELATION 邊，含實體類型與語意分類 badge
+每 KG 獨立資料庫（Enterprise）/ 主庫 kg_id 屬性區隔（Community）
+└── Entity 節點 + 30 種語意關係邊（SVO 知識層）
+```
 
 ## 技術棧
 
-| 元件 | 版本 / 說明 |
-|------|------------|
-| FastAPI | 後端 API，SSE 串流 |
-| Neo4j | 主資料庫 + 每 KG 獨立資料庫（Enterprise）；Community 版自動 fallback |
-| LLM | Ollama（本地）/ OpenAI / Anthropic / Google Gemini / xAI Grok |
-| Embedding | sentence-transformers（本地）/ OpenAI / Ollama |
-| Vanilla JS | 前端單頁應用，無框架依賴 |
+| 元件 | 說明 |
+|------|------|
+| FastAPI >= 0.115 | 後端 API，SSE 串流 |
+| Neo4j Driver >= 5.24 | 主資料庫 + 每 KG 獨立資料庫（Enterprise） |
+| sentence-transformers >= 3.0 | 本地 embedding（無需 API 金鑰） |
+| Ollama / OpenAI / Anthropic / Gemini / Grok | 可選 LLM |
+| EasyOCR / PaddleOCR | PDF OCR 備援 |
+| faster-whisper | 音影片轉譯 |
+| Vanilla JS | 前端，無框架依賴 |
 
 ## 快速啟動
 
@@ -80,128 +72,165 @@ RAG Prompt → LLM → 串流回答
 
 ```bash
 cp .env.example .env
-# 編輯 .env，填入 Neo4j 連線資訊與 LLM 設定
+# 編輯 .env，至少填入：
+# NEO4J_URI / NEO4J_USER / NEO4J_PASSWORD
+# LLM_PROVIDER + 對應金鑰或 OLLAMA_BASE_URL
 ```
 
-`.env` 必要設定（完整範本見 `.env.example`）：
+最小設定範例（Ollama 本地）：
 
 ```env
 NEO4J_URI=bolt://localhost:7687
 NEO4J_USER=neo4j
 NEO4J_PASSWORD=your_password
 
-LLM_PROVIDER=ollama          # ollama | openai | anthropic | gemini | grok
+LLM_PROVIDER=ollama
 OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_LLM_MODEL=qwen2.5:7b
 
-EMBEDDING_PROVIDER=local     # local | openai | ollama
+EMBEDDING_PROVIDER=local
 ```
 
-### 2. 安裝相依套件
+詳細 Provider 設定見 [`.env.example`](.env.example) 與 [`docs/PROVIDERS.md`](docs/PROVIDERS.md)。
+
+### 2. 安裝套件
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. 啟動 Neo4j
+### 3. 啟動
 
-**方法 A：Docker（推薦）**
+**Docker（推薦）**
 
 ```bash
-docker compose up -d
-# API 啟動後開啟 http://localhost:8000
+docker compose up -d --build
+# API：http://localhost:8000
+# Neo4j Browser：http://localhost:7474
 ```
 
-**方法 B：本地 + Neo4j Desktop**
+**本地開發**
 
-1. Neo4j Desktop → 啟動 DBMS（確認 Bolt port 與 .env 一致）
+1. 啟動 Neo4j Desktop（確認 Bolt port 與 `.env` 一致）
 2. 啟動 API：
 
 ```bash
 python -m uvicorn main:app --reload --port 8000
 ```
 
-開啟瀏覽器：`http://localhost:8000`
-
-> **Windows 一鍵啟動**：`start.ps1`（自動檢查 Docker / Ollama 並啟動服務）
+> **Windows 一鍵啟動**：執行 `./start.ps1`，自動檢查 Docker / Ollama 並啟動服務。
 
 ## 使用流程
 
-### 建立知識圖譜（自動分群）
+### 匯入文件並建立 KG
 
-1. **匯入文件**：「＋新增」→「直接匯入知識庫」，選擇資料夾路徑
-2. **自動分群**：「📥 暫存區」→「🤖 自動分群建立 KG」
-   - LLM 分析文件內容，提出命名方案
-   - 預覽並可編輯 KG 名稱與描述
-   - 確認後一次建立所有 KG
-3. **建立知識圖譜**：「🗂️ 知識圖譜」→ 選 KG →「⚡ 建立知識圖譜」
+1. **直接匯入**：UI →「＋新增」→「直接匯入知識庫」，選擇資料夾
+2. **暫存區 + 自動分群**：
+   - 文件先進暫存區（`workspace/_staging/`）
+   - UI →「📥 暫存區」→「🤖 自動分群建立 KG」
+   - 預覽 LLM 建議的命名與分組，可編輯後確認
+   - 確認後自動建立 KG 並在背景觸發 SVO 知識圖譜建構
+3. **手動建圖**：「🗂️ 知識圖譜」→ 選 KG →「⚡ 建立知識圖譜」
 
 ### 問答
 
-切換到「💬 問答」tab，直接輸入問題。系統會：
-1. 路由到相關 KG
-2. 顯示匹配的知識事實（`[語意類別] 主詞 動詞 受詞`）
-3. 串流回答
+UI →「💬 問答」，直接輸入問題。系統會顯示：
+- 路由到的 KG 清單與匹配分數
+- 匹配的 SVO 知識事實（`[語意類別] 主詞 動詞 受詞`）
+- 自我精煉輪次進度（低信心時）
+- 串流回答
 
-## 資料庫查詢
+### 命令列工具
 
-開啟 Neo4j Browser：`http://localhost:7474`
+```bash
+# 批次匯入文件（繞過 HTTP timeout，適合大量文件）
+python run_ingest.py /path/to/docs
+python run_ingest.py /path/to/docs --kg <kg_id>
 
-```cypher
-// 查所有 KG
-MATCH (kg:KnowledgeGraph) RETURN kg.name, kg.db_name, kg.entity_count
+# 建構 SVO 知識圖譜
+python run_build_kg.py                    # 增量（只處理未建構的文件）
+python run_build_kg.py --force            # 強制重建所有 KG
+python run_build_kg.py --kg <kg_id>       # 只重建指定 KG
 
-// 查某 KG 的 Entity（在對應 db 執行）
-MATCH (e:Entity) RETURN e.name, e.type LIMIT 50
-
-// 查特定語意類型的關係（rel_type 即 Neo4j edge label）
-MATCH (s:Entity)-[r:CAUSES]->(o:Entity)
-RETURN s.name, r.verb, o.name
-
-// IS_A 階層遍歷（1-3 跳）
-MATCH path = (e:Entity)-[:IS_A*1..3]->(root:Entity)
-RETURN path
-
-// 查高信心度的知識事實
-MATCH (s:Entity)-[r]->(o:Entity)
-WHERE r.confidence >= 2
-RETURN s.name, type(r), r.verb, o.name
-ORDER BY r.confidence DESC LIMIT 20
+# 維護工具
+python run_label_kg.py --kg <kg_id>                          # 套用 Entity 語意型別標籤
+python run_reclassify_related_to.py --kg <kg_id> --dry-run   # 預覽邊重分類
+python run_reclassify_related_to.py --kg <kg_id>             # 執行邊重分類
 ```
 
-## 世界知識（World Knowledge）
-
-Phase 1 已支援「公開 KG」機制：
-
-- **KG 管理** tab → 切換公開 / 私有開關
-- **🌐 世界** tab → 橫跨所有公開 KG 的 World Agent 問答
-- **實體探索** → 搜尋實體，點擊展開鄰居關係，遞迴圖探索
-
-Phase 2 計畫將支援跨 instance 的世界知識聯邦（本地維護 + 雲端 Hub 同步）。  
-詳見 [ROADMAP.md](ROADMAP.md)。
-
-## 專案結構
+## 目錄結構
 
 ```
-├── core/               # 設定、資料庫連線、LLM/Embedding providers
-├── models/             # Pydantic 資料模型
-├── repositories/       # Neo4j CRUD 操作
-├── routers/            # FastAPI 路由（agent, knowledge_graph, staging, world, transcribe）
-├── services/           # 業務邏輯
-│   ├── svo_service.py          # SVO 抽取、圖譜建立、BFS 查詢
-│   ├── knowledge_graph_service.py  # KG CRUD、自動分群
-│   ├── classify_service.py     # 暫存區分類與分配
-│   └── concept_engine.py       # ConceptNode 路由層
-└── ui/templates/       # 前端單頁應用（Vanilla JS）
+├── core/
+│   ├── config.py           # 所有 .env 設定（唯一入口）
+│   ├── database.py         # Neo4j AsyncDriver 連線管理
+│   ├── constants.py        # 路由權重、門檻等常數
+│   └── providers/          # LLM / Embedding Provider
+│       ├── factory.py      # init_providers() 工廠
+│       ├── llm/            # ollama, openai, anthropic, gemini, grok
+│       └── embedding/      # local, openai, ollama
+│
+├── models/                 # Pydantic 資料模型
+├── repositories/           # Neo4j CRUD（concept, document, kg）
+├── routers/
+│   ├── agent.py            # POST /agent/chat（SSE 問答，含自我精煉）
+│   ├── knowledge_graph.py  # KG CRUD + build-graph SSE
+│   ├── documents.py        # 文件 CRUD + 批次匯入
+│   ├── staging.py          # 暫存區管理 + 自動分群確認
+│   ├── search.py           # 向量搜尋
+│   └── transcribe.py       # 音影片轉譯
+│
+├── services/
+│   ├── svo_service.py              # SVO 提取、Neo4j MERGE、BFS 查詢
+│   ├── chunk_store.py              # Chunk 持久化（chunk_store/{kg_id}/）
+│   ├── knowledge_graph_service.py  # KG 建立、自動分群
+│   ├── concept_engine.py           # ConceptNode 路由層（含 LRU 快取）
+│   ├── classify_service.py         # 暫存區分類與分配
+│   └── ingestion_service.py        # 文件解析（PDF/DOCX/PPTX/TXT/MD）
+│
+├── ui/templates/index.html # 前端單頁應用（深色模式支援）
+├── tests/                  # pytest 測試套件（455 tests）
+├── docs/                   # 詳細文件
+│
+├── main.py                 # FastAPI 應用進入點
+├── docker-compose.yml      # Neo4j + FastAPI Docker 設定
+├── .env.example            # 環境設定範本
+└── start.ps1               # Windows 一鍵啟動腳本
 ```
 
-## 文件
+## 30 種語意關係類型
+
+| 群組 | 關係類型 |
+|------|---------|
+| 層級 / 組成 | `IS_A` `PART_OF` `CONTAINS` `INSTANCE_OF` |
+| 因果 / 效應 | `CAUSES` `PREVENTS` `ENABLES` `IMPROVES` `INHIBITS` |
+| 功能 / 操作 | `USES` `REQUIRES` `PRODUCES` `IMPLEMENTS` `REPLACES` `EXTENDS` |
+| 比較 | `CONTRASTS` `SIMILAR_TO` `OUTPERFORMS` |
+| 描述 / 定義 | `DEFINED_AS` `HAS_PROPERTY` `MEASURED_BY` `APPLIES_TO` |
+| 時序 | `PRECEDES` `FOLLOWS` `CO_OCCURS` |
+| 資料流 | `INPUTS` `TRANSFORMS` |
+| 歸屬 / 解決 | `CREATED_BY` `SOLVES` |
+| 其他 | `RELATED_TO`（模糊關係，目標使用率 < 5%） |
+
+## 測試
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+## 文件索引
 
 | 文件 | 說明 |
 |------|------|
-| [docs/SETUP.md](docs/SETUP.md) | Docker + 本地安裝指南 |
-| [docs/PROVIDERS.md](docs/PROVIDERS.md) | LLM / Embedding Provider 設定 |
+| [docs/SETUP.md](docs/SETUP.md) | 詳細安裝指南（Docker / 本地 / Windows） |
+| [docs/PROVIDERS.md](docs/PROVIDERS.md) | LLM / Embedding Provider 完整設定 |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 系統架構深度說明 |
 | [docs/API.md](docs/API.md) | REST API 完整參考 |
-| [ROADMAP.md](ROADMAP.md) | 開發路線圖與 Phase 2 計畫 |
+| [docs/behavior_tree.md](docs/behavior_tree.md) | 完整 Behavior Tree 與優化清單 |
+| [ROADMAP.md](ROADMAP.md) | 開發路線圖 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 貢獻指南 |
+
+## 授權
+
+MIT License — 詳見 [LICENSE](LICENSE)

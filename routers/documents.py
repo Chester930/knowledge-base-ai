@@ -27,6 +27,9 @@ async def create_document(data: DocumentCreate, background_tasks: BackgroundTask
     repo = DocumentRepository(get_driver())
     doc = await repo.create(data.title, data.content, data.file_path, data.file_type)
     background_tasks.add_task(extract_and_init_document_concepts, doc.id, data.content)
+    if data.kg_id:
+        from repositories.knowledge_graph_repo import KnowledgeGraphRepository
+        await KnowledgeGraphRepository(get_driver()).add_document(data.kg_id, doc.id)
     return doc
 
 

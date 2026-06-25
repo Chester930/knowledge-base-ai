@@ -10,6 +10,7 @@ class DocumentCreate(BaseModel):
     content: str
     file_path: str | None = None
     file_type: Literal["md", "txt", "pdf", "manual"] = "manual"
+    kg_id: UUID | None = None  # 建立後自動關聯到指定 KG
 
 
 class Document(BaseModel):

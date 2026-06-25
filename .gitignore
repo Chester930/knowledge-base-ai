@@ -40,8 +40,14 @@ memory/
 # Personal workspace documents (user data, not source code)
 workspace/
 
+# Chunk store (runtime data generated from user documents)
+chunk_store/
+
 # Local KB registry (contains personal KG metadata)
 registry.json
+
+# Internal task planning documents
+TASK_*.md
 
 # OS
 .DS_Store

@@ -1,22 +1,22 @@
 """
-svo_service 純函數測試 — Phase 1
+svo_service 純函數測試
 
 不依賴 Neo4j / LLM，只測試：
-- _parse_svo_lines : pipe 分隔格式解析（6/5/3 欄）
-- _parse_svo_json  : JSON 格式解析
-- _filter_hallucinated : 幻覺過濾
-- _build_ft_query  : Lucene OR 查詢字串建構
-- _chunk_text      : 長文切段
+- _parse_svo_lines      : pipe 分隔格式解析（6/5/3 欄）
+- _parse_svo_json       : JSON 格式解析
+- _filter_hallucinated  : 幻覺過濾
+- _build_ft_query       : Lucene OR 查詢字串建構
+- _sentence_chunk       : 句子感知切分（委派至 chunk_store.sentence_chunk）
 """
 from __future__ import annotations
 import pytest
 
 from services.svo_service import (
     _build_ft_query,
-    _chunk_text,
     _filter_hallucinated,
     _parse_svo_json,
     _parse_svo_lines,
+    _sentence_chunk,
 )
 from models.knowledge_graph import SVOTriple
 
@@ -45,32 +45,30 @@ class TestBuildFtQuery:
         assert result == ""
 
 
-# ── _chunk_text ───────────────────────────────────────────────────────────────
+# ── _sentence_chunk（透過 svo_service 入口）──────────────────────────────────
 
-class TestChunkText:
-    def test_short_text_not_split(self):
-        text = "短文件不需要分割。"
-        chunks = _chunk_text(text)
-        assert len(chunks) == 1
-        assert chunks[0] == text
+class TestSentenceChunkViaService:
+    """確認 svo_service._sentence_chunk() 正確委派至 chunk_store.sentence_chunk()。"""
 
-    def test_long_text_is_split(self):
-        text = "A" * 5000
-        chunks = _chunk_text(text)
-        assert len(chunks) > 1
+    DOC_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
-    def test_chunks_cover_all_content(self):
-        text = "句子一。" * 1000
-        chunks = _chunk_text(text)
-        # 所有 chunk 合起來長度 >= 原文（有重疊）
-        total = sum(len(c) for c in chunks)
-        assert total >= len(text)
+    def test_returns_sentence_chunk_objects(self):
+        from services.chunk_store import SentenceChunk
+        chunks = _sentence_chunk(self.DOC_ID, "句子一。句子二！句子三？")
+        assert all(isinstance(c, SentenceChunk) for c in chunks)
 
-    def test_cuts_at_sentence_boundary(self):
-        sentence = "這是一個句子。" * 300
-        chunks = _chunk_text(sentence)
-        for chunk in chunks[:-1]:
-            assert chunk.endswith("。") or len(chunk) > 1900
+    def test_empty_returns_empty(self):
+        assert _sentence_chunk(self.DOC_ID, "") == []
+
+    def test_chunk_id_format(self):
+        chunks = _sentence_chunk(self.DOC_ID, "這是第一句。這是第二句！")
+        assert chunks[0].chunk_id == f"{self.DOC_ID}_0001"
+
+    def test_many_sentences_split_into_multiple_chunks(self):
+        # 11 句 → ceil(11/5) = 3 個 chunk
+        text = "".join(f"第{i}句話很長很長。" for i in range(1, 12))
+        chunks = _sentence_chunk(self.DOC_ID, text)
+        assert len(chunks) == 3
 
 
 # ── _parse_svo_lines ─────────────────────────────────────────────────────────

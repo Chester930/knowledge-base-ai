@@ -141,6 +141,10 @@ html.dark .svo-toggle { color: #4ade80; }
 .msg-row.ai .msg-bubble { background: var(--bg-ai-bubble); border: 1px solid var(--border); border-top-left-radius: 4px; }
 .msg-row.user .msg-bubble { background: #0984e3; color: white; border-top-right-radius: 4px; }
 .msg-status { font-size: 0.76rem; color: var(--text-faint); font-style: italic; }
+.msg-refine { margin-top: 5px; display: flex; flex-direction: column; gap: 3px; }
+.refine-note { font-size: 0.73rem; color: var(--text-muted); padding: 3px 8px 3px 10px; border-left: 2px solid var(--border-routing); border-radius: 0 5px 5px 0; animation: refineIn 0.25s ease; }
+html.dark .refine-note { color: #8892a4; }
+@keyframes refineIn { from { opacity: 0; transform: translateX(-6px); } to { opacity: 1; transform: translateX(0); } }
 .msg-sources { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .source-chip { background: #e8eaf6; color: #5c6bc0; font-size: 0.7rem; padding: 3px 8px; border-radius: 9px; cursor: pointer; transition: all 0.15s; }
 html.dark .source-chip { background: #1e2050; color: #818cf8; }
@@ -635,6 +639,7 @@ function appendAiMsg() {
         <div class="svo-list" id="${uid}-svo-list"></div>
       </div>
       <div class="msg-bubble" id="${uid}-bubble"><span class="msg-status">🔍 搜尋知識庫中…</span><span class="cursor"></span></div>
+      <div class="msg-refine" id="${uid}-refine"></div>
       <div class="msg-sources" id="${uid}-sources"></div>
     </div>`;
   h.appendChild(d); h.scrollTop = h.scrollHeight;
@@ -675,6 +680,30 @@ function renderSources(uid, sources) {
     const pct = Math.round(s.score * 100);
     return `<span class="source-chip" onclick="openDocByTitle('${esc(s.title)}')">${esc(s.title)} <span class="source-score">${pct}%</span></span>`;
   }).join('');
+}
+
+function addRefineNote(uid, refine) {
+  const el = document.getElementById(uid + '-refine');
+  if (!el) return;
+  const pct = Math.round(refine.confidence_before * 100);
+  const note = document.createElement('div');
+  note.className = 'refine-note';
+  note.dataset.round = refine.round;
+  note.textContent = `🔍 第 ${refine.round} 輪補充：信心 ${pct}%，新增 ${refine.chunks_added} 個原文片段`;
+  el.appendChild(note);
+  document.getElementById('chat-history').scrollTop = 999999;
+}
+
+function finalizeRefineNotes(uid) {
+  const el = document.getElementById(uid + '-refine');
+  if (!el || !el.children.length) return;
+  const total = el.children.length;
+  const summary = document.createElement('div');
+  summary.className = 'refine-note';
+  summary.style.opacity = '0.6';
+  summary.style.fontSize = '0.7rem';
+  summary.textContent = `✅ 共精煉 ${total} 輪`;
+  el.appendChild(summary);
 }
 
 async function doChat() {
@@ -735,6 +764,10 @@ async function doChat() {
           bubble.innerHTML = '<span class="msg-status">📄 比對相關文件…</span><span class="cursor"></span>';
         } else if (evt.sources) {
           renderSources(uid, evt.sources);
+        } else if (evt.refine) {
+          addRefineNote(uid, evt.refine);
+          const pct = Math.round(evt.refine.confidence_before * 100);
+          bubble.innerHTML = `<span class="msg-status">📖 補充第 ${evt.refine.round} 輪原文（信心 ${pct}%）…</span><span class="cursor"></span>`;
         } else if (evt.status === 'generating') {
           bubble.innerHTML = '<span class="cursor"></span>';
         } else if (evt.token) {
@@ -746,6 +779,7 @@ async function doChat() {
           document.getElementById('chat-history').scrollTop = 999999;
         } else if (evt.done) {
           bubble.textContent = fullText;
+          finalizeRefineNotes(uid);
         } else if (evt.error) {
           bubble.innerHTML = `<span style="color:#d63031">❌ ${esc(evt.error)}</span>`;
         }

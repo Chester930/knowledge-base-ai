@@ -12,12 +12,12 @@ from core.providers.factory import get_llm_provider
 from models.knowledge_graph import SVOTriple
 from repositories.document_repo import DocumentRepository
 from repositories.knowledge_graph_repo import KnowledgeGraphRepository
+from services.chunk_store import SentenceChunk, get_chunk_store, sentence_chunk
 
 logger = logging.getLogger(__name__)
 
-_CHUNK_SIZE = 2000   # 每段文字上限（字元）
-_CHUNK_OVERLAP = 200 # 段落重疊（避免三元組跨段斷裂）
-_SVO_CONCURRENCY = 2 # 每份文件最大平行 LLM 呼叫數（對應 OLLAMA_NUM_PARALLEL=2）
+_SENTENCES_PER_CHUNK = 5  # 每個 Chunk 的句子數（可調整）
+_SVO_CONCURRENCY = 2      # 每份文件最大平行 LLM 呼叫數（對應 OLLAMA_NUM_PARALLEL=2）
 _BFS_CACHE_TTL = 300 # BFS 查詢快取 TTL（秒）
 _bfs_cache: dict = {} # (kg_id, terms, hops, min_conf) → (facts, docs, ts)
 
@@ -90,46 +90,57 @@ async def build_graph_for_kg(
     sem = asyncio.Semaphore(_SVO_CONCURRENCY)
     total_merged = 0
 
+    chunk_store = get_chunk_store()
+
     for doc in docs:
         text = doc.content or ""
-        chunks = _chunk_text(text)
-        total_chunks = len(chunks)
         _doc_id = doc.id
         _doc_title = doc.title
+
+        sent_chunks = sentence_chunk(str(_doc_id), text)
+        total_chunks = len(sent_chunks)
+
+        # 持久化 Chunk 檔案（Phase 2）
+        await chunk_store.write(kg_id, _doc_id, sent_chunks)
 
         yield BuildProgress(
             event="chunk_start",
             chunk_idx=0, total_chunks=total_chunks,
-            message=f"[{_doc_title}] 並行處理 {total_chunks} 個段落…",
+            message=f"[{_doc_title}] 句子感知切分 {total_chunks} 個 Chunk，開始並行提取…",
         )
 
         _MAX_CHUNK_RETRIES = 2
 
         async def _process_chunk(
-            idx: int, chunk: str,
+            sc: SentenceChunk,
             __doc_id=_doc_id, __doc_title=_doc_title,
         ):
             async with sem:
                 last_err = None
                 for attempt in range(1 + _MAX_CHUNK_RETRIES):
                     try:
-                        triples = await extract_svo_from_text(chunk)
-                        merged = await merge_triples_to_neo4j(triples, kg_id, __doc_id, db_name)
-                        return idx, triples, merged, None
+                        triples = await extract_svo_from_text(sc.text)
+                        merged = await merge_triples_to_neo4j(
+                            triples, kg_id, __doc_id, db_name, chunk_id=sc.chunk_id
+                        )
+                        return sc.idx, triples, merged, None
                     except Exception as e:
                         last_err = e
                         if attempt < _MAX_CHUNK_RETRIES:
-                            wait = 2 ** attempt  # 1s → 2s
+                            wait = 2 ** attempt
                             logger.warning(
-                                f"SVO 提取重試 [{__doc_title} chunk {idx}] "
+                                f"SVO 提取重試 [{__doc_title} chunk {sc.idx}] "
                                 f"第 {attempt + 1} 次（等 {wait}s）：{e}"
                             )
                             await asyncio.sleep(wait)
-                logger.warning(f"SVO 提取失敗 [{__doc_title} chunk {idx}]（已重試 {_MAX_CHUNK_RETRIES} 次）：{last_err}")
-                return idx, [], 0, last_err
+                logger.warning(
+                    f"SVO 提取失敗 [{__doc_title} chunk {sc.idx}]"
+                    f"（已重試 {_MAX_CHUNK_RETRIES} 次）：{last_err}"
+                )
+                return sc.idx, [], 0, last_err
 
         chunk_results = await asyncio.gather(
-            *[_process_chunk(i, c) for i, c in enumerate(chunks, 1)]
+            *[_process_chunk(sc) for sc in sent_chunks]
         )
 
         doc_has_error = False
@@ -268,12 +279,14 @@ async def merge_triples_to_neo4j(
     kg_id: UUID,
     doc_id: UUID,
     db_name: str = "",
+    chunk_id: str = "",
 ) -> int:
     """
     將帶型別的三元組以 rel_type 作為真正的 Neo4j relationship type 寫入。
     每個 rel_type 一批 UNWIND（最多 8 批），確保邊標籤有語意意義。
     db_name 不為空 → 寫入 KG 專用資料庫
     db_name 為空  → 寫入主資料庫並以 kg_id 隔離
+    chunk_id 不為空 → Entity / Relationship 節點追加 source_chunk_ids
     """
     if not triples:
         return 0
@@ -304,18 +317,30 @@ async def merge_triples_to_neo4j(
                     f"""
                     UNWIND $rows AS r
                     MERGE (s:Entity {{name: r.subject}})
-                    ON CREATE SET s.id = r.s_id, s.type = r.s_type, s.created_at = datetime()
-                    ON MATCH SET  s.type = CASE WHEN s.type IS NULL THEN r.s_type ELSE s.type END
+                    ON CREATE SET s.id = r.s_id, s.type = r.s_type, s.created_at = datetime(),
+                                  s.source_chunk_ids = CASE WHEN $chunk_id <> '' THEN [$chunk_id] ELSE [] END
+                    ON MATCH SET  s.type = CASE WHEN s.type IS NULL THEN r.s_type ELSE s.type END,
+                                  s.source_chunk_ids = CASE WHEN $chunk_id <> '' THEN
+                                      [x IN coalesce(s.source_chunk_ids, []) WHERE x <> $chunk_id] + [$chunk_id]
+                                      ELSE coalesce(s.source_chunk_ids, []) END
                     MERGE (o:Entity {{name: r.object}})
-                    ON CREATE SET o.id = r.o_id, o.type = r.o_type, o.created_at = datetime()
-                    ON MATCH SET  o.type = CASE WHEN o.type IS NULL THEN r.o_type ELSE o.type END
+                    ON CREATE SET o.id = r.o_id, o.type = r.o_type, o.created_at = datetime(),
+                                  o.source_chunk_ids = CASE WHEN $chunk_id <> '' THEN [$chunk_id] ELSE [] END
+                    ON MATCH SET  o.type = CASE WHEN o.type IS NULL THEN r.o_type ELSE o.type END,
+                                  o.source_chunk_ids = CASE WHEN $chunk_id <> '' THEN
+                                      [x IN coalesce(o.source_chunk_ids, []) WHERE x <> $chunk_id] + [$chunk_id]
+                                      ELSE coalesce(o.source_chunk_ids, []) END
                     MERGE (s)-[rel:{rel_type} {{source_doc_id: $doc_id}}]->(o)
-                    ON CREATE SET rel.verb = r.verb, rel.confidence = 1, rel.created_at = datetime()
+                    ON CREATE SET rel.verb = r.verb, rel.confidence = 1, rel.created_at = datetime(),
+                                  rel.source_chunk_ids = CASE WHEN $chunk_id <> '' THEN [$chunk_id] ELSE [] END
                     ON MATCH SET  rel.confidence = rel.confidence + 1,
-                                  rel.verb = r.verb, rel.updated_at = datetime()
+                                  rel.verb = r.verb, rel.updated_at = datetime(),
+                                  rel.source_chunk_ids = CASE WHEN $chunk_id <> '' THEN
+                                      [x IN coalesce(rel.source_chunk_ids, []) WHERE x <> $chunk_id] + [$chunk_id]
+                                      ELSE coalesce(rel.source_chunk_ids, []) END
                     RETURN count(rel) AS merged
                     """,
-                    rows=rows, doc_id=doc_id_str,
+                    rows=rows, doc_id=doc_id_str, chunk_id=chunk_id,
                     database_=db_name,
                 )
             else:
@@ -323,18 +348,30 @@ async def merge_triples_to_neo4j(
                     f"""
                     UNWIND $rows AS r
                     MERGE (s:Entity {{name: r.subject, kg_id: $kg_id}})
-                    ON CREATE SET s.id = r.s_id, s.type = r.s_type, s.created_at = datetime()
-                    ON MATCH SET  s.type = CASE WHEN s.type IS NULL THEN r.s_type ELSE s.type END
+                    ON CREATE SET s.id = r.s_id, s.type = r.s_type, s.created_at = datetime(),
+                                  s.source_chunk_ids = CASE WHEN $chunk_id <> '' THEN [$chunk_id] ELSE [] END
+                    ON MATCH SET  s.type = CASE WHEN s.type IS NULL THEN r.s_type ELSE s.type END,
+                                  s.source_chunk_ids = CASE WHEN $chunk_id <> '' THEN
+                                      [x IN coalesce(s.source_chunk_ids, []) WHERE x <> $chunk_id] + [$chunk_id]
+                                      ELSE coalesce(s.source_chunk_ids, []) END
                     MERGE (o:Entity {{name: r.object, kg_id: $kg_id}})
-                    ON CREATE SET o.id = r.o_id, o.type = r.o_type, o.created_at = datetime()
-                    ON MATCH SET  o.type = CASE WHEN o.type IS NULL THEN r.o_type ELSE o.type END
+                    ON CREATE SET o.id = r.o_id, o.type = r.o_type, o.created_at = datetime(),
+                                  o.source_chunk_ids = CASE WHEN $chunk_id <> '' THEN [$chunk_id] ELSE [] END
+                    ON MATCH SET  o.type = CASE WHEN o.type IS NULL THEN r.o_type ELSE o.type END,
+                                  o.source_chunk_ids = CASE WHEN $chunk_id <> '' THEN
+                                      [x IN coalesce(o.source_chunk_ids, []) WHERE x <> $chunk_id] + [$chunk_id]
+                                      ELSE coalesce(o.source_chunk_ids, []) END
                     MERGE (s)-[rel:{rel_type} {{source_doc_id: $doc_id}}]->(o)
-                    ON CREATE SET rel.verb = r.verb, rel.confidence = 1, rel.created_at = datetime()
+                    ON CREATE SET rel.verb = r.verb, rel.confidence = 1, rel.created_at = datetime(),
+                                  rel.source_chunk_ids = CASE WHEN $chunk_id <> '' THEN [$chunk_id] ELSE [] END
                     ON MATCH SET  rel.confidence = rel.confidence + 1,
-                                  rel.verb = r.verb, rel.updated_at = datetime()
+                                  rel.verb = r.verb, rel.updated_at = datetime(),
+                                  rel.source_chunk_ids = CASE WHEN $chunk_id <> '' THEN
+                                      [x IN coalesce(rel.source_chunk_ids, []) WHERE x <> $chunk_id] + [$chunk_id]
+                                      ELSE coalesce(rel.source_chunk_ids, []) END
                     RETURN count(rel) AS merged
                     """,
-                    rows=rows, doc_id=doc_id_str, kg_id=kg_id_str,
+                    rows=rows, doc_id=doc_id_str, kg_id=kg_id_str, chunk_id=chunk_id,
                 )
             total_merged += result.records[0]["merged"] if result.records else len(rows)
         except Exception as e:
@@ -345,39 +382,63 @@ async def merge_triples_to_neo4j(
                         await driver.execute_query(
                             f"""
                             MERGE (s:Entity {{name: $subject}})
-                            ON CREATE SET s.id = $s_id, s.type = $s_type, s.created_at = datetime()
-                            ON MATCH SET  s.type = CASE WHEN s.type IS NULL THEN $s_type ELSE s.type END
+                            ON CREATE SET s.id = $s_id, s.type = $s_type, s.created_at = datetime(),
+                                          s.source_chunk_ids = CASE WHEN $chunk_id <> '' THEN [$chunk_id] ELSE [] END
+                            ON MATCH SET  s.type = CASE WHEN s.type IS NULL THEN $s_type ELSE s.type END,
+                                          s.source_chunk_ids = CASE WHEN $chunk_id <> '' THEN
+                                              [x IN coalesce(s.source_chunk_ids, []) WHERE x <> $chunk_id] + [$chunk_id]
+                                              ELSE coalesce(s.source_chunk_ids, []) END
                             MERGE (o:Entity {{name: $object}})
-                            ON CREATE SET o.id = $o_id, o.type = $o_type, o.created_at = datetime()
-                            ON MATCH SET  o.type = CASE WHEN o.type IS NULL THEN $o_type ELSE o.type END
+                            ON CREATE SET o.id = $o_id, o.type = $o_type, o.created_at = datetime(),
+                                          o.source_chunk_ids = CASE WHEN $chunk_id <> '' THEN [$chunk_id] ELSE [] END
+                            ON MATCH SET  o.type = CASE WHEN o.type IS NULL THEN $o_type ELSE o.type END,
+                                          o.source_chunk_ids = CASE WHEN $chunk_id <> '' THEN
+                                              [x IN coalesce(o.source_chunk_ids, []) WHERE x <> $chunk_id] + [$chunk_id]
+                                              ELSE coalesce(o.source_chunk_ids, []) END
                             MERGE (s)-[rel:{rel_type} {{source_doc_id: $doc_id}}]->(o)
-                            ON CREATE SET rel.verb = $verb, rel.confidence = 1, rel.created_at = datetime()
+                            ON CREATE SET rel.verb = $verb, rel.confidence = 1, rel.created_at = datetime(),
+                                          rel.source_chunk_ids = CASE WHEN $chunk_id <> '' THEN [$chunk_id] ELSE [] END
                             ON MATCH SET  rel.confidence = rel.confidence + 1,
-                                          rel.verb = $verb, rel.updated_at = datetime()
+                                          rel.verb = $verb, rel.updated_at = datetime(),
+                                          rel.source_chunk_ids = CASE WHEN $chunk_id <> '' THEN
+                                              [x IN coalesce(rel.source_chunk_ids, []) WHERE x <> $chunk_id] + [$chunk_id]
+                                              ELSE coalesce(rel.source_chunk_ids, []) END
                             """,
                             subject=row["subject"], object=row["object"],
                             verb=row["verb"], s_type=row["s_type"], o_type=row["o_type"],
                             doc_id=doc_id_str, s_id=row["s_id"], o_id=row["o_id"],
-                            database_=db_name,
+                            chunk_id=chunk_id, database_=db_name,
                         )
                     else:
                         await driver.execute_query(
                             f"""
                             MERGE (s:Entity {{name: $subject, kg_id: $kg_id}})
-                            ON CREATE SET s.id = $s_id, s.type = $s_type, s.created_at = datetime()
-                            ON MATCH SET  s.type = CASE WHEN s.type IS NULL THEN $s_type ELSE s.type END
+                            ON CREATE SET s.id = $s_id, s.type = $s_type, s.created_at = datetime(),
+                                          s.source_chunk_ids = CASE WHEN $chunk_id <> '' THEN [$chunk_id] ELSE [] END
+                            ON MATCH SET  s.type = CASE WHEN s.type IS NULL THEN $s_type ELSE s.type END,
+                                          s.source_chunk_ids = CASE WHEN $chunk_id <> '' THEN
+                                              [x IN coalesce(s.source_chunk_ids, []) WHERE x <> $chunk_id] + [$chunk_id]
+                                              ELSE coalesce(s.source_chunk_ids, []) END
                             MERGE (o:Entity {{name: $object, kg_id: $kg_id}})
-                            ON CREATE SET o.id = $o_id, o.type = $o_type, o.created_at = datetime()
-                            ON MATCH SET  o.type = CASE WHEN o.type IS NULL THEN $o_type ELSE o.type END
+                            ON CREATE SET o.id = $o_id, o.type = $o_type, o.created_at = datetime(),
+                                          o.source_chunk_ids = CASE WHEN $chunk_id <> '' THEN [$chunk_id] ELSE [] END
+                            ON MATCH SET  o.type = CASE WHEN o.type IS NULL THEN $o_type ELSE o.type END,
+                                          o.source_chunk_ids = CASE WHEN $chunk_id <> '' THEN
+                                              [x IN coalesce(o.source_chunk_ids, []) WHERE x <> $chunk_id] + [$chunk_id]
+                                              ELSE coalesce(o.source_chunk_ids, []) END
                             MERGE (s)-[rel:{rel_type} {{source_doc_id: $doc_id}}]->(o)
-                            ON CREATE SET rel.verb = $verb, rel.confidence = 1, rel.created_at = datetime()
+                            ON CREATE SET rel.verb = $verb, rel.confidence = 1, rel.created_at = datetime(),
+                                          rel.source_chunk_ids = CASE WHEN $chunk_id <> '' THEN [$chunk_id] ELSE [] END
                             ON MATCH SET  rel.confidence = rel.confidence + 1,
-                                          rel.verb = $verb, rel.updated_at = datetime()
+                                          rel.verb = $verb, rel.updated_at = datetime(),
+                                          rel.source_chunk_ids = CASE WHEN $chunk_id <> '' THEN
+                                              [x IN coalesce(rel.source_chunk_ids, []) WHERE x <> $chunk_id] + [$chunk_id]
+                                              ELSE coalesce(rel.source_chunk_ids, []) END
                             """,
                             subject=row["subject"], object=row["object"],
                             verb=row["verb"], s_type=row["s_type"], o_type=row["o_type"],
                             kg_id=kg_id_str, doc_id=doc_id_str,
-                            s_id=row["s_id"], o_id=row["o_id"],
+                            s_id=row["s_id"], o_id=row["o_id"], chunk_id=chunk_id,
                         )
                     total_merged += 1
                 except Exception as inner_e:
@@ -463,8 +524,8 @@ async def query_svo_facts(
 
     cache_key = (str(kg_id), tuple(sorted(terms)), hops, min_confidence)
     cached = _bfs_cache.get(cache_key)
-    if cached and time.time() - cached[2] < _BFS_CACHE_TTL:
-        return cached[0], cached[1]
+    if cached and time.time() - cached[3] < _BFS_CACHE_TTL:
+        return cached[0], cached[1], cached[2]
 
     if db_name is None:
         db_name = await _get_kg_db(kg_id)
@@ -589,6 +650,7 @@ async def query_svo_facts(
     edge_map: dict[tuple[str, str], list[str]] = {}
     source_docs: list[str] = []
     seen_docs: set[str] = set()
+    entity_freq: dict[str, int] = {}    # 實體出現頻率，供 chunk_ids 排序
 
     for r in result.records:
         rel_type = r.get("rel_type") or "RELATED_TO"
@@ -600,6 +662,8 @@ async def query_svo_facts(
         ot = r.get("object_type") or "概念"
         edge_str = f"{s}({st}) -[{label}:{verb}]→ {o}({ot})"
         edge_map.setdefault((s, o), []).append(edge_str)
+        entity_freq[s] = entity_freq.get(s, 0) + 1
+        entity_freq[o] = entity_freq.get(o, 0) + 1
         doc_id = r.get("source_doc_id")
         if doc_id and doc_id not in seen_docs:
             seen_docs.add(doc_id)
@@ -624,8 +688,38 @@ async def query_svo_facts(
             chains.append(f"[推理鏈] {chain}")
     facts.extend(chains[:10])  # 最多附加 10 條推理鏈
 
-    _bfs_cache[cache_key] = (facts, source_docs, time.time())
-    return facts, source_docs
+    # 收集 BFS 實體節點的 source_chunk_ids（依出現頻率排序，高頻 → 高優先）
+    chunk_ids: list[str] = []
+    entity_names = list(entity_freq.keys())
+    if entity_names:
+        try:
+            if db_name:
+                ci_result = await driver.execute_query(
+                    "UNWIND $names AS n MATCH (e:Entity {name: n}) "
+                    "RETURN e.name AS name, coalesce(e.source_chunk_ids, []) AS cids",
+                    names=entity_names, database_=db_name,
+                )
+            else:
+                ci_result = await driver.execute_query(
+                    "UNWIND $names AS n MATCH (e:Entity {name: n, kg_id: $kg_id}) "
+                    "RETURN e.name AS name, coalesce(e.source_chunk_ids, []) AS cids",
+                    names=entity_names, kg_id=kg_id_str,
+                )
+            rows = sorted(
+                [(r["name"], r["cids"]) for r in ci_result.records],
+                key=lambda x: entity_freq.get(x[0], 0), reverse=True,
+            )
+            seen_cids: set[str] = set()
+            for _, cids in rows:
+                for cid in (cids or []):
+                    if cid not in seen_cids:
+                        seen_cids.add(cid)
+                        chunk_ids.append(cid)
+        except Exception as e:
+            logger.debug(f"chunk_ids 收集失敗（非必要）：{e}")
+
+    _bfs_cache[cache_key] = (facts, source_docs, chunk_ids, time.time())
+    return facts, source_docs, chunk_ids
 
 
 async def _batch_get_doc_titles(doc_ids: list[str]) -> dict[str, str]:
@@ -851,30 +945,9 @@ async def apply_type_labels(kg_id: UUID, db_name: str = "") -> dict[str, int]:
 
 # ── 內部工具 ──────────────────────────────────────────────────────────────────
 
-def _chunk_text(text: str) -> list[str]:
-    """將長文本分成大小接近 _CHUNK_SIZE 的段落，盡量在句尾斷開。"""
-    if len(text) <= _CHUNK_SIZE:
-        return [text]
-
-    chunks: list[str] = []
-    start = 0
-    while start < len(text):
-        end = start + _CHUNK_SIZE
-        if end >= len(text):
-            chunks.append(text[start:])
-            break
-        # 往回找句尾標點（。？！.!?）
-        cut = end
-        for punct in ("。", "？", "！", ".", "!", "?", "\n"):
-            pos = text.rfind(punct, start + _CHUNK_SIZE // 2, end)
-            if pos != -1:
-                cut = pos + 1
-                break
-        chunks.append(text[start:cut])
-        start = cut - _CHUNK_OVERLAP  # 重疊部分
-        if start < 0:
-            start = 0
-    return chunks
+def _sentence_chunk(doc_id: str, text: str) -> list[SentenceChunk]:
+    """句子感知切分，委派至 chunk_store.sentence_chunk()。保留此入口供模組內統一呼叫。"""
+    return sentence_chunk(doc_id, text)
 
 
 _VALID_TYPES = {

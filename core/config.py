@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     score_threshold: float = 0.70
     docs_dir: str = "./docs"
     workspace_dir: str = "./workspace"
+    chunk_store_dir: str = "./chunk_store"
 
     # ── 聯邦識別 ───────────────────────────────────────────────────────────────
     instance_id: str = "local"          # 用於 KB Skill 描述檔的 instance 命名空間

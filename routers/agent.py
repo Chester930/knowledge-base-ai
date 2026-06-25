@@ -15,6 +15,7 @@ from models.document import AgentQueryRequest, AgentQueryResponse, AgentContext,
 from repositories.concept_repo import ConceptRepository
 from repositories.document_repo import DocumentRepository
 from repositories.knowledge_graph_repo import KnowledgeGraphRepository
+from services.chunk_store import get_chunk_store
 from services.concept_engine import build_query_concepts, compute_match_score
 from services.svo_service import query_svo_facts
 
@@ -25,7 +26,13 @@ _CHUNK_SIZE = 400   # 每個段落切片的目標字元數
 _CHUNK_ENCODE_CAP = 512  # 送進 embedding 的最大字元數（超過截斷）
 _GARBLED_THRESHOLD = 0.3  # 非可讀字元比例超過此值視為亂碼
 # 列舉型 chunk 偵測：數字/圓圈編號/中文數字/圓點開頭的列舉行
-_ENUM_RE = re.compile(r'(?m)^\s*(?:[①-⑩]|[1-9][0-9]?[.、）)]\s|[•·▪▸]\s|第[一二三四五六七八九十百]+[章節項])')
+_ENUM_RE = re.compile(r'(?m)^\s*(?:#{1,6}\s+)?(?:[①-⑩]|[1-9][0-9]?(?:[.)）]\s|、)|[•·▪▸]\s|第[一二三四五六七八九十百]+[章節項])')
+
+# 自我精煉迴圈參數
+_CONFIDENCE_THRESHOLD = 0.65  # 達到此信心值即停止精煉
+_MAX_REFINE_ROUNDS = 3        # 最多補充幾輪
+_CHUNKS_PER_ROUND = 3         # 每輪補充的 chunk 數
+_CONFIDENCE_RE = re.compile(r'\{"confidence":\s*([\d.]+)[^}]*\}\s*$', re.DOTALL)
 
 
 def _cosine(v1: list[float], v2: list[float]) -> float:
@@ -187,6 +194,22 @@ def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
+def _extract_confidence(text: str) -> tuple[str, float]:
+    """
+    從 LLM 輸出末尾剝離 {"confidence": x} JSON，
+    回傳 (乾淨答案文字, 信心分數)。
+    若未找到，預設信心 0.5。
+    """
+    m = _CONFIDENCE_RE.search(text)
+    if m:
+        try:
+            conf = float(m.group(1))
+            return text[:m.start()].rstrip(), max(0.0, min(1.0, conf))
+        except ValueError:
+            pass
+    return text, 0.5
+
+
 _TRIPLE_RE = __import__("re").compile(
     r"([^(]+)\([^)]*\)\s*-\[([^:]+):[^\]]*\]→\s*([^(]+)\([^)]*\)"
 )
@@ -240,6 +263,7 @@ def _build_rag_prompt(
     question: str,
     svo_facts: list[str],
     contexts: list[dict],
+    extra_chunks: list[str] | None = None,
 ) -> str:
     import unicodedata as _ud
     svo_facts = [_ud.normalize("NFKC", f) for f in svo_facts]
@@ -256,11 +280,18 @@ def _build_rag_prompt(
         )
         parts.append(f"以下是知識庫中的相關文件內容：\n\n{docs}")
 
+    if extra_chunks:
+        chunks_text = "\n---\n".join(extra_chunks)
+        parts.append(f"\n\n[補充原文片段]\n{chunks_text}\n\n")
+
     parts.append(
         f"---\n問題：{question}\n\n"
         "請仔細閱讀上方文件，找出與問題直接相關的段落，用繁體中文回答。\n"
         "若文件中列舉了具體項目（例如框架的組成要素、動力列表等），請完整列出每一項原文。\n"
-        "若所有文件都找不到相關資訊，回答「知識庫目前無此資訊」。"
+        "若所有文件都找不到相關資訊，回答「知識庫目前無此資訊」。\n\n"
+        "最後一行請附上你的回答信心評估（不要包含在回答正文中）：\n"
+        '{"confidence": 0.85}\n'
+        "（1.0=完全確定有依據，0.7=有間接線索，0.5=部分推論，0.3=幾乎無資訊）"
     )
     return "".join(parts)
 
@@ -322,20 +353,35 @@ async def chat(req: ChatRequest):
                     })
             yield _sse({"kg_route": kg_route_info})
 
-            # ── Step 3：SVO 知識層（BFS 圖遍歷，同時收集來源文件）────────────
+            # ── Step 3：SVO 知識層（BFS 圖遍歷，同時收集來源文件與 chunk_ids）──
             svo_facts: list[str] = []
             graph_doc_ids: list[str] = []   # 圖譜指向的文件 ID
+            svo_chunk_ids: list[str] = []   # BFS 實體對應的 chunk_ids（精煉用）
 
             if req.use_svo and selected_kgs:
                 terms = [c["name"] for c in query_concepts]
                 seen_facts: set[str] = set()
                 seen_doc_ids: set[str] = set()
-                for kg_id, _, _ in selected_kgs:
+                seen_cids: set[str] = set()
+
+                # 多 KG 並行 BFS（☆4 優化）
+                async def _bfs_kg(kg_id):
                     kg_obj = selected_kg_objects.get(kg_id)
                     db_name = getattr(kg_obj, "db_name", "") if kg_obj else ""
-                    facts, src_ids = await query_svo_facts(
+                    return await query_svo_facts(
                         kg_id, terms, hops=req.svo_hops, limit=50, db_name=db_name
                     )
+
+                import asyncio as _asyncio
+                bfs_results = await _asyncio.gather(
+                    *[_bfs_kg(kg_id) for kg_id, _, _ in selected_kgs],
+                    return_exceptions=True,
+                )
+                for res in bfs_results:
+                    if isinstance(res, Exception):
+                        logger.warning(f"BFS 並行錯誤：{res}")
+                        continue
+                    facts, src_ids, cids = res
                     for f in facts:
                         if f not in seen_facts:
                             seen_facts.add(f)
@@ -344,6 +390,10 @@ async def chat(req: ChatRequest):
                         if doc_id not in seen_doc_ids:
                             seen_doc_ids.add(doc_id)
                             graph_doc_ids.append(doc_id)
+                    for cid in cids:
+                        if cid not in seen_cids:
+                            seen_cids.add(cid)
+                            svo_chunk_ids.append(cid)
 
             if svo_facts:
                 yield _sse({"svo_facts": svo_facts})
@@ -425,16 +475,72 @@ async def chat(req: ChatRequest):
 
             yield _sse({"sources": sources})
 
-            # ── Step 5：組 RAG prompt → LLM 串流 ─────────────────────────────
+            # ── Step 5：自我精煉 RAG 迴圈 ────────────────────────────────────
             if not svo_facts and not contexts:
                 yield _sse({"error": "知識庫中沒有找到相關資訊，請先建立知識圖譜或匯入文件"})
                 return
 
-            prompt = _build_rag_prompt(req.question, svo_facts, contexts)
+            llm = get_llm_provider()
+            chunk_store = get_chunk_store()
+            extra_chunks: list[str] = []
+            used_cids: set[str] = set()
+            final_answer: str | None = None
+
+            # 精煉迴圈（只在有 chunk_ids 且啟用 SVO 時進行）
+            if req.use_svo and svo_chunk_ids:
+                for round_num in range(_MAX_REFINE_ROUNDS):
+                    prompt = _build_rag_prompt(
+                        req.question, svo_facts, contexts,
+                        extra_chunks if extra_chunks else None,
+                    )
+                    try:
+                        raw = await llm.generate(prompt)
+                        clean, confidence = _extract_confidence(raw)
+                    except Exception as e:
+                        logger.warning(f"精煉 round {round_num} 失敗：{e}")
+                        break
+
+                    if confidence >= _CONFIDENCE_THRESHOLD:
+                        final_answer = clean
+                        logger.info(f"精煉 round {round_num}：信心={confidence:.2f} ≥ 門檻，停止")
+                        break
+
+                    # 信心不足 → 取下一批 chunk
+                    next_ids = [c for c in svo_chunk_ids if c not in used_cids][:_CHUNKS_PER_ROUND]
+                    if not next_ids:
+                        final_answer = clean
+                        logger.info(f"精煉 round {round_num}：無更多 chunk 可補充，停止")
+                        break
+
+                    chunks_data = await chunk_store.read_many(next_ids)
+                    extra_chunks.extend(c["text"] for c in chunks_data)
+                    used_cids.update(next_ids)
+                    logger.info(
+                        f"精煉 round {round_num+1}：信心={confidence:.2f}，"
+                        f"補充 {len(chunks_data)} 個 chunk"
+                    )
+                    yield _sse({
+                        "refine": {
+                            "round": round_num + 1,
+                            "confidence_before": round(confidence, 2),
+                            "chunks_added": len(chunks_data),
+                        }
+                    })
+
             yield _sse({"status": "generating"})
 
-            async for token in get_llm_provider().stream(prompt):
-                yield _sse({"token": token})
+            if final_answer is not None:
+                # 精煉後有充足信心 → 分段 emit 緩衝答案
+                for i in range(0, len(final_answer), 80):
+                    yield _sse({"token": final_answer[i:i + 80]})
+            else:
+                # 精煉輪次耗盡 or 未觸發精煉 → 直接串流最終 prompt
+                prompt = _build_rag_prompt(
+                    req.question, svo_facts, contexts,
+                    extra_chunks if extra_chunks else None,
+                )
+                async for token in llm.stream(prompt):
+                    yield _sse({"token": token})
 
             yield _sse({"done": True})
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
+import hashlib
 import logging
+from collections import OrderedDict
 from uuid import UUID
 
 from core.config import settings
@@ -10,10 +12,39 @@ from core.database import get_driver
 
 logger = logging.getLogger(__name__)
 
+# 概念提取 LRU 快取（☆5 優化）—— 避免相同文字重複呼叫 LLM
+_CONCEPT_CACHE_MAX = 256
+_concept_cache: OrderedDict[str, list[str]] = OrderedDict()
+
+
+def _concept_cache_key(text: str, domain: str) -> str:
+    return hashlib.md5(f"{domain}:{text[:3000]}".encode()).hexdigest()
+
+
+def _concept_cache_get(key: str) -> list[str] | None:
+    if key in _concept_cache:
+        _concept_cache.move_to_end(key)
+        return _concept_cache[key]
+    return None
+
+
+def _concept_cache_set(key: str, value: list[str]) -> None:
+    if key in _concept_cache:
+        _concept_cache.move_to_end(key)
+    else:
+        if len(_concept_cache) >= _CONCEPT_CACHE_MAX:
+            _concept_cache.popitem(last=False)
+    _concept_cache[key] = value
+
 
 # ── LLM concept extraction ────────────────────────────────────────────────────
 
 async def extract_concepts(text: str, domain: str = "general") -> list[str]:
+    cache_key = _concept_cache_key(text, domain)
+    cached = _concept_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     prompt = (
         f"請從以下文字中，提取最多 {settings.concept_extraction_max} 個核心概念。\n"
         f"每個概念用 2-6 個字表達，只回傳概念名稱，每行一個，不加序號或標點。\n\n"
@@ -22,7 +53,9 @@ async def extract_concepts(text: str, domain: str = "general") -> list[str]:
     try:
         raw = await get_llm_provider().generate(prompt)
         concepts = [line.strip() for line in raw.splitlines() if line.strip()]
-        return concepts[:settings.concept_extraction_max]
+        result = concepts[:settings.concept_extraction_max]
+        _concept_cache_set(cache_key, result)
+        return result
     except Exception as e:
         logger.warning(f"概念提取失敗：{e}")
         return []

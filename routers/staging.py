@@ -3,7 +3,7 @@ import logging
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 
 from core.config import settings
 from core.constants import CLASSIFY_AUTO_THRESHOLD
@@ -120,12 +120,12 @@ async def suggest_kgs():
 
 
 @router.post("/approve-suggestion", status_code=200, summary="核准建議並建立新 KG")
-async def approve_suggestion(body: ApproveSuggestionRequest):
+async def approve_suggestion(body: ApproveSuggestionRequest, background_tasks: BackgroundTasks):
     """
     核准一個分群建議：
     1. 建立新的 KnowledgeGraph（名稱 = suggested_name）
     2. 將指定的 .txt 檔案從 _staging/ 分配到新 KG
-    3. 自動觸發 SVO 提取
+    3. 自動觸發 SVO 知識圖譜建構（背景執行）
     """
     from repositories.knowledge_graph_repo import KnowledgeGraphRepository
     from core.database import get_driver
@@ -155,11 +155,26 @@ async def approve_suggestion(body: ApproveSuggestionRequest):
             except Exception as e:
                 failed.append({"file": filename, "reason": str(e)})
 
+        # 有文件成功分配才觸發建圖
+        if assigned:
+            async def _auto_build(kg_id):
+                try:
+                    from services.svo_service import build_graph_for_kg
+                    async for _ in build_graph_for_kg(kg_id):
+                        pass
+                    logger.info(f"approve-suggestion 自動建圖完成：{kg_id}")
+                except Exception as e:
+                    logger.warning(f"approve-suggestion 自動建圖失敗：{e}")
+
+            import asyncio
+            background_tasks.add_task(asyncio.ensure_future, _auto_build(new_kg.id))
+
         return {
             "kg_id": str(new_kg.id),
             "kg_name": new_kg.name,
             "assigned": assigned,
             "failed": failed,
+            "build_graph": "triggered" if assigned else "skipped",
         }
     except Exception as e:
         logger.exception("核准建議失敗")

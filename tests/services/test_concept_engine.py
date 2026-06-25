@@ -4,6 +4,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from services.concept_engine import (
     _alignment,
+    _concept_cache,
+    _concept_cache_get,
+    _concept_cache_set,
+    _CONCEPT_CACHE_MAX,
     _cosine,
     _magnitude,
     compute_match_score,
@@ -141,6 +145,9 @@ def _mock_llm(response_text: str):
 
 
 class TestExtractConcepts:
+    def setup_method(self):
+        _concept_cache.clear()
+
     async def test_parses_newline_separated_concepts(self):
         with patch("services.concept_engine.get_llm_provider", return_value=_mock_llm("機器學習\n深度學習\n神經網路")):
             result = await extract_concepts("人工智慧文件")
@@ -209,3 +216,83 @@ class TestBuildQueryConcepts:
 
         assert len(result) == 1
         assert result[0]["name"] == "fallback text"[:50]
+
+
+# ── LRU 快取結構（☆5 優化）─────────────────────────────────────────────────
+
+class TestConceptLruCacheStructure:
+    """純同步，測試快取 data structure 行為。"""
+
+    def setup_method(self):
+        _concept_cache.clear()
+
+    def test_cache_miss_returns_none(self):
+        assert _concept_cache_get("nonexistent") is None
+
+    def test_cache_set_and_get_roundtrip(self):
+        _concept_cache_set("k1", ["A", "B"])
+        assert _concept_cache_get("k1") == ["A", "B"]
+
+    def test_cache_hit_promotes_to_most_recent(self):
+        _concept_cache_set("k1", ["A"])
+        _concept_cache_set("k2", ["B"])
+        _concept_cache_get("k1")
+        assert list(_concept_cache.keys())[-1] == "k1"
+
+    def test_evicts_lru_when_full(self):
+        for i in range(_CONCEPT_CACHE_MAX):
+            _concept_cache_set(f"k{i}", [f"c{i}"])
+        _concept_cache_set("overflow", ["new"])
+        assert len(_concept_cache) == _CONCEPT_CACHE_MAX
+        assert _concept_cache_get("k0") is None
+        assert _concept_cache_get("overflow") == ["new"]
+
+    def test_overwrite_existing_key_no_growth(self):
+        _concept_cache_set("k1", ["A"])
+        _concept_cache_set("k1", ["B"])
+        assert len(_concept_cache) == 1
+        assert _concept_cache_get("k1") == ["B"]
+
+
+class TestExtractConceptsCaching:
+    """LLM 快取整合測試。"""
+
+    def setup_method(self):
+        _concept_cache.clear()
+
+    @pytest.mark.asyncio
+    async def test_first_call_hits_llm(self):
+        provider = MagicMock()
+        provider.generate = AsyncMock(return_value="機器學習\n深度學習")
+        with patch("services.concept_engine.get_llm_provider", return_value=provider):
+            await extract_concepts("深度學習是機器學習的子集")
+        assert provider.generate.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_second_call_uses_cache(self):
+        provider = MagicMock()
+        provider.generate = AsyncMock(return_value="機器學習\n深度學習")
+        with patch("services.concept_engine.get_llm_provider", return_value=provider):
+            text = "深度學習是機器學習的子集"
+            r1 = await extract_concepts(text)
+            r2 = await extract_concepts(text)
+        assert provider.generate.call_count == 1  # LLM 只呼叫一次
+        assert r1 == r2
+
+    @pytest.mark.asyncio
+    async def test_different_domain_different_cache_entry(self):
+        provider = MagicMock()
+        provider.generate = AsyncMock(return_value="概念")
+        with patch("services.concept_engine.get_llm_provider", return_value=provider):
+            await extract_concepts("文字", domain="ai")
+            await extract_concepts("文字", domain="biology")
+        assert provider.generate.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_llm_failure_not_cached(self):
+        provider = MagicMock()
+        provider.generate = AsyncMock(side_effect=RuntimeError("LLM 連線失敗"))
+        with patch("services.concept_engine.get_llm_provider", return_value=provider):
+            result = await extract_concepts("任何文字")
+        assert result == []
+        assert len(_concept_cache) == 0
