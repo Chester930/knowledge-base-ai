@@ -48,6 +48,8 @@ class Settings(BaseSettings):
     # ── 優化參數 ───────────────────────────────────────────────────────────────
     confidence_calibration: float = 0.9   # LLM 信心校準係數（< 1.0 讓模型更保守）
     staging_cron_interval: int = 0        # 暫存區自動分類間隔（分鐘，0 = 停用）
+    svo_concurrency: int = 2              # SVO 提取最大並行數
+    svo_format: str = "json"              # SVO 提取格式 (json | pipe)
 
     # ── 聯邦識別 ───────────────────────────────────────────────────────────────
     instance_id: str = "local"          # 用於 KB Skill 描述檔的 instance 命名空間

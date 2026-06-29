@@ -1,0 +1,294 @@
+[2026-06-29 17:05:24] === Ingestion 開始 ===
+[2026-06-29 17:05:24] KG ID: 839aa61d-8d97-4e2a-8c74-10fa111c3f38
+[2026-06-29 17:05:24] Staging: .\workspace\claude_memory_staging
+[2026-06-29 17:05:24] 檔案數: 39
+2026-06-29 17:05:32,267 INFO — === 智慧知識庫批次匯入開始 ===
+2026-06-29 17:05:32,286 INFO — 目錄：.\workspace\claude_memory_staging
+2026-06-29 17:05:32,287 INFO — 找到 39 個支援格式的文件
+2026-06-29 17:05:32,287 INFO — LLM Provider：ollama  Embedding：local
+2026-06-29 17:05:32,287 INFO — 目標 KG：839aa61d-8d97-4e2a-8c74-10fa111c3f38
+2026-06-29 17:05:32,287 INFO — 連線 Neo4j…
+C:\Users\666\AppData\Roaming\Python\Python313\site-packages\requests\__init__.py:113: RequestsDependencyWarning: urllib3 (2.3.0) or chardet (7.4.3)/charset_normalizer (3.4.2) doesn't match a supported version!
+  warnings.warn(
+2026-06-29 17:05:53,131 INFO — 載入本地 Embedding 模型：sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+2026-06-29 17:05:53,179 INFO — Use pytorch device_name: cuda:0
+2026-06-29 17:05:53,180 INFO — Load pretrained SentenceTransformer: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+2026-06-29 17:05:58,897 INFO — Embedding 模型載入完成，維度=384
+2026-06-29 17:05:59,726 INFO — LLM Provider：ollama
+2026-06-29 17:05:59,726 INFO — Embedding Provider：local
+2026-06-29 17:05:59,774 INFO — Received notification from DBMS server: <GqlStatusObject gql_status='00NA0', status_description='note: successful completion - index or constraint already exists. The command \'CREATE VECTOR INDEX concept_q_vector IF NOT EXISTS FOR (e:ConceptNode) ON (e.q_vector) OPTIONS {indexConfig: {`vector.dimensions`: $dim, `vector.similarity_function`: "cosine"}}\' has no effect. The index or constraint specified by \'VECTOR INDEX concept_q_vector FOR (e:ConceptNode) ON (e.q_vector)\' already exists.', position=None, raw_classification='SCHEMA', classification=<NotificationClassification.SCHEMA: 'SCHEMA'>, raw_severity='INFORMATION', severity=<NotificationSeverity.INFORMATION: 'INFORMATION'>, diagnostic_record={'_classification': 'SCHEMA', '_severity': 'INFORMATION', 'OPERATION': '', 'OPERATION_CODE': '0', 'CURRENT_SCHEMA': '/'}> for query: "\n            CREATE VECTOR INDEX concept_q_vector IF NOT EXISTS\n            FOR (c:ConceptNode) ON c.q_vector\n            OPTIONS { indexConfig: { `vector.dimensions`: $dim, `vector.similarity_function`: 'cosine' } }\n            "
+2026-06-29 17:05:59,778 INFO — 資料庫連線完成，開始匯入…
+2026-06-29 17:05:59,804 INFO — 找到 39 個支援格式的文件，開始匯入…
+2026-06-29 17:09:37,844 INFO — HTTP Request: POST http://localhost:11434/api/generate "HTTP/1.1 200 OK"
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00,  1.63it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00,  1.63it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 30.56it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 52.14it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 48.53it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 51.72it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 21.09it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00,  9.06it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00,  8.93it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 20.03it/s]
+2026-06-29 17:09:39,898 INFO — 文件 dd291aa9-5a8d-45f0-b9c8-0dfe23cbeae7 概念初始化完成，共 8 個
+2026-06-29 17:09:39,970 INFO — ✅ 匯入成功並關聯至 KG：agent__code-reviewer__identity.md
+2026-06-29 17:13:52,805 INFO — HTTP Request: POST http://localhost:11434/api/generate "HTTP/1.1 200 OK"
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 37.61it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 30.20it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 55.49it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 56.13it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 56.69it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 32.22it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 11.50it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 13.08it/s]
+2026-06-29 17:13:54,314 INFO — 文件 bc839f40-edde-4595-967d-043c7634363d 概念初始化完成，共 8 個
+2026-06-29 17:13:54,376 INFO — ✅ 匯入成功並關聯至 KG：agent__Pi__exp__C--Users-666-Desktop-claude-desktop.md
+2026-06-29 17:18:53,580 INFO — HTTP Request: POST http://localhost:11434/api/generate "HTTP/1.1 200 OK"
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 31.18it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 44.77it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 56.31it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 54.40it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 74.21it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 59.30it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 53.87it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 62.83it/s]
+2026-06-29 17:18:54,486 INFO — 文件 480b3cd5-78dc-4992-9d2a-a780295fd436 概念初始化完成，共 8 個
+2026-06-29 17:18:54,551 INFO — ✅ 匯入成功並關聯至 KG：agent__Pi__identity.md
+2026-06-29 17:21:51,674 INFO — HTTP Request: POST http://localhost:11434/api/generate "HTTP/1.1 200 OK"
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 52.75it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 78.07it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 55.08it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 59.98it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 31.60it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 41.21it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 40.53it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 27.17it/s]
+2026-06-29 17:21:53,509 INFO — 文件 2986901b-e4b4-405a-84b1-17ad86057b75 概念初始化完成，共 8 個
+2026-06-29 17:21:54,731 INFO — ✅ 匯入成功並關聯至 KG：C--Users-666-Desktop-------__MEMORY.md
+2026-06-29 17:24:16,290 INFO — HTTP Request: POST http://localhost:11434/api/generate "HTTP/1.1 200 OK"
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 23.31it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 21.98it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 23.12it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 26.04it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 24.20it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 22.64it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 25.04it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 25.06it/s]
+2026-06-29 17:24:17,084 INFO — 文件 3b52cb11-3429-4d67-a8a2-9a3dd6ba66e4 概念初始化完成，共 8 個
+2026-06-29 17:24:17,108 INFO — ✅ 匯入成功並關聯至 KG：C--Users-666-Desktop-------__project_kiosk_frontend.md
+2026-06-29 17:27:58,075 INFO — HTTP Request: POST http://localhost:11434/api/generate "HTTP/1.1 200 OK"
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 39.29it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 56.33it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 79.09it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 69.81it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 63.02it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 69.91it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 54.91it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 71.68it/s]
+2026-06-29 17:27:58,536 INFO — 文件 3d3f2b00-cbab-435d-a2fb-0bf525804ded 概念初始化完成，共 8 個
+2026-06-29 17:27:58,549 INFO — ✅ 匯入成功並關聯至 KG：C--Users-666-Desktop-------__project_lifecycle_phase_design.md
+2026-06-29 17:29:57,824 INFO — HTTP Request: POST http://localhost:11434/api/generate "HTTP/1.1 200 OK"
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 22.97it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 41.06it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 47.81it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 64.51it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 45.84it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 45.70it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 38.22it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 55.52it/s]
+2026-06-29 17:29:58,295 INFO — 文件 5ca71a52-536d-487c-be52-03e5001eac43 概念初始化完成，共 8 個
+2026-06-29 17:29:58,308 INFO — ✅ 匯入成功並關聯至 KG：C--Users-666-Desktop------__feedback_rag_ollama_numctx.md
+2026-06-29 17:34:05,486 INFO — HTTP Request: POST http://localhost:11434/api/generate "HTTP/1.1 200 OK"
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 37.86it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 28.82it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 48.59it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 42.73it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 39.51it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 32.01it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 40.92it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 43.26it/s]
+2026-06-29 17:34:06,147 INFO — 文件 d4cb3576-8e21-4c0b-9117-554d5df1a516 概念初始化完成，共 8 個
+2026-06-29 17:34:06,170 INFO — ✅ 匯入成功並關聯至 KG：C--Users-666-Desktop------__MEMORY.md
+2026-06-29 17:39:10,003 WARNING — 概念提取失敗，第 1 次重試 (等 1 秒)：
+2026-06-29 17:42:48,217 INFO — HTTP Request: POST http://localhost:11434/api/generate "HTTP/1.1 200 OK"
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 34.80it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 35.84it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 40.26it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 44.47it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 52.40it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 56.20it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 67.73it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 52.77it/s]
+2026-06-29 17:42:48,696 INFO — 文件 e9ebc6a0-33b3-421b-938f-e02d12aa30e9 概念初始化完成，共 8 個
+2026-06-29 17:42:48,712 INFO — ✅ 匯入成功並關聯至 KG：C--Users-666-Desktop------__project_kg_build_progress.md
+2026-06-29 17:45:13,168 INFO — HTTP Request: POST http://localhost:11434/api/generate "HTTP/1.1 200 OK"
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 32.14it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 60.23it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 44.80it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 57.63it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 36.90it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 36.82it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 21.25it/s]
+
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]
+Batches: 100%|██████████| 1/1 [00:00<00:00, 30.25it/s]
+2026-06-29 17:45:13,817 INFO — 文件 3cb9d21b-1533-40d1-9278-1aa2cd200399 概念初始化完成，共 8 個
+2026-06-29 17:45:13,840 INFO — ✅ 匯入成功並關聯至 KG：C--Users-666-Desktop------__project_knowledge_base.md

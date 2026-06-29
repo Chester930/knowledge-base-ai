@@ -43,6 +43,27 @@ async def _get_kg_db(kg_id: UUID) -> str:
     return await KnowledgeGraphRepository(get_driver()).get_db_name(kg_id)
 
 
+async def _get_fallback_model(current_model: str) -> str | None:
+    """動態查詢本地 Ollama 已有的較輕量模型作為降級選擇。"""
+    if "phi4" not in current_model.lower():
+        # 如果當前模型本來就很輕量 (e.g. qwen2.5:7b 或 llama3.2:3b)，不需特別降級
+        return None
+    try:
+        import httpx
+        from core.config import settings
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            res = await client.get(f"{settings.ollama_base_url}/api/tags")
+            if res.status_code == 200:
+                models = [m["name"] for m in res.json().get("models", [])]
+                # 依大小與效果尋找備用模型
+                for fallback in ["qwen2.5:7b", "qwen2.5-coder:7b", "llama3.2:3b", "llama3.2:latest"]:
+                    if fallback in models:
+                        return fallback
+    except Exception as e:
+        logger.debug(f"動態獲取 Ollama fallback 模型失敗: {e}")
+    return None
+
+
 async def build_graph_for_kg(
     kg_id: UUID,
     doc_ids: list[UUID] | None = None,
@@ -53,8 +74,9 @@ async def build_graph_for_kg(
     對 KG 下的所有（或指定）文件執行 SVO 提取，直接 MERGE 進 Neo4j。
     - force_rebuild=True: 清除後重建（rebuild_relations_only=True 時只清關係保留節點）
     - force_rebuild=False: 增量模式，跳過已有 svo_processed_at 的文件
-    - 平行處理：每份文件的 chunks 以 _SVO_CONCURRENCY 限流並行送 LLM
+    - 平行處理：每份文件的 chunks 以 settings.svo_concurrency 限流並行送 LLM
     """
+    from core.config import settings
     kg_repo = KnowledgeGraphRepository(get_driver())
     doc_repo = DocumentRepository(get_driver())
 
@@ -88,10 +110,11 @@ async def build_graph_for_kg(
             yield BuildProgress(event="done", message="所有文件已是最新，無需重建")
             return
 
-    sem = asyncio.Semaphore(_SVO_CONCURRENCY)
+    sem = asyncio.Semaphore(settings.svo_concurrency)
     total_merged = 0
 
     chunk_store = get_chunk_store()
+    progress_lock = asyncio.Lock()
 
     for doc in docs:
         text = doc.content or ""
@@ -100,6 +123,29 @@ async def build_graph_for_kg(
 
         sent_chunks = sentence_chunk(str(_doc_id), text)
         total_chunks = len(sent_chunks)
+
+        # 1. 建立/讀取本地進度檔
+        import json as _json
+        progress_dir = chunk_store._base / str(kg_id) / str(_doc_id)
+        progress_file = progress_dir / "svo_progress.json"
+        
+        if force_rebuild:
+            if progress_file.exists():
+                try:
+                    progress_file.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            progress_data = {}
+        else:
+            try:
+                if progress_file.exists():
+                    with open(progress_file, "r", encoding="utf-8") as f:
+                        progress_data = _json.load(f)
+                else:
+                    progress_data = {}
+            except Exception as pe:
+                logger.warning(f"讀取進度檔失敗，重設：{pe}")
+                progress_data = {}
 
         # 持久化 Chunk 檔案，同時計算並儲存 embedding 向量（☆6 優化）
         try:
@@ -115,13 +161,52 @@ async def build_graph_for_kg(
             _vectors = None
         await chunk_store.write(kg_id, _doc_id, sent_chunks, vectors=_vectors)
 
+        # 2. 分類：哪些 chunk 已完成，哪些待處理
+        to_process = []
+        skipped_results = []
+        for sc in sent_chunks:
+            chunk_status = progress_data.get(str(sc.idx))
+            if chunk_status and chunk_status.get("processed"):
+                skipped_results.append((sc.idx, chunk_status.get("triples_count", 0)))
+            else:
+                to_process.append(sc)
+
         yield BuildProgress(
             event="chunk_start",
             chunk_idx=0, total_chunks=total_chunks,
-            message=f"[{_doc_title}] 句子感知切分 {total_chunks} 個 Chunk，開始並行提取…",
+            message=f"[{_doc_title}] 句子感知切分 {total_chunks} 個 Chunk，已跳過 {len(skipped_results)} 個已處理 Chunk，剩餘 {len(to_process)} 個開始並行提取…",
         )
 
+        # 3. 先把已跳過的進度 yield 給 UI 顯示
+        for idx, triples_cnt in sorted(skipped_results, key=lambda x: x[0]):
+            total_merged += triples_cnt
+            yield BuildProgress(
+                event="chunk_done",
+                chunk_idx=idx, total_chunks=total_chunks,
+                triples_extracted=triples_cnt, triples_merged=triples_cnt,
+                message=f"[{_doc_title}] 第 {idx} 段已跳過（已於先前提取）",
+            )
+
         _MAX_CHUNK_RETRIES = 2
+
+        # 4. 用 Lock 保護進度寫入的 async 函式
+        async def _save_chunk_progress(chunk_idx: int, triples_count: int):
+            async with progress_lock:
+                try:
+                    current_progress = {}
+                    if progress_file.exists():
+                        with open(progress_file, "r", encoding="utf-8") as f:
+                            current_progress = _json.load(f)
+                    current_progress[str(chunk_idx)] = {
+                        "processed": True,
+                        "triples_count": triples_count,
+                        "ts": time.time()
+                    }
+                    progress_dir.mkdir(parents=True, exist_ok=True)
+                    with open(progress_file, "w", encoding="utf-8") as f:
+                        _json.dump(current_progress, f, ensure_ascii=False, indent=2)
+                except Exception as pe:
+                    logger.warning(f"寫入 chunk 進度檔失敗: {pe}")
 
         async def _process_chunk(
             sc: SentenceChunk,
@@ -131,10 +216,27 @@ async def build_graph_for_kg(
                 last_err = None
                 for attempt in range(1 + _MAX_CHUNK_RETRIES):
                     try:
-                        triples = await extract_svo_from_text(sc.text)
+                        # 決定是否使用 fallback model
+                        model_override = None
+                        if attempt == _MAX_CHUNK_RETRIES:
+                            # 最後一次重試，嘗試使用 fallback 模型
+                            try:
+                                current_model = settings.ollama_llm_model
+                                model_override = await _get_fallback_model(current_model)
+                                if model_override:
+                                    logger.warning(
+                                        f"SVO 提取重試 [{__doc_title} chunk {sc.idx}] "
+                                        f"最後一次重試：降級至備用模型 {model_override}"
+                                    )
+                            except Exception:
+                                pass
+
+                        triples = await extract_svo_from_text(sc.text, model_override=model_override)
                         merged = await merge_triples_to_neo4j(
                             triples, kg_id, __doc_id, db_name, chunk_id=sc.chunk_id
                         )
+                        # 成功提取與寫入，保存進度
+                        await _save_chunk_progress(sc.idx, len(triples))
                         return sc.idx, triples, merged, None
                     except Exception as e:
                         last_err = e
@@ -151,30 +253,33 @@ async def build_graph_for_kg(
                 )
                 return sc.idx, [], 0, last_err
 
-        chunk_results = await asyncio.gather(
-            *[_process_chunk(sc) for sc in sent_chunks]
-        )
-
-        doc_has_error = False
-        for idx, triples, merged, err in sorted(chunk_results, key=lambda x: x[0]):
-            if err:
-                doc_has_error = True
-                yield BuildProgress(event="error", chunk_idx=idx, message=str(err))
-            else:
-                total_merged += merged
-                yield BuildProgress(
-                    event="chunk_done",
-                    chunk_idx=idx, total_chunks=total_chunks,
-                    triples_extracted=len(triples), triples_merged=merged,
-                    message=f"[{_doc_title}] 第 {idx} 段完成：{len(triples)} 組三元組",
-                )
-
-        if doc_has_error:
-            failed_count = sum(1 for _, _, _, e in chunk_results if e)
-            logger.warning(
-                f"[{_doc_title}] {failed_count} 個 chunk 最終失敗，"
-                f"svo_processed_at 保留 null → 下次增量跑自動補提取"
+        if to_process:
+            chunk_results = await asyncio.gather(
+                *[_process_chunk(sc) for sc in to_process]
             )
+
+            doc_has_error = False
+            for idx, triples, merged, err in sorted(chunk_results, key=lambda x: x[0]):
+                if err:
+                    doc_has_error = True
+                    yield BuildProgress(event="error", chunk_idx=idx, message=str(err))
+                else:
+                    total_merged += merged
+                    yield BuildProgress(
+                        event="chunk_done",
+                        chunk_idx=idx, total_chunks=total_chunks,
+                        triples_extracted=len(triples), triples_merged=merged,
+                        message=f"[{_doc_title}] 第 {idx} 段完成：{len(triples)} 組三元組",
+                    )
+
+            if doc_has_error:
+                failed_count = sum(1 for _, _, _, e in chunk_results if e)
+                logger.warning(
+                    f"[{_doc_title}] {failed_count} 個 chunk 最終失敗，"
+                    f"svo_processed_at 保留 null → 下次增量跑自動補提取"
+                )
+            else:
+                await _set_doc_svo_processed(_doc_id)
         else:
             await _set_doc_svo_processed(_doc_id)
 
@@ -186,8 +291,8 @@ async def build_graph_for_kg(
     )
 
 
-async def extract_svo_from_text(text: str) -> list[SVOTriple]:
-    """呼叫 LLM 從單段文字提取本體論知識三元組，優先使用 JSON 模式。"""
+async def extract_svo_from_text(text: str, model_override: str | None = None) -> list[SVOTriple]:
+    """呼叫 LLM 從單段文字提取本體論知識三元組，依設定選用 JSON 或 Pipe 模式。"""
     if not text.strip():
         return []
 
@@ -236,11 +341,10 @@ async def extract_svo_from_text(text: str) -> list[SVOTriple]:
         "  RELATED_TO  → 【絕對最後手段】以上 29 種皆完全不適用時才能用，目標使用率 < 5%\n\n"
         "規則：\n"
         "- 主詞與受詞為名詞或名詞短語（2-15字），去除冗餘後綴（如「XX技術」→「XX」、「XX方法」→「XX」）\n"
-        "- 動詞欄位盡量引用原文中的實際措辭（2-8字），"
-        "忠實反映原文用語，不要自行概括替換\n"
+        "- 動詞欄位盡量引用原文中的實際措辭（2-8字），忠實反映原文用語，不要自行概括替換\n"
         "- 嚴禁濫用 RELATED_TO：有明確語意關係必須選精確類別，每段文字最多使用 1 次\n"
-        "- 只輸出六欄格式，不加說明、序號、標點\n"
-        "- 行數上限 30 行，優先抽取最重要的知識關係\n\n"
+        "- 必須只輸出六欄格式（用 | 分隔），絕對不要使用 ``` 或 ```python 等 Markdown 程式碼方塊包裹輸出，不要輸出任何前言、引言、註釋或解釋\n"
+        "- 行數上限 30 行，優先抽取最重要的知識關係，若無符合內容則直接輸出空白\n\n"
         "範例：\n"
         "Q-Learning|算法|IS_A|屬於|強化學習|概念\n"
         "工具呼叫|方法|PART_OF|包含於|代理迴圈|概念\n"
@@ -261,24 +365,31 @@ async def extract_svo_from_text(text: str) -> list[SVOTriple]:
         f"文字：\n{text}"
     )
     import json as _json
-    llm = get_llm_provider()
+    from core.config import settings
 
-    # 優先嘗試 JSON 模式
-    json_prompt = prompt + (
-        "\n\n【輸出格式】請以 JSON 陣列輸出，每項為：\n"
-        '{"s":"主詞","st":"主詞類型","r":"關係類別","v":"動詞","o":"受詞","ot":"受詞類型"}\n'
-        "不要輸出任何其他文字，只輸出 JSON 陣列。"
-    )
-    try:
-        raw = await llm.generate_json(json_prompt)
-        match = re.search(r"\[[\s\S]*\]", raw)
-        if match:
-            items = _json.loads(match.group())
-            triples = _parse_svo_json(items)
-            if triples:
-                return _filter_hallucinated(triples, text)
-    except Exception as e:
-        logger.debug(f"JSON 模式失敗，回退 pipe 格式：{e}")
+    if model_override:
+        from core.providers.llm.ollama import OllamaLLMProvider
+        llm = OllamaLLMProvider(base_url=settings.ollama_base_url, model=model_override)
+    else:
+        llm = get_llm_provider()
+
+    # 優先嘗試 JSON 模式（如果設定為 json）
+    if settings.svo_format == "json":
+        json_prompt = prompt + (
+            "\n\n【輸出格式】請以 JSON 陣列輸出，每項為：\n"
+            '{"s":"主詞","st":"主詞類型","r":"關係類別","v":"動詞","o":"受詞","ot":"受詞類型"}\n'
+            "不要輸出任何其他文字，只輸出 JSON 陣列。"
+        )
+        try:
+            raw = await llm.generate_json(json_prompt)
+            match = re.search(r"\[[\s\S]*\]", raw)
+            if match:
+                items = _json.loads(match.group())
+                triples = _parse_svo_json(items)
+                if triples:
+                    return _filter_hallucinated(triples, text)
+        except Exception as e:
+            logger.debug(f"JSON 模式失敗，回退 pipe 格式：{e}")
 
     # Fallback：傳統 pipe-delimited 格式
     raw = await llm.generate(prompt)

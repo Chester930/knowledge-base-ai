@@ -19,22 +19,22 @@ class OllamaLLMProvider(LLMProvider):
     _NUM_CTX = 8192
 
     async def generate(self, prompt: str) -> str:
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=300.0) as client:
             res = await client.post(
                 f"{self.base_url}/api/generate",
                 json={"model": self.model, "prompt": prompt, "stream": False,
-                      "options": {"num_ctx": self._NUM_CTX}},
+                      "options": {"num_ctx": self._NUM_CTX, "temperature": 0.0, "num_predict": 1024}},
             )
             res.raise_for_status()
             return res.json().get("response", "")
-
+ 
     async def generate_json(self, prompt: str) -> str:
         """使用 Ollama format=json 模式，強制輸出合法 JSON。"""
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=300.0) as client:
             res = await client.post(
                 f"{self.base_url}/api/generate",
                 json={"model": self.model, "prompt": prompt, "stream": False,
-                      "format": "json", "options": {"num_ctx": self._NUM_CTX}},
+                      "format": "json", "options": {"num_ctx": self._NUM_CTX, "temperature": 0.0, "num_predict": 1024}},
             )
             res.raise_for_status()
             return res.json().get("response", "")

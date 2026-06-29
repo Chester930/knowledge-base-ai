@@ -15,13 +15,24 @@ class DocumentRepository:
         self, title: str, content: str, file_path: str | None, file_type: str
     ) -> Document:
         doc_id = uuid4()
+        # MERGE on file_path to prevent duplicates on repeated ingestion runs.
+        # ON CREATE: assign a fresh UUID and timestamps.
+        # ON MATCH:  update content/title only, preserve the original id and created_at.
         result = await self.driver.execute_query(
             """
-            CREATE (d:Document {
-                id: $id, title: $title, content: $content,
-                file_path: $file_path, file_type: $file_type,
-                created_at: datetime(), updated_at: datetime()
-            })
+            MERGE (d:Document {file_path: $file_path})
+            ON CREATE SET
+                d.id         = $id,
+                d.title      = $title,
+                d.content    = $content,
+                d.file_type  = $file_type,
+                d.created_at = datetime(),
+                d.updated_at = datetime()
+            ON MATCH SET
+                d.title      = $title,
+                d.content    = $content,
+                d.file_type  = $file_type,
+                d.updated_at = datetime()
             RETURN d
             """,
             id=str(doc_id), title=title, content=content,

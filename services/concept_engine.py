@@ -50,15 +50,34 @@ async def extract_concepts(text: str, domain: str = "general") -> list[str]:
         f"每個概念用 2-6 個字表達，只回傳概念名稱，每行一個，不加序號或標點。\n\n"
         f"文字：\n{text[:3000]}"
     )
-    try:
-        raw = await get_llm_provider().generate(prompt)
-        concepts = [line.strip() for line in raw.splitlines() if line.strip()]
-        result = concepts[:settings.concept_extraction_max]
-        _concept_cache_set(cache_key, result)
-        return result
-    except Exception as e:
-        logger.warning(f"概念提取失敗：{e}")
-        return []
+    import asyncio as _asyncio
+    _MAX_RETRIES = 2
+    for attempt in range(1 + _MAX_RETRIES):
+        try:
+            raw = await get_llm_provider().generate(prompt)
+            import re as _re
+            concepts = []
+            for line in raw.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                # 去除常見序號，如: "1. ", "1、", "- ", "* ", "(1) " 等
+                line = _re.sub(r'^(?:(?:\d+[\.、\s\)])|[-*•·])\s*', '', line).strip()
+                # 去除前後可能的引號
+                line = line.strip('\'"`“”‘’')
+                if line:
+                    concepts.append(line)
+            result = concepts[:settings.concept_extraction_max]
+            _concept_cache_set(cache_key, result)
+            return result
+        except Exception as e:
+            if attempt < _MAX_RETRIES:
+                wait_s = 2 ** attempt
+                logger.warning(f"概念提取失敗，第 {attempt+1} 次重試 (等 {wait_s} 秒)：{e}")
+                await _asyncio.sleep(wait_s)
+            else:
+                logger.exception(f"概念提取最終失敗：{e}")
+    return []
 
 
 # ── Match score ───────────────────────────────────────────────────────────────

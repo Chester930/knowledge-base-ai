@@ -384,7 +384,11 @@ async def chat(req: ChatRequest):
             svo_chunk_ids: list[str] = []   # BFS 實體對應的 chunk_ids（精煉用）
 
             if req.use_svo and selected_kgs:
-                terms = [c["name"] for c in query_concepts]
+                q_terms = [c["name"] for c in query_concepts]
+                matched_terms = []
+                for _, _, matched in selected_kgs:
+                    matched_terms.extend(matched)
+                terms = list(dict.fromkeys(q_terms + matched_terms))
                 seen_facts: set[str] = set()
                 seen_doc_ids: set[str] = set()
                 seen_cids: set[str] = set()

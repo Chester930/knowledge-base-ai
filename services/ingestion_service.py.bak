@@ -64,28 +64,14 @@ async def ingest_file(file_path: str) -> Document:
     return doc
 
 
-async def ingest_directory(dir_path: str, kg_id: str | None = None) -> tuple[list[Document], list[str]]:
+async def ingest_directory(dir_path: str) -> tuple[list[Document], list[str]]:
     """
     批次匯入目錄下所有支援格式的文件。
-    若指定 kg_id，匯入後自動建立 KG → Document 的 CONTAINS 關係。
     回傳 (成功列表, 失敗訊息列表)。
     """
-    from uuid import UUID as _UUID
-    from repositories.knowledge_graph_repo import KnowledgeGraphRepository
-
     path = Path(dir_path)
     if not path.exists():
         raise FileNotFoundError(f"目錄不存在：{dir_path}")
-
-    kg_uuid: _UUID | None = None
-    kg_repo = None
-    if kg_id:
-        try:
-            kg_uuid = _UUID(kg_id)
-        except ValueError:
-            logger.warning(f"kg_id 格式錯誤，將略過 KG 關聯：{kg_id}")
-        else:
-            kg_repo = KnowledgeGraphRepository(get_driver())
 
     success: list[Document] = []
     errors: list[str] = []
@@ -97,11 +83,7 @@ async def ingest_directory(dir_path: str, kg_id: str | None = None) -> tuple[lis
         try:
             doc = await ingest_file(str(f))
             success.append(doc)
-            if kg_repo and kg_uuid:
-                await kg_repo.add_document(kg_uuid, doc.id)
-                logger.info(f"✅ 匯入成功並關聯至 KG：{f.name}")
-            else:
-                logger.info(f"✅ 匯入成功：{f.name}")
+            logger.info(f"✅ 匯入成功：{f.name}")
         except Exception as e:
             msg = f"❌ {f.name}：{e}"
             errors.append(msg)
@@ -339,4 +321,3 @@ def _read_ppt(path: Path) -> str:
         return _sanitize_text("\n\n".join(parts))
     except Exception as e:
         raise RuntimeError(f".ppt 讀取失敗（需安裝 Microsoft Office）：{e}") from e
-
