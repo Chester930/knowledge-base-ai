@@ -474,14 +474,20 @@ async def chat(req: ChatRequest):
                     for d in await kg_repo.get_documents(kg_id):
                         allowed.add(str(d["id"]))
 
-            _SIM_MIN_SCORE = 0.38  # 相似度補充文件的最低門檻，低於此分不納入 RAG context
+            # Ollama 離線時 query 為整句（非短概念），分數系統性偏低；0.28 為合理下限
+            _SIM_MIN_SCORE = 0.28  # 相似度補充文件的最低門檻，低於此分不納入 RAG context
+            logger.info(f"[DEBUG] all_doc_concepts size={len(all_doc_concepts)}, allowed={len(allowed)}, query_concepts={[c['name'] for c in query_concepts]}")
             scored_docs = []
+            _debug_scores = []
             for doc_id, dc in all_doc_concepts.items():
                 if allowed and str(doc_id) not in allowed:
                     continue
                 score, matched = compute_match_score(query_concepts, dc)
+                _debug_scores.append((str(doc_id), score))
                 if score >= _SIM_MIN_SCORE:
                     scored_docs.append((doc_id, score, matched))
+            _debug_scores.sort(key=lambda x: x[1], reverse=True)
+            logger.info(f"[DEBUG] top5 scores: {_debug_scores[:5]}, total_matched={len(scored_docs)}")
 
             scored_docs.sort(key=lambda x: x[1], reverse=True)
             sim_added = 0
