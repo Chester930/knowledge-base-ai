@@ -186,7 +186,7 @@ class TestQueryShardsParallel:
         with patch("services.svo_service.query_svo_facts_with_provenance",
                    new=AsyncMock(return_value=[])), \
              patch("services.entity_alignment.expand_terms",
-                   wraps=lambda t, **kw: t) as mock_expand:
+                   new=AsyncMock(side_effect=lambda t, **kw: t)) as mock_expand:
             await query_shards_parallel([skill], ["機器學習"], expand_synonyms=True)
 
         mock_expand.assert_called_once()

@@ -393,6 +393,11 @@ async def chat(req: ChatRequest):
                 for _, _, matched in selected_kgs:
                     matched_terms.extend(matched)
                 terms = list(dict.fromkeys(q_terms + matched_terms))
+                
+                # 多語言實體同義詞對齊展開（查詢期動態展開）
+                from services.entity_alignment import expand_terms
+                terms = await expand_terms(terms)
+                
                 seen_facts: set[str] = set()
                 seen_doc_ids: set[str] = set()
                 seen_cids: set[str] = set()
@@ -445,8 +450,12 @@ async def chat(req: ChatRequest):
                 if m.strip() and len(m.strip()) > 1
             })
 
-            # 4a. 圖譜驅動：SVO 指向的文件（過濾亂碼）
+            # 4a. 圖譜驅動：SVO 指向的文件（限制數量 + 過濾亂碼）
+            # 最多取 top_k * 2 篇（後面由 prompt_guard 公平裁減字數），確保相關文件有機會進入
+            _graph_quota = min(req.top_k * 2, 10)
             for doc_id_str in graph_doc_ids:
+                if len(contexts) >= _graph_quota:
+                    break
                 try:
                     doc = await doc_repo.get_by_id(_UUID(doc_id_str))
                 except Exception:
@@ -462,7 +471,7 @@ async def chat(req: ChatRequest):
                 )
                 logger.info(f"[DEBUG graph chunk] {doc.title}: len={len(snippet)} snippet_start={snippet[:120].replace(chr(10),' ')!r}")
                 contexts.append({"title": doc.title, "content": snippet, "source": "graph"})
-                sources.append({"title": doc.title, "source": "graph"})
+                sources.append({"title": doc.title, "score": None, "source": "graph"})
                 seen_doc_ids_ctx.add(doc_id_str)
 
             # 4b. 相似度補充：有圖譜文件時縮減補充量，並過濾亂碼
@@ -518,6 +527,17 @@ async def chat(req: ChatRequest):
             if not svo_facts and not contexts:
                 yield _sse({"error": "知識庫中沒有找到相關資訊，請先建立知識圖譜或匯入文件"})
                 return
+
+            # prompt 大小保護：每篇公平分配字數，避免前幾篇佔滿 LLM context
+            # phi4 num_ctx=8192 ≈ 12,000 chars；扣除 system+instructions~1500，留 ~7500 給 context
+            _MAX_TOTAL_CTX_CHARS = 7500
+            if contexts:
+                _per_doc = max(500, _MAX_TOTAL_CTX_CHARS // len(contexts))
+                _total_before = sum(len(c["content"]) for c in contexts)
+                contexts = [{**c, "content": c["content"][:_per_doc]} for c in contexts]
+                _total_after = sum(len(c["content"]) for c in contexts)
+                if _total_before > _total_after:
+                    logger.info(f"[prompt_guard] 公平裁減 {len(contexts)} 篇：{_total_before} → {_total_after} chars")
 
             llm = get_llm_provider()
             chunk_store = get_chunk_store()
@@ -584,14 +604,19 @@ async def chat(req: ChatRequest):
                 for i in range(0, len(final_answer), 80):
                     yield _sse({"token": final_answer[i:i + 80]})
             else:
-                # 精煉輪次耗盡 or 未觸發精煉 → 直接串流最終 prompt
+                # 精煉輪次耗盡 or 未觸發精煉 → 收集完整回答後剝離 confidence JSON 再 emit
                 prompt = _build_rag_prompt(
                     req.question, svo_facts, contexts,
                     extra_chunks if extra_chunks else None,
                     history=req.history,
                 )
+                raw_parts: list[str] = []
                 async for token in llm.stream(prompt):
-                    yield _sse({"token": token})
+                    raw_parts.append(token)
+                raw = "".join(raw_parts)
+                clean, _conf = _extract_confidence(raw)
+                for i in range(0, len(clean), 80):
+                    yield _sse({"token": clean[i:i + 80]})
 
             yield _sse({"done": True})
 

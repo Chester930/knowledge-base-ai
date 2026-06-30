@@ -21,56 +21,74 @@ from services.entity_alignment import (
 
 # ── expand_terms ──────────────────────────────────────────────────────────────
 
+@pytest.mark.asyncio
 class TestExpandTerms:
-    def test_known_zh_term_expands(self):
-        result = expand_terms(["機器學習"])
+    async def test_known_zh_term_expands(self):
+        result = await expand_terms(["機器學習"])
         assert "機器學習" in result
         assert len(result) > 1
 
-    def test_known_en_term_expands(self):
-        result = expand_terms(["machine learning"])
+    async def test_known_en_term_expands(self):
+        result = await expand_terms(["machine learning"])
         assert "machine learning" in result
         assert len(result) > 1
 
-    def test_zh_en_cross_expansion(self):
-        result = expand_terms(["機器學習"])
+    async def test_zh_en_cross_expansion(self):
+        result = await expand_terms(["機器學習"])
         joined = " ".join(result).lower()
         assert "machine learning" in joined or "ml" in joined
 
-    def test_unknown_term_returned_unchanged(self):
-        result = expand_terms(["完全未知的術語XYZ"])
-        assert result == ["完全未知的術語XYZ"]
+    async def test_unknown_term_returned_unchanged(self):
+        # 測試未命中靜態同義詞表時，如果 LLM 回傳空，則保持不變
+        from unittest.mock import patch, AsyncMock
+        mock_llm = AsyncMock()
+        mock_llm.generate.return_value = ""  # LLM 沒有給出同義詞
+        with patch("core.providers.factory.get_llm_provider", return_value=mock_llm):
+            result = await expand_terms(["完全未知的術語XYZ"])
+            assert result == ["完全未知的術語XYZ"]
 
-    def test_original_term_is_first(self):
-        result = expand_terms(["深度學習"])
+    async def test_unknown_term_llm_aligned(self):
+        # 測試未命中靜態同義詞表時，LLM 成功翻譯並展開
+        from unittest.mock import patch, AsyncMock
+        mock_llm = AsyncMock()
+        mock_llm.generate.return_value = "Quantum Entanglement\n量子糾纏\n量子纠缠\n"
+        with patch("core.providers.factory.get_llm_provider", return_value=mock_llm):
+            result = await expand_terms(["量子糾纏"])
+            assert "Quantum Entanglement" in result
+            assert "量子制造" not in result  # 確保過濾
+            assert "量子纠缠" in result
+            assert result[0] == "量子糾纏"
+
+    async def test_original_term_is_first(self):
+        result = await expand_terms(["深度學習"])
         assert result[0] == "深度學習"
 
-    def test_max_expansion_respected(self):
+    async def test_max_expansion_respected(self):
         # 強化學習同義詞組有 3 個成員，max_expansion=1 只展開 1 個
-        result = expand_terms(["強化學習"], max_expansion=1)
+        result = await expand_terms(["強化學習"], max_expansion=1)
         # 原詞 + 最多 1 個展開
         assert len(result) <= 2
 
-    def test_deduplication_when_two_terms_same_group(self):
+    async def test_deduplication_when_two_terms_same_group(self):
         # ML 和 machine learning 同組，不應重複
-        result = expand_terms(["機器學習", "machine learning"])
+        result = await expand_terms(["機器學習", "machine learning"])
         seen = set()
         for t in result:
             assert t not in seen, f"Duplicate: {t}"
             seen.add(t)
 
-    def test_empty_list_returns_empty(self):
-        assert expand_terms([]) == []
+    async def test_empty_list_returns_empty(self):
+        assert await expand_terms([]) == []
 
-    def test_multiple_terms_all_expanded(self):
-        result = expand_terms(["機器學習", "知識圖譜"])
+    async def test_multiple_terms_all_expanded(self):
+        result = await expand_terms(["機器學習", "知識圖譜"])
         assert "機器學習" in result
         assert "知識圖譜" in result
         assert len(result) > 2
 
-    def test_case_insensitive_lookup(self):
-        result_lower = expand_terms(["machine learning"])
-        result_upper = expand_terms(["Machine Learning"])
+    async def test_case_insensitive_lookup(self):
+        result_lower = await expand_terms(["machine learning"])
+        result_upper = await expand_terms(["Machine Learning"])
         # 兩者都應觸發展開
         assert len(result_lower) > 1
         assert len(result_upper) > 1

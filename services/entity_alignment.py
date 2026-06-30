@@ -64,13 +64,65 @@ for _grp in _SYNONYM_GROUPS:
         _TERM_INDEX[_t.lower()] = _grp
 
 
-# ── 同義詞展開 ────────────────────────────────────────────────────────────────
+# ── LLM 多語言動態展開快取與非同步查詢 ────────────────────────────────────────
 
-def expand_terms(terms: list[str], max_expansion: int = 3) -> list[str]:
+_llm_synonym_cache: dict[str, list[str]] = {}
+
+
+async def _get_llm_synonyms(term: str) -> list[str]:
+    """使用 LLM 將術語翻譯/對齊為其他語言或常見同義詞（科技/學術名詞對照）。"""
+    term_key = term.strip().lower()
+    if term_key in _llm_synonym_cache:
+        return _llm_synonym_cache[term_key]
+
+    # 過於簡短或僅為數字的術語，不進行 LLM 動態翻譯
+    if len(term_key) <= 1 or term_key.isdigit():
+        return []
+
+    from core.providers.factory import get_llm_provider
+    import logging as _logging
+    import re as _re
+
+    logger = _logging.getLogger(__name__)
+    prompt = (
+        f"你是一個科技與學術名詞翻譯對齊專家。請將概念「{term}」翻譯或對照成其他語言或常見同義詞。\n"
+        f"請提供該詞的：\n"
+        f"1. 英文對照學術名 (如為中文)\n"
+        f"2. 繁體中文名 (如為英文或簡體)\n"
+        f"3. 簡體中文名 (如為英文或繁體)\n"
+        f"4. 常見學術縮寫/簡稱 (如有)\n\n"
+        f"請直接輸出對照後的術語列表，每行一個，不要有任何序號、標點、引號、說明或額外文字。"
+    )
+
+    try:
+        raw = await get_llm_provider().generate(prompt)
+        synonyms = []
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            # 去除常見標題、序號前綴 (如 "1. ", "2、", "- ", "* ")
+            line = _re.sub(r'^(?:(?:\d+[\.、\s\)])|[-*•·])\s*', '', line).strip()
+            line = line.strip('\'"`“”‘’')
+            if line and line.lower() != term_key and len(line) > 1:
+                synonyms.append(line)
+        # 去重
+        synonyms = list(OrderedDict.fromkeys(synonyms))
+        _llm_synonym_cache[term_key] = synonyms
+        return synonyms
+    except Exception as e:
+        logger.warning(f"LLM 多語言同義詞展開失敗 [{term}]: {e}")
+        return []
+
+
+from collections import OrderedDict
+
+async def expand_terms(terms: list[str], max_expansion: int = 3) -> list[str]:
     """
-    展開查詢詞的同義詞。
+    展開查詢詞的同義詞與多語言對照。
     - 原詞保留最前，展開詞依字典序附後
-    - 每個原詞最多補 max_expansion 個同義詞
+    - 優先使用內建靜態同義詞表
+    - 若未命中，利用 LLM 來做動態多語言術語翻譯與對齊
     - 去重保序
     """
     seen: set[str] = set()
@@ -80,18 +132,31 @@ def expand_terms(terms: list[str], max_expansion: int = 3) -> list[str]:
         if term not in seen:
             seen.add(term)
             result.append(term)
+        
+        # 1. 優先匹配靜態同義詞表
         grp = _TERM_INDEX.get(term.lower())
-        if not grp:
-            continue
-        added = 0
-        for syn in sorted(grp):                     # 字典序，方便測試
-            if syn.lower() == term.lower() or syn in seen:
-                continue
-            seen.add(syn)
-            result.append(syn)
-            added += 1
-            if added >= max_expansion:
-                break
+        if grp:
+            added = 0
+            for syn in sorted(grp):
+                if syn.lower() == term.lower() or syn in seen:
+                    continue
+                seen.add(syn)
+                result.append(syn)
+                added += 1
+                if added >= max_expansion:
+                    break
+        else:
+            # 2. 未命中時，動態使用 LLM 對齊翻譯
+            llm_syns = await _get_llm_synonyms(term)
+            added = 0
+            for syn in sorted(llm_syns):
+                if syn.lower() == term.lower() or syn in seen:
+                    continue
+                seen.add(syn)
+                result.append(syn)
+                added += 1
+                if added >= max_expansion:
+                    break
 
     return result
 

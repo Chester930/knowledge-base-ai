@@ -679,8 +679,9 @@ function renderSources(uid, sources) {
   if (!sources || !sources.length) return;
   const el = document.getElementById(uid + '-sources');
   el.innerHTML = sources.map(s => {
-    const pct = Math.round(s.score * 100);
-    return `<span class="source-chip" onclick="openDocByTitle('${esc(s.title)}')">${esc(s.title)} <span class="source-score">${pct}%</span></span>`;
+    const pctStr = s.score != null ? `<span class="source-score">${Math.round(s.score * 100)}%</span>` : '';
+    const srcLabel = s.source === 'graph' ? '<span class="source-score" style="color:#a78bfa">圖譜</span>' : pctStr;
+    return `<span class="source-chip" onclick="openDocByTitle('${esc(s.title)}')">${esc(s.title)} ${srcLabel}</span>`;
   }).join('');
 }
 

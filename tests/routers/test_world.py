@@ -497,7 +497,7 @@ class TestProvenanceFacts:
                    return_value=_mock_kg_repo(kgs=[_kg()])), \
              patch("services.svo_service.query_svo_facts_with_provenance",
                    new=AsyncMock(return_value=[sf])), \
-             patch("services.entity_alignment.expand_terms", side_effect=lambda t, **kw: t):
+             patch("services.entity_alignment.expand_terms", new=AsyncMock(side_effect=lambda t, **kw: t)):
             async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as c:
                 res = await c.get("/world/provenance/facts?q=A")
 
@@ -519,7 +519,7 @@ class TestProvenanceFacts:
                    return_value=_mock_kg_repo(kgs=[_kg()])), \
              patch("services.svo_service.query_svo_facts_with_provenance",
                    new=AsyncMock(return_value=[])), \
-             patch("services.entity_alignment.expand_terms", side_effect=lambda t, **kw: t):
+             patch("services.entity_alignment.expand_terms", new=AsyncMock(side_effect=lambda t, **kw: t)):
             async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as c:
                 res = await c.get("/world/provenance/facts?q=不存在術語")
 
@@ -530,7 +530,7 @@ class TestProvenanceFacts:
         with patch("routers.world.get_driver"), \
              patch("routers.world.KnowledgeGraphRepository",
                    return_value=_mock_kg_repo(kgs=[])), \
-             patch("services.entity_alignment.expand_terms", side_effect=lambda t, **kw: t):
+             patch("services.entity_alignment.expand_terms", new=AsyncMock(side_effect=lambda t, **kw: t)):
             async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as c:
                 res = await c.get("/world/provenance/facts?q=AI&hops=2&limit=50")
 
@@ -544,7 +544,7 @@ class TestAlignSynonyms:
         with patch("services.entity_alignment.get_synonym_group",
                    return_value=["機器學習", "machine learning", "ML"]), \
              patch("services.entity_alignment.expand_terms",
-                   return_value=["機器學習", "machine learning", "ML"]):
+                   new=AsyncMock(return_value=["機器學習", "machine learning", "ML"])):
             async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as c:
                 res = await c.get("/world/align/synonyms?term=機器學習")
 
@@ -557,7 +557,7 @@ class TestAlignSynonyms:
 
     async def test_unknown_term_returns_not_found(self, test_app):
         with patch("services.entity_alignment.get_synonym_group", return_value=[]), \
-             patch("services.entity_alignment.expand_terms", return_value=["未知術語"]):
+             patch("services.entity_alignment.expand_terms", new=AsyncMock(return_value=["未知術語"])):
             async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as c:
                 res = await c.get("/world/align/synonyms?term=未知術語")
 
@@ -583,7 +583,7 @@ class TestAlignEntities:
         with patch("routers.world.get_driver"), \
              patch("routers.world.KnowledgeGraphRepository",
                    return_value=_mock_kg_repo(kgs=[])), \
-             patch("services.entity_alignment.expand_terms", return_value=["AI"]), \
+             patch("services.entity_alignment.expand_terms", new=AsyncMock(return_value=["AI"])), \
              patch("services.entity_alignment.align_entity_results", return_value=aligned), \
              patch("services.federation_service.get_federation_cache",
                    return_value=_mock_federation()):

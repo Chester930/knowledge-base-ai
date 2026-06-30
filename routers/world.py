@@ -77,7 +77,7 @@ async def provenance_facts(
     from models.provenance import ProvenanceReport
 
     terms = [t.strip() for t in q.split(",") if t.strip()]
-    terms = expand_terms(terms)  # Phase 2d 同義詞展開
+    terms = await expand_terms(terms)  # Phase 2d 同義詞展開
 
     driver = get_driver()
     kg_repo = KnowledgeGraphRepository(driver)
@@ -556,7 +556,7 @@ async def explore_entities(
     search_terms: list[str] = []
     if search_q and expand_synonyms:
         from services.entity_alignment import expand_terms
-        search_terms = expand_terms([search_q])
+        search_terms = await expand_terms([search_q])
     elif search_q:
         search_terms = [search_q]
 
@@ -641,7 +641,7 @@ async def get_synonyms(term: str = Query(..., description="術語（zh 或 en）
     """回傳 term 所屬的同義詞組，以及展開後的查詢詞清單。"""
     from services.entity_alignment import get_synonym_group, expand_terms
     group = get_synonym_group(term)
-    expanded = expand_terms([term])
+    expanded = await expand_terms([term])
     return {
         "term": term,
         "synonym_group": group,
@@ -665,7 +665,7 @@ async def align_entities(
     from services.federation_service import get_federation_cache
     from core.config import settings as _settings
 
-    search_terms = expand_terms([name])
+    search_terms = await expand_terms([name])
 
     driver = get_driver()
     kg_repo = KnowledgeGraphRepository(driver)

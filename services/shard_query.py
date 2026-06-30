@@ -204,7 +204,7 @@ async def query_shards_parallel(
 
     if expand_synonyms:
         from services.entity_alignment import expand_terms
-        terms = expand_terms(terms)
+        terms = await expand_terms(terms)
 
     async def _run(skill: KBSkill) -> ShardResult:
         try:
