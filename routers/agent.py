@@ -352,16 +352,20 @@ async def chat(req: ChatRequest):
             kg_repo = KnowledgeGraphRepository(get_driver())
 
             # ── Step 2：KG 路由層 ─────────────────────────────────────────────
-            all_kg_concepts = await concept_repo.get_all_kgs_concepts()
+            # 若請求指定了 kg_id，直接強制使用該 KG，跳過全域路由
+            if req.kg_id:
+                selected_kgs = [(req.kg_id, 1.0, [])]
+            else:
+                all_kg_concepts = await concept_repo.get_all_kgs_concepts()
 
-            kg_scores: list[tuple[UUID, float, list[str]]] = []
-            for kg_id, kg_concepts in all_kg_concepts.items():
-                score, matched = compute_match_score(query_concepts, kg_concepts)
-                if score >= KG_ROUTE_THRESHOLD:
-                    kg_scores.append((kg_id, score, matched))
+                kg_scores: list[tuple[UUID, float, list[str]]] = []
+                for kg_id, kg_concepts in all_kg_concepts.items():
+                    score, matched = compute_match_score(query_concepts, kg_concepts)
+                    if score >= KG_ROUTE_THRESHOLD:
+                        kg_scores.append((kg_id, score, matched))
 
-            kg_scores.sort(key=lambda x: x[1], reverse=True)
-            selected_kgs = kg_scores[:MAX_KG_PER_QUERY]
+                kg_scores.sort(key=lambda x: x[1], reverse=True)
+                selected_kgs = kg_scores[:MAX_KG_PER_QUERY]
 
             # 推送 KG 路由結果，同時快取 KG 物件（含 db_name）
             kg_route_info = []

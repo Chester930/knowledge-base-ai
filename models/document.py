@@ -76,3 +76,4 @@ class ChatRequest(BaseModel):
     use_svo: bool = True
     svo_hops: int = Field(default=2, ge=1, le=3)
     history: list[ChatMessage] | None = None  # 多輪對話歷史（☆10）
+    kg_id: UUID | None = None  # 指定時強制路由到此 KG，跳過全域路由
