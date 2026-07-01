@@ -246,7 +246,7 @@ async def sync_subscription(sub: Subscription) -> dict:
 # ── 同步所有訂閱 ───────────────────────────────────────────────────────────────
 
 async def sync_all_subscriptions() -> list[dict]:
-    """同步所有 active 訂閱，回傳每筆結果清單。"""
+    """並行同步所有 active 訂閱，回傳每筆結果清單（併發優化）。"""
     manager = get_subscription_manager()
     subs = await manager.list_all()
     active = [s for s in subs if s.status != "paused"]
@@ -255,24 +255,29 @@ async def sync_all_subscriptions() -> list[dict]:
         logger.info("無 active 訂閱需要同步")
         return []
 
-    results = []
-    for sub in active:
-        try:
-            res = await asyncio.wait_for(sync_subscription(sub), timeout=60.0)
-            if res["error"]:
-                await manager.set_status(sub.kb_id, "error", res["error"])
-                results.append({"kb_id": sub.kb_id, "kb_name": sub.kb_name, **res})
-            else:
-                await manager.set_last_sync(sub.kb_id, _now_iso())
-                results.append({"kb_id": sub.kb_id, "kb_name": sub.kb_name, **res})
-        except asyncio.TimeoutError:
-            await manager.set_status(sub.kb_id, "error", "同步超時（60s）")
-            results.append({"kb_id": sub.kb_id, "kb_name": sub.kb_name, "merged": 0, "error": "timeout"})
-        except Exception as e:
-            await manager.set_status(sub.kb_id, "error", str(e))
-            results.append({"kb_id": sub.kb_id, "kb_name": sub.kb_name, "merged": 0, "error": str(e)})
+    # 限制最大並發同步數為 5，防止佔用過多連線 Socket
+    sem = asyncio.Semaphore(5)
 
-    return results
+    async def _sync_one_with_sem(sub: Subscription) -> dict:
+        async with sem:
+            try:
+                res = await asyncio.wait_for(sync_subscription(sub), timeout=60.0)
+                if res["error"]:
+                    await manager.set_status(sub.kb_id, "error", res["error"])
+                    return {"kb_id": sub.kb_id, "kb_name": sub.kb_name, **res}
+                else:
+                    await manager.set_last_sync(sub.kb_id, _now_iso())
+                    return {"kb_id": sub.kb_id, "kb_name": sub.kb_name, **res}
+            except asyncio.TimeoutError:
+                await manager.set_status(sub.kb_id, "error", "同步超時（60s）")
+                return {"kb_id": sub.kb_id, "kb_name": sub.kb_name, "merged": 0, "error": "timeout"}
+            except Exception as e:
+                await manager.set_status(sub.kb_id, "error", str(e))
+                return {"kb_id": sub.kb_id, "kb_name": sub.kb_name, "merged": 0, "error": str(e)}
+
+    tasks = [_sync_one_with_sem(sub) for sub in active]
+    results = await asyncio.gather(*tasks)
+    return list(results)
 
 
 def _now_iso() -> str:
