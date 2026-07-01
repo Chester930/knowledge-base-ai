@@ -37,8 +37,15 @@ Write-Log "退出碼: $exitCode"
 Write-Log "耗時: $([Math]::Round($elapsed, 1)) 分鐘"
 
 # 統計結果
-$successCount = (Select-String -Path $LOG_FILE -Pattern "SUCCESS|成功|✓" -ErrorAction SilentlyContinue).Count
-$failCount    = (Select-String -Path $LOG_FILE -Pattern "FAIL|失敗|ERROR" -ErrorAction SilentlyContinue).Count
+$successCount = 0
+$failCount    = 0
+$logContent   = Get-Content $LOG_FILE -Raw
+if ($logContent -match '成功：(\d+) 個') {
+    $successCount = [int]$Matches[1]
+}
+if ($logContent -match '失敗：(\d+) 個') {
+    $failCount = [int]$Matches[1]
+}
 
 Write-Log "成功: $successCount | 失敗: $failCount"
 

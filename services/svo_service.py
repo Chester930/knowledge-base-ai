@@ -262,32 +262,50 @@ async def build_graph_for_kg(
                 return sc.idx, [], 0, last_err
 
         if to_process:
-            chunk_results = await asyncio.gather(
-                *[_process_chunk(sc) for sc in to_process]
-            )
-
-            doc_has_error = False
-            for idx, triples, merged, err in sorted(chunk_results, key=lambda x: x[0]):
-                if err:
-                    doc_has_error = True
-                    yield BuildProgress(event="error", chunk_idx=idx, message=str(err))
-                else:
-                    total_merged += merged
+            max_doc_attempts = 3
+            doc_attempt = 0
+            while to_process and doc_attempt < max_doc_attempts:
+                doc_attempt += 1
+                if doc_attempt > 1:
                     yield BuildProgress(
-                        event="chunk_done",
-                        chunk_idx=idx, total_chunks=total_chunks,
-                        triples_extracted=len(triples), triples_merged=merged,
-                        message=f"[{_doc_title}] 第 {idx} 段完成：{len(triples)} 組三元組",
+                        event="chunk_start",
+                        chunk_idx=0, total_chunks=total_chunks,
+                        message=f"[{_doc_title}] 重新對上一步失敗的 {len(to_process)} 個段落發起原地重試抽取（第 {doc_attempt} 次）...",
                     )
 
-            if doc_has_error:
-                failed_count = sum(1 for _, _, _, e in chunk_results if e)
-                logger.warning(
-                    f"[{_doc_title}] {failed_count} 個 chunk 最終失敗，"
-                    f"svo_processed_at 保留 null → 下次增量跑自動補提取"
+                chunk_results = await asyncio.gather(
+                    *[_process_chunk(sc) for sc in to_process]
                 )
-            else:
+
+                success_indices = set()
+                doc_has_error = False
+                for idx, triples, merged, err in sorted(chunk_results, key=lambda x: x[0]):
+                    if err:
+                        doc_has_error = True
+                        yield BuildProgress(event="error", chunk_idx=idx, message=str(err))
+                    else:
+                        success_indices.add(idx)
+                        total_merged += merged
+                        yield BuildProgress(
+                            event="chunk_done",
+                            chunk_idx=idx, total_chunks=total_chunks,
+                            triples_extracted=len(triples), triples_merged=merged,
+                            message=f"[{_doc_title}] 第 {idx} 段完成：{len(triples)} 組三元組",
+                        )
+
+                # 僅保留失敗的段落作為下一輪的 to_process
+                to_process = [sc for sc in to_process if sc.idx not in success_indices]
+
+                if not to_process:
+                    break
+
+            if not to_process:
+                # 100% 成功，標記為已處理
                 await _set_doc_svo_processed(_doc_id)
+            else:
+                logger.warning(
+                    f"[{_doc_title}] 達到原地重試上限 {max_doc_attempts} 次，仍有 {len(to_process)} 個 chunk 失敗，暫時跳過此文檔..."
+                )
         else:
             await _set_doc_svo_processed(_doc_id)
 
@@ -410,9 +428,23 @@ async def extract_svo_from_text(text: str, model_override: str | None = None) ->
 
 
 def _normalize_entity(name: str) -> str:
-    """正規化實體名稱（☆8）：NFKC + 去頭尾空白 + 合併連續空格，減少同義實體碎片。"""
+    """正規化實體名稱（☆8）：NFKC + 去頭尾空白 + 合併連續空格 + 修正康熙部首偏僻字。"""
     name = _unicodedata.normalize("NFKC", name).strip()
-    return re.sub(r"\s+", " ", name)
+    name = re.sub(r"\s+", " ", name)
+    # 修正康熙部首偏僻字對應
+    mapping = {
+        "\u2fd3": "龍",
+        "\u2fe3": "龍",
+        "\u2f9d": "門",
+        "\u2f08": "人",
+        "\u2f8b": "魚",
+        "\u2f8c": "鳥",
+        "\u2f94": "麥",
+        "\u2f9c": "黃",
+    }
+    for k, v in mapping.items():
+        name = name.replace(k, v)
+    return name
 
 
 async def merge_triples_to_neo4j(

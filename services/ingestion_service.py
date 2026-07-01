@@ -22,10 +22,10 @@ _ocr_reader = None
 def _get_ocr_reader():
     global _ocr_reader
     if _ocr_reader is None:
-        import easyocr
-        logger.info("初始化 OCR 引擎（繁中 + 英文），首次載入需下載模型…")
-        _ocr_reader = easyocr.Reader(["ch_tra", "en"], gpu=True, verbose=False)
-        logger.info("OCR 引擎載入完成")
+        from paddleocr import PaddleOCR
+        logger.info("初始化 PaddleOCR（中文 + 英文）…")
+        _ocr_reader = PaddleOCR(use_angle_cls=True, lang="ch", show_log=False, use_gpu=True)
+        logger.info("PaddleOCR 載入完成（GPU）")
     return _ocr_reader
 
 # 副檔名 → (reader_func, file_type_str)
@@ -60,7 +60,10 @@ async def ingest_file(file_path: str) -> Document:
     doc = await repo.create(
         title=title, content=content, file_path=str(path), file_type=file_type
     )
-    await extract_and_init_document_concepts(doc.id, content)
+    try:
+        await extract_and_init_document_concepts(doc.id, content)
+    except Exception as ce:
+        logger.warning(f"⚠️ 文件 {title} 概念提取失敗（Ollama 可能未啟動或連線失敗）：{ce}。文件仍會建立並關聯。")
     return doc
 
 
@@ -108,6 +111,7 @@ async def ingest_directory(dir_path: str, kg_id: str | None = None) -> tuple[lis
             logger.warning(msg)
 
     logger.info(f"匯入完成：成功 {len(success)} 個，失敗 {len(errors)} 個")
+    generate_ingest_summary(len(success), len(errors), errors)
     return success, errors
 
 
@@ -165,6 +169,7 @@ async def move_and_ingest(
             except Exception:
                 pass
 
+    generate_ingest_summary(len(success), len(ingest_errors), ingest_errors)
     return success, ingest_errors
 
 
@@ -196,7 +201,7 @@ def _read_text(path: Path) -> str:
 
 
 def _ocr_pdf(path: Path) -> str:
-    """OCR 備援：用 PyMuPDF 將每頁渲染成圖片，再用 easyocr 辨識文字。"""
+    """OCR 備援：用 PyMuPDF 將每頁渲染成圖片，再用 PaddleOCR 辨識文字。"""
     import fitz  # pymupdf
     import numpy as np
 
@@ -210,10 +215,17 @@ def _ocr_pdf(path: Path) -> str:
         pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
         img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, 3)
 
-        results = reader.readtext(img, detail=0, paragraph=True)
-        page_text = "\n".join(r for r in results if r.strip())
-        if page_text:
-            parts.append(f"[第 {i} 頁]\n{page_text}")
+        result = reader.ocr(img, cls=True)
+        page_lines: list[str] = []
+        if result and result[0]:
+            for line in result[0]:
+                if line and len(line) >= 2:
+                    text, _conf = line[1]
+                    if text.strip():
+                        page_lines.append(text)
+
+        if page_lines:
+            parts.append(f"[第 {i} 頁]\n" + "\n".join(page_lines))
         logger.debug(f"OCR 第 {i}/{len(doc)} 頁完成：{path.name}")
 
     doc.close()
@@ -364,3 +376,34 @@ def _read_ppt(path: Path) -> str:
                 pass
         pythoncom.CoUninitialize()
 
+def generate_ingest_summary(success_count: int, fail_count: int, errors: list[str]):
+    total = success_count + fail_count
+    fail_rate = (fail_count / total * 100) if total > 0 else 0
+    
+    import datetime
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    warning_text = ""
+    if fail_rate >= 20.0:
+        warning_text = "⚠️ 本次匯入失敗率偏高，建議人工檢查\n\n"
+        
+    summary_content = f"""{warning_text}# Ingestion 統計摘要
+
+- **時間戳**：{now_str}
+- **總檔案數**：{total}
+- **成功數**：{success_count}
+- **失敗數**：{fail_count}
+- **失敗率**：{fail_rate:.1f}%
+
+"""
+    if errors:
+        summary_content += "## 失敗詳情\n\n"
+        for err in errors:
+            summary_content += f"- {err}\n"
+            
+    summary_path = Path("ingest_summary.md")
+    try:
+        summary_path.write_text(summary_content, encoding="utf-8")
+        logger.info(f"已產生匯入統計摘要：{summary_path.absolute()}")
+    except Exception as e:
+        logger.error(f"寫入 {summary_path} 失敗：{e}")

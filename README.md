@@ -13,7 +13,7 @@
 | **Sentence-Aware Chunking** | 按句子邊界切分並持久化，SVO 節點記錄來源 chunk 座標 |
 | **多 Provider** | Ollama / OpenAI / Anthropic / Gemini / Grok，本地雲端自由切換 |
 | **自動分群建 KG** | LLM 分析暫存區文件，自動命名分群，確認後一鍵建立並觸發建圖 |
-| **PDF OCR 三層備援** | pypdf → pdfminer → EasyOCR（繁中+英），無損轉換掃描版 PDF |
+| **PDF OCR 三層備援** | pypdf → pdfminer → PaddleOCR（繁中+英），無損轉換掃描版 PDF |
 
 ## 系統架構
 
@@ -62,7 +62,7 @@
 | Neo4j Driver >= 5.24 | 主資料庫 + 每 KG 獨立資料庫（Enterprise） |
 | sentence-transformers >= 3.0 | 本地 embedding（無需 API 金鑰） |
 | Ollama / OpenAI / Anthropic / Gemini / Grok | 可選 LLM |
-| EasyOCR / PaddleOCR | PDF OCR 備援 |
+| PaddleOCR | PDF OCR 統一引擎 |
 | faster-whisper | 音影片轉譯 |
 | Vanilla JS | 前端，無框架依賴 |
 
