@@ -18,14 +18,14 @@ try {
 
 # ── 2. 檢查 Neo4j Desktop 是否仍在跑（會衝突）──────────────────────────
 Write-Host "`n[2/4] 檢查 Neo4j Desktop DBMS..." -ForegroundColor Yellow
-$neo4jPort = Test-NetConnection -ComputerName localhost -Port 7689 -WarningAction SilentlyContinue
+$neo4jPort = Test-NetConnection -ComputerName localhost -Port 7989 -WarningAction SilentlyContinue
 if ($neo4jPort.TcpTestSucceeded) {
-    Write-Host "  ⚠️  偵測到 port 7689 已被佔用（Neo4j Desktop 可能正在執行）" -ForegroundColor Red
+    Write-Host "  ⚠️  偵測到 port 7989 已被佔用（Neo4j Desktop 可能正在執行）" -ForegroundColor Red
     Write-Host "  請到 Neo4j Desktop → KG Test → Stop，再重新執行此腳本。" -ForegroundColor Red
     Read-Host "按 Enter 離開"
     exit 1
 }
-Write-Host "  Port 7689 空閒，可以啟動" -ForegroundColor Green
+Write-Host "  Port 7989 空閒，可以啟動" -ForegroundColor Green
 
 # ── 3. 檢查 Ollama ────────────────────────────────────────────────────────
 Write-Host "`n[3/4] 檢查 Ollama（qwen2.5:7b）..." -ForegroundColor Yellow
