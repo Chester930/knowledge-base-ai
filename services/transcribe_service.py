@@ -219,8 +219,13 @@ def _get_ocr_reader():
         from paddleocr import PaddleOCR
         logger.info("初始化 PaddleOCR（中文 + 英文）…")
         # lang='ch' 支援繁/簡中文與英文；show_log=False 抑制冗長輸出
-        _ocr_reader = PaddleOCR(use_angle_cls=True, lang="ch", show_log=False, use_gpu=True)
-        logger.info("PaddleOCR 載入完成（GPU）")
+        try:
+            _ocr_reader = PaddleOCR(use_angle_cls=True, lang="ch", show_log=False, use_gpu=True)
+            logger.info("PaddleOCR 載入完成（GPU）")
+        except Exception as e:
+            logger.warning(f"PaddleOCR GPU 初始化失敗，改用 CPU：{e}")
+            _ocr_reader = PaddleOCR(use_angle_cls=True, lang="ch", show_log=False, use_gpu=False)
+            logger.info("PaddleOCR 載入完成（CPU）")
     return _ocr_reader
 
 

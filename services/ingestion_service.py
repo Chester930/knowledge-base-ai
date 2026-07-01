@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 SUPPORTED_EXTENSIONS = {".md", ".txt", ".pdf", ".docx", ".pptx", ".doc", ".ppt"}
 
-# easyocr Reader 耗時初始化，模組層級快取，首次 OCR 時才建立
+# PaddleOCR Reader 耗時初始化，模組層級快取，首次 OCR 時才建立
 _ocr_reader = None
 
 
@@ -24,8 +24,13 @@ def _get_ocr_reader():
     if _ocr_reader is None:
         from paddleocr import PaddleOCR
         logger.info("初始化 PaddleOCR（中文 + 英文）…")
-        _ocr_reader = PaddleOCR(use_angle_cls=True, lang="ch", show_log=False, use_gpu=True)
-        logger.info("PaddleOCR 載入完成（GPU）")
+        try:
+            _ocr_reader = PaddleOCR(use_angle_cls=True, lang="ch", show_log=False, use_gpu=True)
+            logger.info("PaddleOCR 載入完成（GPU）")
+        except Exception as e:
+            logger.warning(f"PaddleOCR GPU 初始化失敗，改用 CPU：{e}")
+            _ocr_reader = PaddleOCR(use_angle_cls=True, lang="ch", show_log=False, use_gpu=False)
+            logger.info("PaddleOCR 載入完成（CPU）")
     return _ocr_reader
 
 # 副檔名 → (reader_func, file_type_str)
