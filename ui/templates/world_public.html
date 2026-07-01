@@ -523,6 +523,7 @@ async function doWorldChat() {
   document.getElementById('world-send-btn').disabled = true;
   const bubble = document.getElementById(uid + '-bubble');
   let fullText = '';
+  let hasError = false;
 
   try {
     const res = await fetch(`${API}/world/chat`, {
@@ -568,13 +569,18 @@ async function doWorldChat() {
           bubble.appendChild(cur);
           document.getElementById('world-chat-history').scrollTop = 999999;
         } else if (evt.done) {
-          bubble.textContent = fullText;
+          if (!hasError) {
+            bubble.textContent = fullText;
+          }
         } else if (evt.error) {
           bubble.innerHTML = `<span style="color:#d63031">❌ ${esc(evt.error)}</span>`;
+          hasError = true;
         }
       }
     }
-    bubble.textContent = fullText || bubble.textContent;
+    if (!hasError) {
+      bubble.textContent = fullText || bubble.textContent;
+    }
   } catch(e) {
     bubble.innerHTML = `<span style="color:#d63031">❌ 連線失敗：${esc(e.message)}</span>`;
   } finally {

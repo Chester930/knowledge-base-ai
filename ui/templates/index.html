@@ -731,6 +731,7 @@ async function doChat() {
 
   const bubble = document.getElementById(uid + '-bubble');
   let fullText = '';
+  let hasError = false;
 
   try {
     const res = await fetch(`${API}/agent/chat`, {
@@ -785,16 +786,21 @@ async function doChat() {
           bubble.appendChild(cur);
           document.getElementById('chat-history').scrollTop = 999999;
         } else if (evt.done) {
-          bubble.textContent = fullText;
+          if (!hasError) {
+            bubble.textContent = fullText;
+          }
           finalizeRefineNotes(uid);
         } else if (evt.error) {
           bubble.innerHTML = `<span style="color:#d63031">❌ ${esc(evt.error)}</span>`;
+          hasError = true;
         }
       }
     }
-    bubble.textContent = fullText || bubble.textContent;
+    if (!hasError) {
+      bubble.textContent = fullText || bubble.textContent;
+    }
     // 記錄本輪到對話歷史
-    if (fullText) {
+    if (fullText && !hasError) {
       chatHistory.push({ role: 'user', content: question });
       chatHistory.push({ role: 'assistant', content: fullText });
       if (chatHistory.length > 16) chatHistory = chatHistory.slice(-16); // 最多 8 輪

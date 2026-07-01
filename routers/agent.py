@@ -544,6 +544,7 @@ async def chat(req: ChatRequest):
             extra_chunks: list[str] = []
             used_cids: set[str] = set()
             final_answer: str | None = None
+            last_clean_answer: str | None = None
 
             # 精煉迴圈（只在有 chunk_ids 且啟用 SVO 時進行）
             if req.use_svo and svo_chunk_ids:
@@ -560,6 +561,7 @@ async def chat(req: ChatRequest):
                             raw_parts.append(tok)
                         raw = "".join(raw_parts)
                         clean, confidence = _extract_confidence(raw)
+                        last_clean_answer = clean
                         # 送出本輪的預覽答案（信心 JSON 已剝離）
                         yield _sse({"refine_preview": {"round": round_num + 1, "answer": clean}})
                     except Exception as e:
@@ -599,12 +601,17 @@ async def chat(req: ChatRequest):
 
             yield _sse({"status": "generating"})
 
+            # 如果精煉完畢但未達門檻，直接採用最後一輪的答案，避免再次重複呼叫 LLM
+            if final_answer is None and last_clean_answer is not None:
+                final_answer = last_clean_answer
+                logger.info("精煉輪次耗盡，直接採用最後一輪的備份答案")
+
             if final_answer is not None:
-                # 精煉後有充足信心 → 分段 emit 緩衝答案
+                # 有精煉產生的最終答案 → 分段 emit 緩衝答案
                 for i in range(0, len(final_answer), 80):
                     yield _sse({"token": final_answer[i:i + 80]})
             else:
-                # 精煉輪次耗盡 or 未觸發精煉 → 收集完整回答後剝離 confidence JSON 再 emit
+                # 未觸發任何精煉迴圈 → 呼叫 LLM 生產
                 prompt = _build_rag_prompt(
                     req.question, svo_facts, contexts,
                     extra_chunks if extra_chunks else None,

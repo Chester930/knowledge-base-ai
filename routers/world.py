@@ -775,10 +775,22 @@ async def explore_neighbors(
     edges: list[dict] = []
 
     for r in result.records:
-        node_set[r["src"]] = {"id": r["src"], "type": r["src_type"] or "Entity", "is_seed": True}
-        node_set[r["dst"]] = {"id": r["dst"], "type": r["dst_type"] or "Entity", "is_seed": False}
+        src_name = r["src"]
+        dst_name = r["dst"]
+        node_set[src_name] = {
+            "id": src_name,
+            "type": r["src_type"] or "Entity",
+            "is_seed": (src_name == entity),
+        }
+        if dst_name not in node_set or dst_name == entity:
+            node_set[dst_name] = {
+                "id": dst_name,
+                "type": r["dst_type"] or "Entity",
+                "is_seed": (dst_name == entity),
+            }
         edges.append({
-            "src": r["src"], "dst": r["dst"],
+            "src": src_name,
+            "dst": dst_name,
             "rel_type": r["rel_type"],
             "verb": r["verb"] or r["rel_type"],
         })

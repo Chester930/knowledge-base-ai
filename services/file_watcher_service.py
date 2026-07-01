@@ -82,21 +82,19 @@ def get_status() -> dict:
 
 # ── 事件處理器 ────────────────────────────────────────────────────────────────
 
-class _TranscribeHandler:
-    """watchdog event handler — 偵測新增或移入的支援格式檔案，自動觸發轉譯。"""
+try:
+    from watchdog.events import FileSystemEventHandler
+except ImportError:
+    FileSystemEventHandler = object
 
-    # watchdog 會傳 FileCreatedEvent / FileMovedEvent；使用 dispatch 介面。
-    def __init__(self):
-        try:
-            from watchdog.events import FileSystemEventHandler
-            self._base = FileSystemEventHandler
-        except ImportError:
-            self._base = object
+
+class _TranscribeHandler(FileSystemEventHandler):
+    """watchdog event handler — 偵測新增或移入的支援格式檔案，自動觸發轉譯。"""
 
     def dispatch(self, event):
         try:
             from watchdog.events import (
-                FileCreatedEvent, FileMovedEvent, EVENT_TYPE_CREATED, EVENT_TYPE_MOVED
+                FileCreatedEvent, FileMovedEvent
             )
         except ImportError:
             return
@@ -121,7 +119,33 @@ class _TranscribeHandler:
         # 避免 watchdog 執行緒阻塞，用 threading 背景執行轉譯
         threading.Thread(target=self._run_transcribe, args=(src,), daemon=True).start()
 
+    def _wait_until_stable(self, src: Path, timeout: float = 30.0) -> bool:
+        """等待檔案大小穩定且可以正常開啟，避免讀取正在寫入中的檔案。"""
+        import time
+        t_start = time.time()
+        last_size = -1
+        while time.time() - t_start < timeout:
+            if not src.exists():
+                return False
+            try:
+                current_size = src.stat().st_size
+                # 如果檔案大小大於 0 且在最近 1 秒內沒有改變
+                if current_size > 0 and current_size == last_size:
+                    # 嘗試以 append 模式打開它（檢查是否被其他進程鎖定）
+                    with open(src, "ab"):
+                        pass
+                    return True
+                last_size = current_size
+            except (OSError, PermissionError):
+                # 檔案可能正被寫入鎖定中，繼續等待
+                pass
+            time.sleep(1.0)
+        return False
+
     def _run_transcribe(self, src: Path) -> None:
+        if not self._wait_until_stable(src):
+            logger.warning(f"檔案寫入未穩定，略過自動轉譯：{src.name}")
+            return
         result = transcribe_file(src)
         if result.success:
             logger.info(f"自動轉譯成功：{src.name} → {result.txt_path}")

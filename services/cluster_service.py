@@ -169,14 +169,26 @@ async def cluster_staging_files() -> list[dict]:
 
     logger.info(f"找到 {len(unmatched_files)} 個 unmatched 文件，進行分群分析")
 
-    # 提取每個文件的向量和概念
+    # 並行提取每個文件的向量和概念（並行優化）
+    import asyncio as _asyncio
+
+    async def _process_one_doc(txt: Path):
+        try:
+            vec, concepts = await _get_doc_embedding(txt)
+            return txt.name, vec, concepts
+        except Exception as e:
+            logger.warning(f"提取文件嵌入失敗 [{txt.name}]: {e}")
+            return txt.name, [], []
+
+    tasks = [_process_one_doc(txt) for txt in unmatched_files]
+    results = await _asyncio.gather(*tasks)
+
     doc_embeddings: dict[str, list[float]] = {}
     doc_concepts: dict[str, list[str]] = {}
-    for txt in unmatched_files:
-        vec, concepts = await _get_doc_embedding(txt)
+    for name, vec, concepts in results:
         if vec:
-            doc_embeddings[txt.name] = vec
-            doc_concepts[txt.name] = concepts
+            doc_embeddings[name] = vec
+            doc_concepts[name] = concepts
 
     names = list(doc_embeddings.keys())
     if len(names) < CLUSTER_MIN_SIZE:
@@ -193,8 +205,8 @@ async def cluster_staging_files() -> list[dict]:
     # 分群
     components = _connected_components(names, sim_matrix, CLUSTER_INTRA_THRESHOLD)
 
-    # 過濾：群太小 or 群內相似度不夠的跳過
-    suggestions = []
+    # 過濾：群太小 or 群內相似度不夠的跳過，並收集各群組的概念頻率
+    candidate_groups = []
     for members in components:
         if len(members) < CLUSTER_MIN_SIZE:
             continue
@@ -208,20 +220,26 @@ async def cluster_staging_files() -> list[dict]:
             for c in doc_concepts.get(fname, []):
                 concept_freq[c] = concept_freq.get(c, 0) + 1
         top_concepts = sorted(concept_freq, key=concept_freq.get, reverse=True)[:15]
+        candidate_groups.append((members, top_concepts, intra_sim))
 
-        # LLM 建議名稱
+    # 並行調用 LLM 建議名稱（並行優化）
+    async def _suggest_one_group(members, top_concepts, intra_sim):
         suggested_name, suggested_desc = await _suggest_kg_name(members, top_concepts)
-
-        suggestions.append({
+        return {
             "suggested_name": suggested_name,
             "suggested_description": suggested_desc,
             "files": members,
             "top_concepts": top_concepts,
             "intra_similarity": round(intra_sim, 3),
-        })
+        }
+
+    llm_tasks = [_suggest_one_group(m, tc, sim) for m, tc, sim in candidate_groups]
+    suggestions = await _asyncio.gather(*llm_tasks)
+
+    for s in suggestions:
         logger.info(
-            f"群組建議：{suggested_name}（{len(members)} 份文件，"
-            f"avg_sim={intra_sim:.2f}）"
+            f"群組建議：{s['suggested_name']}（{len(s['files'])} 份文件，"
+            f"avg_sim={s['intra_similarity']:.2f}）"
         )
 
     suggestions.sort(key=lambda s: s["intra_similarity"], reverse=True)

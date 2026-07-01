@@ -30,6 +30,7 @@ class FederationCache:
         self._fetched_at: float = 0.0
         self._drivers: dict[str, AsyncDriver] = {}   # kb_id -> AsyncDriver
         self._shard_status: dict[str, str] = {}      # kb_id -> "online" | "offline" | "local"
+        self._offline_timestamps: dict[str, float] = {}  # kb_id -> timestamp (熔斷冷卻時間戳)
         self._lock = asyncio.Lock()
 
     # ── GitHub Registry ───────────────────────────────────────────────────────
@@ -91,6 +92,13 @@ class FederationCache:
         if skill.is_local or not skill.aura_uri:
             return None
 
+        # 熔斷保護：若處於 offline 且距離上次失敗小於 60 秒，則直接略過連線嘗試
+        if self._shard_status.get(skill.kb_id) == "offline":
+            last_fail = self._offline_timestamps.get(skill.kb_id, 0.0)
+            if time.time() - last_fail < 60.0:
+                logger.debug(f"AuraDB 處於熔斷冷卻期，略過連線：{skill.name} [{skill.instance_id}]")
+                return None
+
         if skill.kb_id not in self._drivers:
             try:
                 auth = (skill.read_token or "neo4j", "")
@@ -98,10 +106,12 @@ class FederationCache:
                 await driver.verify_connectivity()
                 self._drivers[skill.kb_id] = driver
                 self._shard_status[skill.kb_id] = "online"
+                self._offline_timestamps.pop(skill.kb_id, None)
                 logger.info(f"AuraDB 連線建立：{skill.name} ({skill.instance_id})")
             except Exception as e:
                 logger.warning(f"AuraDB 連線失敗 [{skill.name}]：{e}")
                 self._shard_status[skill.kb_id] = "offline"
+                self._offline_timestamps[skill.kb_id] = time.time()
                 return None
 
         return self._drivers.get(skill.kb_id)
@@ -109,6 +119,7 @@ class FederationCache:
     def mark_shard_offline(self, kb_id: str) -> None:
         """標記某個分片為離線（查詢逾時或失敗時呼叫）。"""
         self._shard_status[kb_id] = "offline"
+        self._offline_timestamps[kb_id] = time.time()
         driver = self._drivers.pop(kb_id, None)
         if driver:
             asyncio.create_task(driver.close())

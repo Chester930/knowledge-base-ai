@@ -338,27 +338,41 @@ def _ocr_pptx(path: Path) -> str:
 
 
 def _read_doc(path: Path) -> str:
+    import pythoncom
+    import win32com.client
+    pythoncom.CoInitialize()
+    word = None
+    doc = None
     try:
-        import pythoncom
-        import win32com.client
-        pythoncom.CoInitialize()
         word = win32com.client.Dispatch("Word.Application")
         word.Visible = False
         word.DisplayAlerts = False
         doc = word.Documents.Open(str(path.absolute()), ReadOnly=True)
         text = doc.Content.Text
-        doc.Close(False)
-        word.Quit()
         return _sanitize(text)
     except Exception as e:
         raise RuntimeError(f".doc 讀取失敗（需安裝 Microsoft Office）：{e}") from e
+    finally:
+        if doc is not None:
+            try:
+                doc.Close(False)
+            except Exception:
+                pass
+        if word is not None:
+            try:
+                word.Quit()
+            except Exception:
+                pass
+        pythoncom.CoUninitialize()
 
 
 def _read_ppt(path: Path) -> str:
+    import pythoncom
+    import win32com.client
+    pythoncom.CoInitialize()
+    ppt_app = None
+    presentation = None
     try:
-        import pythoncom
-        import win32com.client
-        pythoncom.CoInitialize()
         ppt_app = win32com.client.Dispatch("PowerPoint.Application")
         ppt_app.Visible = True
         presentation = ppt_app.Presentations.Open(
@@ -377,11 +391,21 @@ def _read_ppt(path: Path) -> str:
                     pass
             if slide_texts:
                 parts.append(f"[第 {i} 頁]\n" + "\n".join(slide_texts))
-        presentation.Close()
-        ppt_app.Quit()
         return _sanitize("\n\n".join(parts))
     except Exception as e:
         raise RuntimeError(f".ppt 讀取失敗（需安裝 Microsoft Office）：{e}") from e
+    finally:
+        if presentation is not None:
+            try:
+                presentation.Close()
+            except Exception:
+                pass
+        if ppt_app is not None:
+            try:
+                ppt_app.Quit()
+            except Exception:
+                pass
+        pythoncom.CoUninitialize()
 
 
 # ── Whisper 語音/影片轉譯 ──────────────────────────────────────────────────────

@@ -208,10 +208,15 @@ async def query_shards_parallel(
 
     async def _run(skill: KBSkill) -> ShardResult:
         try:
-            return await asyncio.wait_for(
+            res = await asyncio.wait_for(
                 _query_one_shard(skill, terms, hops, limit_per_shard),
                 timeout=timeout,
             )
+            # 如果是遠端分片且查詢失敗，也主動標記為離線以啟動熔斷保護
+            if res.status == "error" and not skill.is_local:
+                from services.federation_service import get_federation_cache
+                get_federation_cache().mark_shard_offline(skill.kb_id)
+            return res
         except asyncio.TimeoutError:
             logger.warning(f"分片超時（{timeout:.0f}s）：{skill.name} [{skill.instance_id}]")
             if not skill.is_local:

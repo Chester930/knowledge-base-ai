@@ -123,24 +123,26 @@ async def expand_terms(terms: list[str], max_expansion: int = 3) -> list[str]:
     - 原詞保留最前，展開詞依字典序附後
     - 優先使用內建靜態同義詞表
     - 若未命中，利用 LLM 來做動態多語言術語翻譯與對齊
-    - 去重保序
+    - 去重保序（大小寫不敏感去重，保留原詞大小寫格式）
     """
-    seen: set[str] = set()
+    seen_lower: set[str] = set()
     result: list[str] = []
 
     for term in terms:
-        if term not in seen:
-            seen.add(term)
+        t_low = term.lower()
+        if t_low not in seen_lower:
+            seen_lower.add(t_low)
             result.append(term)
         
         # 1. 優先匹配靜態同義詞表
-        grp = _TERM_INDEX.get(term.lower())
+        grp = _TERM_INDEX.get(t_low)
         if grp:
             added = 0
             for syn in sorted(grp):
-                if syn.lower() == term.lower() or syn in seen:
+                syn_low = syn.lower()
+                if syn_low == t_low or syn_low in seen_lower:
                     continue
-                seen.add(syn)
+                seen_lower.add(syn_low)
                 result.append(syn)
                 added += 1
                 if added >= max_expansion:
@@ -150,9 +152,10 @@ async def expand_terms(terms: list[str], max_expansion: int = 3) -> list[str]:
             llm_syns = await _get_llm_synonyms(term)
             added = 0
             for syn in sorted(llm_syns):
-                if syn.lower() == term.lower() or syn in seen:
+                syn_low = syn.lower()
+                if syn_low == t_low or syn_low in seen_lower:
                     continue
-                seen.add(syn)
+                seen_lower.add(syn_low)
                 result.append(syn)
                 added += 1
                 if added >= max_expansion:

@@ -61,7 +61,8 @@ class TestReadPdf:
         mock_reader = MagicMock()
         mock_reader.pages = [mock_page]
 
-        with patch("pypdf.PdfReader", return_value=mock_reader):
+        with patch("pypdf.PdfReader", return_value=mock_reader), \
+             patch("services.ingestion_service._ocr_pdf", return_value=""):
             result = _read_pdf(tmp_path / "a.pdf")
 
         assert "PDF 第一頁" in result
@@ -75,7 +76,8 @@ class TestReadPdf:
         mock_reader = MagicMock()
         mock_reader.pages = pages
 
-        with patch("pypdf.PdfReader", return_value=mock_reader):
+        with patch("pypdf.PdfReader", return_value=mock_reader), \
+             patch("services.ingestion_service._ocr_pdf", return_value=""):
             result = _read_pdf(tmp_path / "multi.pdf")
 
         for i in range(3):
@@ -87,7 +89,8 @@ class TestReadPdf:
         mock_reader = MagicMock()
         mock_reader.pages = [mock_page]
 
-        with patch("pypdf.PdfReader", return_value=mock_reader):
+        with patch("pypdf.PdfReader", return_value=mock_reader), \
+             patch("services.ingestion_service._ocr_pdf", return_value=""):
             result = _read_pdf(tmp_path / "null.pdf")
 
         assert result == ""
@@ -96,7 +99,8 @@ class TestReadPdf:
         mock_reader = MagicMock()
         mock_reader.pages = []
 
-        with patch("pypdf.PdfReader", return_value=mock_reader):
+        with patch("pypdf.PdfReader", return_value=mock_reader), \
+             patch("services.ingestion_service._ocr_pdf", return_value=""):
             result = _read_pdf(tmp_path / "empty.pdf")
 
         assert result == ""

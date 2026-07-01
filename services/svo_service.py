@@ -104,9 +104,17 @@ async def build_graph_for_kg(
         else:
             await _clear_kg_entities(kg_id, db_name)
         await _reset_docs_svo_processed(kg_id)
+        # 清除快取
+        to_del = [k for k in _bfs_cache.keys() if k[0] == str(kg_id)]
+        for k in to_del:
+            _bfs_cache.pop(k, None)
     else:
         docs = await _filter_unprocessed_docs(docs)
         if not docs:
+            # 即使沒有文件要處理，也主動清一次快取確保一致性
+            to_del = [k for k in _bfs_cache.keys() if k[0] == str(kg_id)]
+            for k in to_del:
+                _bfs_cache.pop(k, None)
             yield BuildProgress(event="done", message="所有文件已是最新，無需重建")
             return
 
@@ -284,6 +292,10 @@ async def build_graph_for_kg(
             await _set_doc_svo_processed(_doc_id)
 
     await kg_repo.refresh_counts(kg_id)
+    # 再次清除快取以反映最新合併的資料
+    to_del = [k for k in _bfs_cache.keys() if k[0] == str(kg_id)]
+    for k in to_del:
+        _bfs_cache.pop(k, None)
     yield BuildProgress(
         event="done",
         triples_merged=total_merged,

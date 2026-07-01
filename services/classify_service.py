@@ -117,25 +117,34 @@ async def assign_document_to_kg(txt_filename: str, kg_id: UUID) -> None:
     shutil.move(str(txt_path), str(dest))
     logger.info(f"檔案移動：{txt_filename} → {dest}")
 
-    # 建立 Document 節點
-    text = dest.read_text(encoding="utf-8")
-    doc_repo = DocumentRepository(get_driver())
-    doc = await doc_repo.create(
-        title=txt_path.stem,
-        content=text,
-        file_path=str(dest),
-        file_type="txt",
-    )
+    try:
+        # 建立 Document 節點
+        text = dest.read_text(encoding="utf-8")
+        doc_repo = DocumentRepository(get_driver())
+        doc = await doc_repo.create(
+            title=txt_path.stem,
+            content=text,
+            file_path=str(dest),
+            file_type="txt",
+        )
 
-    # 提取概念，建立路由層
-    await extract_and_init_document_concepts(doc.id, text)
+        # 提取概念，建立路由層
+        await extract_and_init_document_concepts(doc.id, text)
 
-    # 建立 KG ↔ Document 關聯
-    await kg_repo.add_document(kg_id, doc.id)
+        # 建立 KG ↔ Document 關聯
+        await kg_repo.add_document(kg_id, doc.id)
 
-    # 刷新 KG 路由層概念
-    await refresh_kg_concepts(kg_id)
-    logger.info(f"分配完成：{txt_filename} → KG {kg.name}（doc_id={doc.id}）")
+        # 刷新 KG 路由層概念
+        await refresh_kg_concepts(kg_id)
+        logger.info(f"分配完成：{txt_filename} → KG {kg.name}（doc_id={doc.id}）")
+    except Exception as e:
+        logger.warning(f"分配處理失敗，將檔案退回暫存區 [{txt_filename}]: {e}")
+        try:
+            shutil.move(str(dest), str(txt_path))
+            logger.info(f"已成功退回：{dest.name} 搬回 {txt_path}")
+        except Exception as re:
+            logger.error(f"退回暫存區失敗：{re}")
+        raise e
 
     # 自動觸發增量 SVO 提取（背景執行，不阻塞回應）
     async def _auto_svo():
