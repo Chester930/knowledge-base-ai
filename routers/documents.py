@@ -5,8 +5,8 @@ import tempfile
 from fastapi import APIRouter, BackgroundTasks, HTTPException, UploadFile, File
 from pydantic import BaseModel
 
-from core.config import settings
 from core.database import get_driver
+from core.upload_guard import write_upload_with_guard
 from models.document import Document, DocumentCreate, DocumentConcept
 from repositories.document_repo import DocumentRepository
 from repositories.concept_repo import ConceptRepository
@@ -16,16 +16,6 @@ from services.ingestion_service import (
 )
 
 router = APIRouter(prefix="/documents", tags=["documents"])
-
-# 上傳檔案 magic bytes 校驗（僅對有固定簽章的二進位格式檢查；.md/.txt 純文字不校驗）
-_MAGIC_SIGNATURES: dict[str, tuple[bytes, ...]] = {
-    ".pdf": (b"%PDF",),
-    ".docx": (b"PK\x03\x04",),
-    ".pptx": (b"PK\x03\x04",),
-    ".doc": (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",),
-    ".ppt": (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",),
-}
-_UPLOAD_CHUNK_SIZE = 1024 * 1024
 
 
 class MoveIngestRequest(BaseModel):
@@ -50,40 +40,11 @@ async def upload_document(file: UploadFile = File(...)):
     if suffix not in SUPPORTED_EXTENSIONS:
         raise HTTPException(400, f"不支援的格式 {suffix}，支援：{', '.join(SUPPORTED_EXTENSIONS)}")
 
-    max_bytes = settings.max_upload_size_mb * 1024 * 1024
-    total = 0
-    header = b""
-    tmp_path: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp_path = tmp.name
-            while True:
-                chunk = await file.read(_UPLOAD_CHUNK_SIZE)
-                if not chunk:
-                    break
-                total += len(chunk)
-                if total > max_bytes:
-                    raise HTTPException(
-                        413, f"檔案超過大小上限 {settings.max_upload_size_mb}MB"
-                    )
-                if len(header) < 16:
-                    header += chunk[: 16 - len(header)]
-                tmp.write(chunk)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp_path = Path(tmp.name)
 
-        signatures = _MAGIC_SIGNATURES.get(suffix)
-        if signatures and not any(header.startswith(sig) for sig in signatures):
-            raise HTTPException(400, f"檔案內容與副檔名 {suffix} 不符")
-
-        doc = await ingest_file(tmp_path)
-        return doc
-    except HTTPException:
-        if tmp_path:
-            Path(tmp_path).unlink(missing_ok=True)
-        raise
-    except Exception:
-        if tmp_path:
-            Path(tmp_path).unlink(missing_ok=True)
-        raise
+    await write_upload_with_guard(file, suffix, tmp_path)
+    return await ingest_file(str(tmp_path))
 
 
 @router.post("/ingest-dir")

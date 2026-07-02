@@ -171,6 +171,20 @@ class TestTranscribeFile:
         assert res.status_code == 415
         assert "不支援" in res.json()["detail"]
 
+    async def test_fake_pdf_extension_rejected_by_magic_bytes(self, test_app):
+        """副檔名為 .pdf 但內容並非真正 PDF（magic bytes 不符）應被拒絕。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("routers.transcribe.settings") as ms:
+                ms.workspace_dir = tmpdir
+                async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as c:
+                    res = await c.post(
+                        "/transcribe/file",
+                        files=_upload_file("fake.pdf", content=b"not a real pdf"),
+                    )
+
+        assert res.status_code == 400
+        assert "不符" in res.json()["detail"]
+
     async def test_txt_file_accepted(self, test_app):
         result = _ok_result(src="note.txt", txt="note.txt", chars=100)
         with tempfile.TemporaryDirectory() as tmpdir:

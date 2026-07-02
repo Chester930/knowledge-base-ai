@@ -36,6 +36,9 @@ _CHUNKS_PER_ROUND = 3         # 每輪補充的 chunk 數
 _CONFIDENCE_RE = re.compile(r'\{"confidence":\s*([\d.]+)[^}]*\}\s*$', re.DOTALL)
 _NO_INFO_RE = re.compile(r"知識庫目前無此資訊|找不到相關|無法回答|沒有相關資訊", re.IGNORECASE)
 
+# Graph-CoT 簡化版：BFS 證據過於稀疏時，加深一跳重查（不呼叫 LLM 選路，只擴大搜尋半徑）
+_SVO_SPARSE_FACT_THRESHOLD = 3
+
 
 def _cosine(v1: list[float], v2: list[float]) -> float:
     dot = sum(a * b for a, b in zip(v1, v2))
@@ -404,35 +407,55 @@ async def chat(req: ChatRequest):
                 seen_cids: set[str] = set()
 
                 # 多 KG 並行 BFS（☆4 優化）
-                async def _bfs_kg(kg_id):
+                async def _bfs_kg(kg_id, hops):
                     kg_obj = selected_kg_objects.get(kg_id)
                     db_name = getattr(kg_obj, "db_name", "") if kg_obj else ""
                     return await query_svo_facts(
-                        kg_id, terms, hops=req.svo_hops, limit=50, db_name=db_name
+                        kg_id, terms, hops=hops, limit=50, db_name=db_name
                     )
+
+                def _merge_bfs_results(results):
+                    for res in results:
+                        if isinstance(res, Exception):
+                            logger.warning(f"BFS 並行錯誤：{res}")
+                            continue
+                        facts, src_ids, cids = res
+                        for f in facts:
+                            if f not in seen_facts:
+                                seen_facts.add(f)
+                                svo_facts.append(f)
+                        for doc_id in src_ids:
+                            if doc_id not in seen_doc_ids:
+                                seen_doc_ids.add(doc_id)
+                                graph_doc_ids.append(doc_id)
+                        for cid in cids:
+                            if cid not in seen_cids:
+                                seen_cids.add(cid)
+                                svo_chunk_ids.append(cid)
 
                 import asyncio as _asyncio
                 bfs_results = await _asyncio.gather(
-                    *[_bfs_kg(kg_id) for kg_id, _, _ in selected_kgs],
+                    *[_bfs_kg(kg_id, req.svo_hops) for kg_id, _, _ in selected_kgs],
                     return_exceptions=True,
                 )
-                for res in bfs_results:
-                    if isinstance(res, Exception):
-                        logger.warning(f"BFS 並行錯誤：{res}")
-                        continue
-                    facts, src_ids, cids = res
-                    for f in facts:
-                        if f not in seen_facts:
-                            seen_facts.add(f)
-                            svo_facts.append(f)
-                    for doc_id in src_ids:
-                        if doc_id not in seen_doc_ids:
-                            seen_doc_ids.add(doc_id)
-                            graph_doc_ids.append(doc_id)
-                    for cid in cids:
-                        if cid not in seen_cids:
-                            seen_cids.add(cid)
-                            svo_chunk_ids.append(cid)
+                _merge_bfs_results(bfs_results)
+
+                # Graph-CoT 簡化版：命中事實過少（推理鏈可能斷在門檻跳數外）且
+                # 尚未查到最大跳數時，用同一組種子詞加深一跳重查，
+                # 不引入額外 LLM 呼叫，只是擴大 BFS 搜尋半徑。
+                if len(svo_facts) < _SVO_SPARSE_FACT_THRESHOLD and req.svo_hops < 3:
+                    deeper_hops = req.svo_hops + 1
+                    deeper_results = await _asyncio.gather(
+                        *[_bfs_kg(kg_id, deeper_hops) for kg_id, _, _ in selected_kgs],
+                        return_exceptions=True,
+                    )
+                    before = len(svo_facts)
+                    _merge_bfs_results(deeper_results)
+                    if len(svo_facts) > before:
+                        logger.info(
+                            f"[Graph-CoT] 證據稀疏（{before} 條），加深至 {deeper_hops} 跳，"
+                            f"補充後共 {len(svo_facts)} 條事實"
+                        )
 
             if svo_facts:
                 yield _sse({"svo_facts": svo_facts})

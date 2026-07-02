@@ -7,6 +7,7 @@ Entity Alignment Service — Phase 2d
 """
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass, field
 
 # ── 同義詞組（每個 frozenset 為一組等義詞）────────────────────────────────────
@@ -66,14 +67,32 @@ for _grp in _SYNONYM_GROUPS:
 
 # ── LLM 多語言動態展開快取與非同步查詢 ────────────────────────────────────────
 
-_llm_synonym_cache: dict[str, list[str]] = {}
+_LLM_SYNONYM_CACHE_MAX = 512  # LRU 容量上限，避免長時間運行無上限增長
+_llm_synonym_cache: OrderedDict[str, list[str]] = OrderedDict()
+
+
+def _llm_synonym_cache_get(key: str) -> list[str] | None:
+    if key in _llm_synonym_cache:
+        _llm_synonym_cache.move_to_end(key)
+        return _llm_synonym_cache[key]
+    return None
+
+
+def _llm_synonym_cache_set(key: str, value: list[str]) -> None:
+    if key in _llm_synonym_cache:
+        _llm_synonym_cache.move_to_end(key)
+    else:
+        if len(_llm_synonym_cache) >= _LLM_SYNONYM_CACHE_MAX:
+            _llm_synonym_cache.popitem(last=False)
+    _llm_synonym_cache[key] = value
 
 
 async def _get_llm_synonyms(term: str) -> list[str]:
     """使用 LLM 將術語翻譯/對齊為其他語言或常見同義詞（科技/學術名詞對照）。"""
     term_key = term.strip().lower()
-    if term_key in _llm_synonym_cache:
-        return _llm_synonym_cache[term_key]
+    cached = _llm_synonym_cache_get(term_key)
+    if cached is not None:
+        return cached
 
     # 過於簡短或僅為數字的術語，不進行 LLM 動態翻譯
     if len(term_key) <= 1 or term_key.isdigit():
@@ -108,14 +127,11 @@ async def _get_llm_synonyms(term: str) -> list[str]:
                 synonyms.append(line)
         # 去重
         synonyms = list(OrderedDict.fromkeys(synonyms))
-        _llm_synonym_cache[term_key] = synonyms
+        _llm_synonym_cache_set(term_key, synonyms)
         return synonyms
     except Exception as e:
         logger.warning(f"LLM 多語言同義詞展開失敗 [{term}]: {e}")
         return []
-
-
-from collections import OrderedDict
 
 async def expand_terms(terms: list[str], max_expansion: int = 3) -> list[str]:
     """

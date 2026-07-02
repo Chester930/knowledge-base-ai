@@ -1,12 +1,12 @@
 from __future__ import annotations
 import logging
-import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from core.config import settings
+from core.upload_guard import write_upload_with_guard
 from services.transcribe_service import (
     SUPPORTED_EXTENSIONS,
     TranscribeResult,
@@ -80,9 +80,8 @@ async def transcribe_upload(
     staging.mkdir(parents=True, exist_ok=True)
 
     upload_tmp = staging / f"__upload__{file.filename}"
+    await write_upload_with_guard(file, suffix, upload_tmp)
     try:
-        with upload_tmp.open("wb") as f:
-            shutil.copyfileobj(file.file, f)
         result = transcribe_file(upload_tmp, staging_dir=staging, overwrite=overwrite)
     finally:
         # 刪除上傳的原始檔（保留轉譯後的 .txt）
