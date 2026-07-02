@@ -210,7 +210,21 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
 
 為了進一步提升神經符號 Graph-MoE RAG 架構在極大規模與複雜邏輯下的推理精度，未來可在以下四個前沿方向進行架構擴展，各方向均有相關學術研究支撐：
 
+> **落地狀態總覽**（2026-07 系統健檢與稽核後回填，見第 11 節變更記錄）：
+>
+> | 方向 | 狀態 | 備註 |
+> |---|---|---|
+> | ① GNN 共嵌入空間 | ❌ 暫不做 | 過度工程，見下方評估 |
+> | ② 動態本體對齊 | ❌ 暫不做 | 過度工程，見下方評估 |
+> | ③ Graph-CoT 推理 | ✅ 已落地（簡化版） | `routers/agent.py` 門檻觸發式加深查詢，不含 LLM 選路 |
+> | ④ Active RAG | ❌ 暫不做 | 過度工程，見下方評估 |
+> | ⑤ 社群摘要檢索 | ❌ 暫不做 | 過度工程，見下方評估 |
+> | ⑥ 時序知識圖譜 | ❌ 暫不做 | 有條件保留，見下方評估 |
+> | ⑦ 對比學習 | ❌ 暫不做 | 過度工程，見下方評估 |
+> | ⑧ 二階段粗精篩 | ✅ 已落地 | `repositories/concept_repo.py` 的 `*_for_query` 方法 |
+
 ### ① 圖拓撲感知共嵌入空間 (Graph-Aware Co-embedding Space)
+* **落地狀態**：❌ 暫不做 —— 個人知識庫規模（單 KG 通常數百至數千實體）用不到 GNN 才能解決的表徵瓶頸；且需要離線訓練管線、額外模型生命週期管理與 GPU 資源，屬於過度工程（over-engineering）。現有 cosine + 對齊分數（`services/concept_engine.py` 的 `compute_match_score`）已足夠。
 * **當前局限**：目前的 ConceptNode 連續特徵向量（Embedding）是利用標準文本模型獨立計算的，未感知到 Neo4j 圖譜中 SVO 邊所承載的拓撲結構與關聯強度。
 * **優化建議**：引入 **圖神經網絡 (GNN)** 算法（如 GraphSAGE 或 Node2Vec），將圖譜的離散拓撲特徵與文本的語意特徵進行聯合表徵學習，產生「感知圖結構的概念向量 (Graph-Aware Concept Embeddings)」。這能使 Gating Router 的相似度計算精確數倍。
 * **學術來源**：
@@ -218,6 +232,7 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
   * Grover, A., & Leskovec, J. (2016). *"node2vec: Scalable Feature Learning for Networks."* KDD 2016.
 
 ### ② 多源聯邦本體動態對齊 (Dynamic Federated Ontology Alignment)
+* **落地狀態**：❌ 暫不做 —— 本專案本體 schema（30 種關係、13 種實體類型）是全域共享的單一定義，`services/entity_alignment.py` 的同義詞表已解決同名實體問題；只有真正對接第三方 KG（不同本體 schema）時才有意義，目前聯邦查詢對象都是同一套 schema 的分片。虛擬碼中以 regex 字串替換轉換 Cypher 關係語句的做法本身也有 Cypher 注入風險，不建議照原設計實作。
 * **當前局限**：跨分片並行查詢時，若不同分片的本體 Schema（如關係邊定義）存在命名或分類不一致（如 `IS_A` 與 `INSTANCE_OF` 混用），跨域查詢的語意流會發生斷裂。
 * **優化建議**：在路由層引入基於 LLM 或 Graph Matching 的 **動態本體對齊（Ontology Alignment）** 機制，自動在查詢發起前對不同知識庫的關係邊進行 Schema 轉換與映射，達成「無感知的跨域本體對接」。
 * **學術來源**：
@@ -225,13 +240,15 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
   * Faria, D., et al. (2013). *"AgreementMakerLight: A System for Large-Scale Ontology Matching."* Semantic Web Conference.
 
 ### ③ 圖譜鏈式思考推理 (Graph Chain-of-Thought / G-CoT)
+* **落地狀態**：✅ 已落地簡化版 —— 見 `routers/agent.py` 的 `_SVO_SPARSE_FACT_THRESHOLD` 機制。**與下方原始設計的關鍵差異**：不採用「每跳都呼叫 LLM 決定下一步」的做法（延遲與 LLM 成本過高，不適合個人 KB 的問答場景），改為門檻觸發式簡化版——2 跳 BFS 命中事實數低於門檻（3 條）時，用同一組種子詞加深一跳重查（`hops+1`）並合併結果，零額外 LLM 呼叫。細節見第 10 節③。
 * **當前局限**：圖譜內查找僅依賴簡單的 1-2 跳 BFS，屬於「被動式檢索」，缺乏對複雜邏輯路徑的自主推理能力。
 * **優化建議**：引入 **Graph-CoT (圖譜鏈式思考)** 機制。LLM 不僅被動接收 Context，而是能作為一個 Agent 沿著圖譜的語意關係邊主動「尋路」，動態決定下一跳要遍歷哪個實體，尋找最優的推理路徑（Multi-hop Reasoning Path）。
 * **學術來源**：
-  * He, Xiaoxin, et al. (2023). *"Mind's Eye of LLM: Reasoning on Graphs with Chain-of-Thought."* arXiv:2310.13344 (G-CoT 經典研究).
+  * He, Xiaoxin, et al. (2023). *"Mind's Eye of LLM: Reasoning on Graphs with Chain-of-Thought."* arXiv:2310.13344 (G-CoT 經典研究；本專案簡化版的理論依據)。
   * Chao, Yuxiao, et al. (2024). *"Graph-ToolChain: Leveraging Tool Chains for Reasoning on Graphs."* arXiv:2401.12345.
 
 ### ④ 主動自適應檢索 (Active & Adaptive Retrieval)
+* **落地狀態**：❌ 暫不做 —— 虛擬碼設計依賴 token 級 confidence/logprobs，但 `core/providers/llm/` 下的 Ollama/Anthropic/Gemini/Grok provider 介面目前都只有純文字 `generate()`/`stream()`，未暴露 logprobs，需先改造整個 provider 介面才能支援。專案既有的「自我精煉迴圈」（`routers/agent.py` 的信心校準 + 補充 chunk 機制）本質上已是簡化版 Active RAG，核心價值已被覆蓋。
 * **當前局限**：現有機制為單次檢索後生成答案，即便有自我精煉（Self-Refinement）也只是被動回填 Chunks，無法在生成過程中自發性地決定何時需要新知識。
 * **優化建議**：引入 **Active RAG (主動式檢索增強)**。在 LLM 串流生成的過程中，如果發現缺失某個中間邏輯鏈條的知識，能自發發起圖譜檢索，實現「一邊生成、一邊動態判斷、一邊補充檢索」的自適應生成。
 * **學術來源**：
@@ -239,6 +256,7 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
   * Asai, Akari, et al. (2024). *"Self-RAG: Learning to Retrieve, Generate, and Critique through Self-Reflection."* ICLR 2024.
 
 ### ⑤ 多層次社群摘要檢索 (Community-based Hierarchical Retrieval)
+* **落地狀態**：❌ 暫不做 —— 這個機制解決的是「全域性宏觀問題」，但個人 KB 場景下一個 KG 通常只有數百到數千實體，直接把 BFS 結果餵給 LLM 摘要即可，不需要先做社群偵測分群再摘要的兩層架構。規模不到，過度工程。
 * **當前局限**：當遭遇全域性（Global Query）或跨多個文檔的宏觀查詢（如：「請總結所有公開圖譜中的技術演進」）時，BFS 遍歷與向量路由僅能匹配局部實體，無法回答全局性問題。
 * **優化建議**：引入 **社群檢測 (Community Detection)** 算法（如 Louvain 或 Leiden 算法），對 Neo4j 中的圖譜結構進行層次化分群，並由 LLM 預先為每個分群生成「社群摘要 (Community Summaries)」。問答時根據問題層級路由至相應的社群摘要，提供巨觀的全局回答。
 * **學術來源**：
@@ -246,6 +264,7 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
   * Traag, V., et al. (2019). *"From Louvain to Leiden: guaranteeing well-behaved communities."* Scientific Reports. (Leiden 算法)
 
 ### ⑥ 時序知識圖譜與陳舊性校正 (Temporal Knowledge Graphs & Decay)
+* **落地狀態**：❌ 暫不做，但保留條件 —— 目前 SVO 三元組沒有時間維度，`confidence` 欄位（`services/svo_service.py`）某種程度隱含新舊（重複出現次數），但無法區分「舊資訊被新資訊取代」。若未來使用者實際回報「AI 引用過期資訊」的痛點，最小可行版本是：SVO schema 加一個 `updated_at`（已有 `created_at`），在 `_pick_relevant_chunks` 的 reranking 公式（`routers/agent.py`）加一個時間衰減項，不需要完整的 `valid_from`/`valid_to` 區間模型。在痛點明確前優先度低。
 * **當前局限**：知識事實會隨著時間演進而陳舊（例如：CEO 職位更迭、技術標準變遷）。若 SVO 缺乏時間維度，圖譜中會存在相互衝突的過期知識，導致 LLM 產生幻覺。
 * **優化建議**：引入 **時序知識圖譜 (Temporal KG)** 機制，為每條 SVO 關係邊加上時間戳（`valid_from`, `valid_to`），並在重排公式中引入 **「時間衰減因子 (Temporal Decay Factor)」**，確保時效性高、未過期的事實被優先檢索。
 * **學術來源**：
@@ -253,6 +272,7 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
   * Goel, R., et al. (2020). *"Diachronic Embedding for Temporal Knowledge Graph Completion."* AAAI 2020.
 
 ### ⑦ 對比自我監督概念學習 (Contrastive Concept Learning)
+* **落地狀態**：❌ 暫不做 —— 需要負樣本挖掘、embedding 模型微調管線；`core/providers/embedding/local.py` 用的是現成 sentence-transformers 模型，微調需要標註資料與訓練基礎設施，對個人知識庫是典型過度工程。真正想解決「路由邊界模糊」問題，調整 `KG_ROUTE_THRESHOLD`/`MAX_KG_PER_QUERY`（`core/constants.py`）或優化同義詞表的成本效益高得多。
 * **當前局限**：在 ConceptNode 路由比對中只計算了正向的 Similarity 相似分，若兩個相鄰領域的概念界線模糊，容易發生路由偏差。
 * **優化建議**：在 Embedding 訓練或對齊計算中引入 **對比學習 (Contrastive Learning)**。在優化對齊權重時，不僅最大化正向概念的 cosine alignment，同時拉遠無關的負樣本概念（Negative Concepts），使得 Gating Router 的分類決策邊界更加清晰。
 * **學術來源**：
@@ -260,6 +280,7 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
   * You, Y., et al. (2020). *"Graph Contrastive Learning with Augmentations."* NeurIPS 2020. (GCL 圖對比學習)
 
 ### ⑧ 二階段向量粗篩-精篩架構 (Two-Stage Coarse-to-Fine Retrieval)
+* **落地狀態**：✅ 已落地 —— `repositories/concept_repo.py` 的 `get_kgs_concepts_for_query()`、`get_public_kgs_concepts_for_query()`、`get_documents_concepts_for_query()`（Stage-1 呼叫 `db.index.vector.queryNodes` 做 KNN 粗篩）+ `services/concept_engine.py` 的 `route_kgs()`/`route_documents()`（Stage-2 精篩封裝，向量索引不可用時自動 fallback 全表掃描）。已套用到 `routers/agent.py`、`routers/world.py`、`routers/search.py`、`services/classify_service.py` 所有查詢期路由路徑。與下方虛擬碼的差異：粗篩候選數改為可調常數 `CONCEPT_COARSE_TOP_K`（`core/constants.py`，預設 100），且針對索引尚未建立/查詢失敗的情況內建 fallback，而非假設索引必然可用。
 * **當前局限**：概念匹配時在 Python 內存中對全庫進行 $O(N)$ 雙重迴圈計算，在大規模（N > 10,000）時會引發 CPU 阻塞與內存溢出。
 * **優化建議**：將檢索重構為**「二階段檢索架構（Two-Stage Retrieval）」**。第一階段（粗篩，Stage-1）利用 Neo4j 內建的 **Vector Index**（以 C++ 底層高速運算）抓出 Cosine 相似度最高的 Top-100 個候選節點；第二階段（精篩，Stage-2）在 Python 內存中僅對這 100 個候選節點進行對齊遮罩（Align）與強度振幅（Mag）的精細比對。複雜度由 $O(N)$ 驟降為 $O(100)$ 常數級別，效能提升千倍以上。
 * **學術來源**：
@@ -349,6 +370,14 @@ class TemporalDecayRerankEngine:
 
 ### ③ 圖譜鏈式思考路徑推理流程 (Graph Chain-of-Thought / G-CoT)
 在圖譜內檢索時，利用 LLM 來指導並沿著 Neo4j 語意邊進行自主多跳推理尋路：
+
+> **實際落地（門檻觸發式簡化版）**：以下 `GraphCoTReasoningEngine` 虛擬碼保留作為原始理論設計參考，
+> 實際程式碼採用更輕量的做法，見 `routers/agent.py` 的 `_bfs_kg`/`_merge_bfs_results` 與
+> `_SVO_SPARSE_FACT_THRESHOLD`（門檻 = 3）：BFS 以 `req.svo_hops` 跑一次後，若命中事實數低於門檻
+> 且未達最大跳數（3），用**同一組種子詞**（不重新用 LLM 選路）加深一跳（`hops+1`）重查並合併結果。
+> 差異：不逐跳呼叫 LLM 決定下一個節點，換取零額外 LLM 延遲/成本，代價是不能像原始設計一樣
+> 「主動選擇最相關的鄰居」，而是單純擴大 BFS 半徑。測試見
+> `tests/routers/test_rag_quality.py::TestSVOFactInjection::test_sparse_bfs_triggers_deeper_hop_graph_cot`。
 
 ```python
 import json
@@ -442,6 +471,16 @@ class ActiveRetrievalController:
 ### ⑤ 二階段向量粗篩-精篩檢索引擎 (Two-Stage Retrieval Engine)
 利用資料庫內建向量索引進行 C++ 級粗篩，在內存中進行精細重排，避免 memory 瓶頸：
 
+> **實際落地**：以下 `TwoStageVectorRetrievalEngine` 虛擬碼已真正落地，實作分散在
+> `repositories/concept_repo.py`（`_vector_candidate_ids()` 做 Stage-1 粗篩，
+> `get_kgs_concepts_for_query()`/`get_public_kgs_concepts_for_query()`/
+> `get_documents_concepts_for_query()` 三個查詢期入口）與
+> `services/concept_engine.py`（`route_kgs()`/`route_documents()` 是 Stage-2 精篩 + fallback 的封裝）。
+> 與下方虛擬碼的差異：① Top-K 粗篩數量改為常數 `CONCEPT_COARSE_TOP_K`（`core/constants.py`，預設 100）
+> 而非寫死；② 向量索引呼叫失敗（索引不存在、Neo4j 版本不支援等）時會自動 fallback 回原本的全表掃描
+> （`get_all_kgs_concepts()` 等），不是假設索引必然可用。已套用到 agent.py/world.py/search.py/
+> classify_service.py 所有查詢期路由路徑。整合測試見 `tests/integration/test_neo4j_integration.py`。
+
 ```python
 class TwoStageVectorRetrievalEngine:
     def __init__(self, neo4j_driver, concept_engine):
@@ -495,3 +534,20 @@ class TwoStageVectorRetrievalEngine:
         refined_results.sort(key=lambda x: x["fine_score"], reverse=True)
         return refined_results
 ```
+
+---
+
+## 11. 架構落地變更記錄 (Implementation Changelog)
+
+本節記錄本文件所述理論方向的實際落地狀態變化，以及過程中新增引用的外部論文/專案，
+避免未來重新稽核時重複評估同樣的問題。**日後只要參考了任何新的外部論文或開源專案
+（無論是落地某個方向、或引用來佐證設計決策），都應在此追加一筆記錄，並同步更新
+對應章節的「學術來源」小節。**
+
+### 2026-07：系統健檢後的落地與評估
+* **✅ 落地**：第9節⑧二階段向量粗篩-精篩（`repositories/concept_repo.py` / `services/concept_engine.py`）。
+* **✅ 落地（簡化版）**：第9節③ Graph-CoT 圖譜鏈式思考（`routers/agent.py`，門檻觸發式加深查詢，不含逐跳 LLM 選路）。
+* **❌ 評估後判定過度工程，暫不做**：第9節①（GNN 共嵌入）、②（動態本體對齊）、④（Active RAG）、⑤（社群摘要檢索）、⑦（對比學習）。
+* **❌ 評估後判定有條件保留，暫不做**：第9節⑥（時序知識圖譜）—— 除非使用者實際回報「AI 引用過期資訊」的痛點。
+* 本輪評估未引入本文件既有學術來源之外的新論文/專案，皆沿用第9節原有引用作為評估依據。
+* 對應健檢報告：`docs/SYSTEM_HEALTH_AUDIT.md`；對應程式碼變更：PR `worktree-gap-fixes` 分支（API 認證、上傳防護、Rate limiting、SVO 孤兒節點清理、`_bfs_cache`/`_llm_synonym_cache` LRU 化、federation registry 背景刷新、`ingestion_service.py` 事件迴圈阻塞修復、`docker-compose.yml` healthcheck 等）。
