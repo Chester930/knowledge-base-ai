@@ -358,3 +358,64 @@ class TestDeleteStaging:
 
             assert (staging / "keep.txt").exists()
             assert not (staging / "delete_me.txt").exists()
+
+
+# ── 路徑穿越防護 ─────────────────────────────────────────────────────────────
+
+class TestPathTraversalProtection:
+    """
+    {filename} 路徑參數必須拒絕含路徑分隔符或 `..` 的輸入，避免
+    `staging / filename` 拼接時逃出 _staging/ 目錄（尤其 Windows 原生部署下
+    `\\` 會被當作真正的路徑分隔符）。
+    """
+
+    async def test_delete_rejects_backslash_traversal(self, test_app):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "_staging").mkdir()
+            with patch("routers.staging.settings") as mock_settings:
+                mock_settings.workspace_dir = tmpdir
+                async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as c:
+                    res = await c.delete("/staging/..%5C..%5Csensitive.txt")
+
+        assert res.status_code == 400
+
+    async def test_delete_rejects_dotdot(self, test_app):
+        """
+        `/staging/..` 會先被 URL 正規化解析為上一層路徑，連 FastAPI 路由都
+        比對不到（回 404），本測試確認這個輸入無論如何都不會成功刪除任何檔案。
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "_staging").mkdir()
+            with patch("routers.staging.settings") as mock_settings:
+                mock_settings.workspace_dir = tmpdir
+                async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as c:
+                    res = await c.delete("/staging/..")
+
+        assert res.status_code in (400, 404)
+
+    async def test_classify_rejects_backslash_traversal(self, test_app):
+        async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as c:
+            res = await c.post("/staging/..%5C..%5Csecrets.txt/classify", json={})
+        assert res.status_code == 400
+
+    async def test_assign_rejects_backslash_traversal(self, test_app):
+        async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as c:
+            res = await c.post(
+                "/staging/..%5C..%5Csecrets.txt/assign",
+                json={"kg_id": str(uuid4())},
+            )
+        assert res.status_code == 400
+
+    async def test_legitimate_filename_still_works(self, test_app):
+        """確認防護沒有誤傷正常檔名（含中文、空白、括號等常見合法字元）。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            staging = Path(tmpdir) / "_staging"
+            staging.mkdir()
+            (staging / "會議記錄 (2026).txt").write_text("內容", encoding="utf-8")
+
+            with patch("routers.staging.settings") as mock_settings:
+                mock_settings.workspace_dir = tmpdir
+                async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as c:
+                    res = await c.delete("/staging/會議記錄 (2026).txt")
+
+        assert res.status_code == 204

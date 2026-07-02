@@ -20,6 +20,16 @@ router = APIRouter(prefix="/staging", tags=["staging"])
 logger = logging.getLogger(__name__)
 
 
+def _validate_staging_filename(filename: str) -> None:
+    r"""
+    拒絕含路徑分隔符或 `..` 的檔名，避免 `staging / filename` 拼接時逃出
+    `_staging/` 目錄（尤其 Windows 原生部署下 `\` 會被當作真正的路徑分隔符，
+    FastAPI 路由層只對 `/` 有防護）。
+    """
+    if not filename or "/" in filename or "\\" in filename or filename in (".", ".."):
+        raise HTTPException(status_code=400, detail=f"檔名不合法：{filename}")
+
+
 @router.get("", summary="列出暫存區所有 .txt")
 async def list_staging():
     staging = Path(settings.workspace_dir) / "_staging"
@@ -48,6 +58,7 @@ async def classify_one(
     對 `_staging/{filename}` 執行概念比對，回傳 KG 候選清單與分數。
     `auto_assign=true` 且 top_score ≥ threshold 時自動分配（移動檔案 + 建 Document）。
     """
+    _validate_staging_filename(filename)
     try:
         return await classify_document(
             filename,
@@ -79,6 +90,7 @@ async def assign_one(filename: str, body: AssignRequest):
     手動將 `_staging/{filename}` 分配給指定的 KG，
     移動檔案 + 建立 Document + 刷新 KG 路由層概念。
     """
+    _validate_staging_filename(filename)
     try:
         await assign_document_to_kg(filename, body.kg_id)
         return {"status": "assigned", "filename": filename, "kg_id": str(body.kg_id)}
@@ -92,6 +104,7 @@ async def assign_one(filename: str, body: AssignRequest):
 
 @router.delete("/{filename}", status_code=204, summary="刪除暫存區文件")
 async def delete_staging_file(filename: str):
+    _validate_staging_filename(filename)
     staging = Path(settings.workspace_dir) / "_staging"
     target = staging / filename
     if not target.exists():
@@ -145,6 +158,9 @@ async def approve_suggestion(body: ApproveSuggestionRequest, background_tasks: B
         # 逐一分配文件
         assigned, failed = [], []
         for filename in body.files:
+            if not filename or "/" in filename or "\\" in filename or filename in (".", ".."):
+                failed.append({"file": filename, "reason": "檔名不合法"})
+                continue
             staging = Path(settings.workspace_dir) / "_staging" / filename
             if not staging.exists():
                 failed.append({"file": filename, "reason": "不在 staging"})

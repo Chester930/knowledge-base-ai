@@ -1014,7 +1014,12 @@ async function renderKgDetail(id) {
   } catch { detail.innerHTML = '<div class="kg-detail-empty"><div class="icon">⚠️</div><p>載入失敗</p></div>'; }
 }
 
+const _buildingKgIds = new Set();
+
 async function buildGraph(id) {
+  if (_buildingKgIds.has(id)) { toast('此 KG 正在建圖中，請稍候','error'); return; }
+  _buildingKgIds.add(id);
+
   const log = document.getElementById('build-log-'+id);
   log.style.display='block'; log.innerHTML='';
   const addLog = (msg, cls='') => {
@@ -1023,6 +1028,11 @@ async function buildGraph(id) {
   addLog('▶ 開始建立 SVO 知識圖譜…');
   try {
     const res = await fetch(`${API}/knowledge-graphs/${id}/build-graph`, { method:'POST', headers:{'Content-Type':'application/json'}, body:'{}' });
+    if (!res.ok) {
+      const e = await res.json().catch(()=>({}));
+      addLog(`❌ ${e.detail || `建圖請求失敗（HTTP ${res.status}）`}`, 'error');
+      return;
+    }
     const reader = res.body.getReader(); const dec = new TextDecoder(); let buf='';
     while (true) {
       const { done, value } = await reader.read();
@@ -1039,6 +1049,7 @@ async function buildGraph(id) {
       }
     }
   } catch (e) { addLog('❌ 連線錯誤：'+e.message, 'error'); }
+  finally { _buildingKgIds.delete(id); }
   loadKgList(); loadSidebar();
 }
 
