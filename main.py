@@ -2,11 +2,12 @@ import logging
 from contextlib import asynccontextmanager
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.templating import Jinja2Templates
 from fastapi.requests import Request
 from fastapi.responses import HTMLResponse
 
+from core.auth import require_api_key
 from core.config import settings
 from core.database import connect, disconnect, get_driver
 from core.providers.factory import init_providers
@@ -83,15 +84,19 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.include_router(documents.router)
-app.include_router(search.router)
-app.include_router(agent.router)
-app.include_router(transcribe.router)
-app.include_router(knowledge_graph.router)
-app.include_router(versioning.router)
-app.include_router(staging.router)
+_protected = [Depends(require_api_key)]
+
+# world.router 對外提供公開問答（/world/chat 等），不套用全域驗證；
+# 其中的管理型端點（/world/sync、/world/federation/refresh）已在 routers/world.py 個別保護。
+app.include_router(documents.router, dependencies=_protected)
+app.include_router(search.router, dependencies=_protected)
+app.include_router(agent.router, dependencies=_protected)
+app.include_router(transcribe.router, dependencies=_protected)
+app.include_router(knowledge_graph.router, dependencies=_protected)
+app.include_router(versioning.router, dependencies=_protected)
+app.include_router(staging.router, dependencies=_protected)
 app.include_router(world.router)
-app.include_router(subscription.router)
+app.include_router(subscription.router, dependencies=_protected)
 
 templates = Jinja2Templates(directory="ui/templates")
 

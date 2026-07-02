@@ -38,6 +38,9 @@ class TestSearch:
         concept = {"name": "概念", "q_vector": _vec(), "interest_score": 0.8, "professional_score": 0.8}
 
         mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
         mock_concept_repo.get_all_documents_concepts.return_value = {doc.id: [concept]}
 
         mock_doc_repo = AsyncMock()
@@ -62,6 +65,9 @@ class TestSearch:
 
         doc_concepts = {doc1.id: [concept], doc2.id: [concept]}
         mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
         mock_concept_repo.get_all_documents_concepts.return_value = doc_concepts
 
         mock_doc_repo = AsyncMock()
@@ -87,6 +93,9 @@ class TestSearch:
 
         doc_concepts = {d.id: [concept] for d in docs}
         mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
         mock_concept_repo.get_all_documents_concepts.return_value = doc_concepts
 
         mock_doc_repo = AsyncMock()
@@ -119,6 +128,9 @@ class TestSearch:
 class TestListConcepts:
     async def test_returns_concept_list(self, test_app):
         mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
         mock_concept_repo.get_all_concepts.return_value = [
             {"id": str(uuid4()), "name": "機器學習", "domain": "general", "doc_count": 5},
             {"id": str(uuid4()), "name": "深度學習", "domain": "general", "doc_count": 3},
@@ -136,6 +148,9 @@ class TestListConcepts:
 
     async def test_empty_concepts_returns_empty_list(self, test_app):
         mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
         mock_concept_repo.get_all_concepts.return_value = []
 
         with patch("routers.search.get_driver"), \

@@ -21,6 +21,117 @@ class ConceptRepository:
             dim=dim,
         )
 
+    # ── 兩階段向量粗精篩（Two-Stage Retrieval）───────────────────────────────────
+    # Stage-1：對每個 query concept 向量呼叫 Neo4j Vector Index 做 KNN 粗篩，
+    #          取代「拉全庫進 Python 記憶體再雙迴圈比對」的 O(N*M) 作法。
+    # Stage-2：只對粗篩候選的少量 ConceptNode 抓取 EFFECTIVE 邊，交給
+    #          concept_engine.compute_match_score() 做精細對齊評分。
+
+    async def _vector_candidate_ids(
+        self, query_vectors: list[list[float]], top_k: int
+    ) -> set[str] | None:
+        """回傳候選 ConceptNode id 聯集；索引不可用時回傳 None（呼叫端應 fallback 全表掃描）。"""
+        if not query_vectors:
+            return set()
+        candidate_ids: set[str] = set()
+        try:
+            for vec in query_vectors:
+                result = await self.driver.execute_query(
+                    """
+                    CALL db.index.vector.queryNodes('concept_q_vector', $top_k, $vector)
+                    YIELD node, score
+                    RETURN node.id AS id
+                    """,
+                    top_k=top_k, vector=vec,
+                )
+                candidate_ids.update(r["id"] for r in result.records)
+        except Exception as e:
+            logger.warning(f"Vector index 粗篩失敗，將 fallback 全表掃描：{e}")
+            return None
+        return candidate_ids
+
+    async def get_kgs_concepts_for_query(
+        self, query_vectors: list[list[float]], top_k: int = 100
+    ) -> dict[UUID, list[dict]] | None:
+        """兩階段版 get_all_kgs_concepts()：僅取粗篩候選概念的 KG EFFECTIVE 邊。回傳 None 代表需 fallback。"""
+        candidate_ids = await self._vector_candidate_ids(query_vectors, top_k)
+        if candidate_ids is None:
+            return None
+        if not candidate_ids:
+            return {}
+        result = await self.driver.execute_query(
+            """
+            MATCH (kg:KnowledgeGraph)-[e:EFFECTIVE]->(c:ConceptNode)
+            WHERE c.id IN $ids
+            RETURN kg.id AS kg_id, c.id AS concept_id, c.name AS name,
+                   c.q_vector AS q_vector,
+                   e.interest_score AS interest_score,
+                   e.professional_score AS professional_score
+            """,
+            ids=list(candidate_ids),
+        )
+        result_map: dict[UUID, list[dict]] = {}
+        for r in result.records:
+            kg_id = UUID(r["kg_id"])
+            result_map.setdefault(kg_id, []).append(dict(r))
+        return result_map
+
+    async def get_public_kgs_concepts_for_query(
+        self, query_vectors: list[list[float]], top_k: int = 100
+    ) -> dict[UUID, list[dict]] | None:
+        """兩階段版 get_public_kgs_concepts()（World Agent 專用）。回傳 None 代表需 fallback。"""
+        candidate_ids = await self._vector_candidate_ids(query_vectors, top_k)
+        if candidate_ids is None:
+            return None
+        if not candidate_ids:
+            return {}
+        result = await self.driver.execute_query(
+            """
+            MATCH (kg:KnowledgeGraph {is_public: true})-[e:EFFECTIVE]->(c:ConceptNode)
+            WHERE c.id IN $ids
+            RETURN kg.id AS kg_id, c.id AS concept_id, c.name AS name,
+                   c.q_vector AS q_vector,
+                   e.interest_score AS interest_score,
+                   e.professional_score AS professional_score
+            """,
+            ids=list(candidate_ids),
+        )
+        result_map: dict[UUID, list[dict]] = {}
+        for r in result.records:
+            kg_id = UUID(r["kg_id"])
+            result_map.setdefault(kg_id, []).append(dict(r))
+        return result_map
+
+    async def get_documents_concepts_for_query(
+        self,
+        query_vectors: list[list[float]],
+        top_k: int = 100,
+        exclude_doc_ids: list[UUID] | None = None,
+    ) -> dict[UUID, list[dict]] | None:
+        """兩階段版 get_all_documents_concepts()。回傳 None 代表需 fallback。"""
+        candidate_ids = await self._vector_candidate_ids(query_vectors, top_k)
+        if candidate_ids is None:
+            return None
+        if not candidate_ids:
+            return {}
+        exclude = [str(d) for d in exclude_doc_ids] if exclude_doc_ids else []
+        result = await self.driver.execute_query(
+            """
+            MATCH (d:Document)-[e:EFFECTIVE]->(c:ConceptNode)
+            WHERE c.id IN $ids AND NOT d.id IN $exclude
+            RETURN d.id AS doc_id, c.id AS concept_id, c.name AS name,
+                   c.q_vector AS q_vector,
+                   e.interest_score AS interest_score,
+                   e.professional_score AS professional_score
+            """,
+            ids=list(candidate_ids), exclude=exclude,
+        )
+        result_map: dict[UUID, list[dict]] = {}
+        for r in result.records:
+            doc_id = UUID(r["doc_id"])
+            result_map.setdefault(doc_id, []).append(dict(r))
+        return result_map
+
     async def get_or_create(self, name: str, domain: str, q_vector) -> UUID:
         vec = q_vector.tolist() if hasattr(q_vector, "tolist") else list(q_vector)
         result = await self.driver.execute_query(

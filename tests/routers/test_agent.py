@@ -87,6 +87,9 @@ class TestAgentQuery:
         concept = {"name": "概念", "q_vector": _vec(), "interest_score": 0.9, "professional_score": 0.9}
 
         mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
         mock_concept_repo.get_all_documents_concepts.return_value = {doc.id: [concept]}
 
         mock_doc_repo = AsyncMock()
@@ -111,6 +114,9 @@ class TestAgentQuery:
         concept = {"name": "概念", "q_vector": _vec(), "interest_score": 0.9, "professional_score": 0.9}
 
         mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
         mock_concept_repo.get_all_documents_concepts.return_value = {doc.id: [concept]}
 
         mock_doc_repo = AsyncMock()
@@ -136,6 +142,9 @@ class TestAgentQuery:
         concept = {"name": "概念", "q_vector": _vec(), "interest_score": 0.9, "professional_score": 0.9}
 
         mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
         mock_concept_repo.get_all_documents_concepts.return_value = {doc.id: [concept]}
 
         mock_doc_repo = AsyncMock()
@@ -159,6 +168,9 @@ class TestAgentQuery:
         concept = {"name": "概念", "q_vector": _vec(), "interest_score": 0.9, "professional_score": 0.9}
 
         mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
         mock_concept_repo.get_all_documents_concepts.return_value = {d.id: [concept] for d in docs}
 
         mock_doc_repo = AsyncMock()
@@ -179,6 +191,9 @@ class TestAgentQuery:
         concept = {"name": "概念", "q_vector": _vec(), "interest_score": 0.8, "professional_score": 0.8}
 
         mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
         mock_concept_repo.get_all_documents_concepts.return_value = {doc.id: [concept]}
 
         mock_doc_repo = AsyncMock()

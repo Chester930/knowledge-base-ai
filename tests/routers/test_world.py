@@ -174,10 +174,13 @@ class TestWorldChat:
     def _base_patches(self, kgs=None, query_concepts=None, match_score=0.8, shard_result=None):
         """回傳所有 world/chat 所需 patch 的 context list。"""
         kg_list = kgs or [_kg()]
-        concepts = query_concepts or [{"name": "深度學習", "vector": [0.1] * 384}]
+        concepts = query_concepts or [{"name": "深度學習", "q_vector": [0.1] * 384}]
 
         mock_repo = _mock_kg_repo(kgs=kg_list, kg=kg_list[0] if kg_list else None)
         mock_concept_repo = MagicMock()
+        mock_concept_repo.get_kgs_concepts_for_query = AsyncMock(return_value=None)
+        mock_concept_repo.get_public_kgs_concepts_for_query = AsyncMock(return_value=None)
+        mock_concept_repo.get_documents_concepts_for_query = AsyncMock(return_value=None)
         mock_concept_repo.get_public_kgs_concepts = AsyncMock(
             return_value={kg_list[0].id: concepts} if kg_list else {}
         )
@@ -224,8 +227,11 @@ class TestWorldChat:
         assert any("error" in e for e in events)
 
     async def test_no_matching_kgs_returns_error(self, test_app):
-        concepts = [{"name": "量子", "vector": [0.0] * 384}]
+        concepts = [{"name": "量子", "q_vector": [0.0] * 384}]
         mock_concept_repo = MagicMock()
+        mock_concept_repo.get_kgs_concepts_for_query = AsyncMock(return_value=None)
+        mock_concept_repo.get_public_kgs_concepts_for_query = AsyncMock(return_value=None)
+        mock_concept_repo.get_documents_concepts_for_query = AsyncMock(return_value=None)
         mock_concept_repo.get_public_kgs_concepts = AsyncMock(return_value={})
         mock_concept_repo.get_all_documents_concepts = AsyncMock(return_value={})
         mock_doc_repo = MagicMock()

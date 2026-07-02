@@ -246,6 +246,9 @@ class TestKGRoutingCriteria:
         mock_kg_repo.get_documents.side_effect = _mock_get_docs
 
         mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
         # 每個 KG 都有一個概念
         kgs_concepts = {kg_id: [_concept("測試")] for kg_id in kg_scores}
         mock_concept_repo.get_all_kgs_concepts.return_value = kgs_concepts
@@ -325,6 +328,9 @@ class TestKGRoutingCriteria:
             return (score_map[kid], ["測試"])
 
         mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
         mock_concept_repo.get_all_kgs_concepts.return_value = {k: [_concept("測試")] for k in score_map}
         mock_concept_repo.get_all_documents_concepts.return_value = {}
         mock_kg_repo = AsyncMock()
@@ -366,6 +372,9 @@ class TestKGRoutingCriteria:
         kg_obj.db_name = ""
 
         mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
         mock_concept_repo.get_all_kgs_concepts.return_value = {kg_id: [_concept("人工智慧")]}
         # 提供文件概念，使相似度補充路徑找到文件
         mock_concept_repo.get_all_documents_concepts.return_value = {
@@ -473,6 +482,9 @@ class TestSVOFactInjection:
         kg_obj.db_name = ""
 
         mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
         mock_concept_repo.get_all_kgs_concepts.return_value = {kg_id: [_concept("強化學習")]}
         mock_concept_repo.get_all_documents_concepts.return_value = {}
         mock_kg_repo = AsyncMock()
@@ -562,6 +574,9 @@ class TestHallucinationDefense:
         concepts = [_concept("完全無關的主題")]
 
         mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
         mock_concept_repo.get_all_kgs_concepts.return_value = {}
         mock_concept_repo.get_all_documents_concepts.return_value = {}
         mock_kg_repo = AsyncMock()
@@ -689,6 +704,9 @@ class TestSourceAttribution:
         kg_obj.db_name = ""
 
         mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
         mock_concept_repo.get_all_kgs_concepts.return_value = {kg_id: [_concept("深度學習")]}
         mock_concept_repo.get_all_documents_concepts.return_value = {}
         mock_kg_repo = AsyncMock()
@@ -751,6 +769,9 @@ class TestSourceAttribution:
         kg_obj.db_name = ""
 
         mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
         mock_concept_repo.get_all_kgs_concepts.return_value = {kg_id: [_concept("深度學習")]}
         mock_concept_repo.get_all_documents_concepts.return_value = {doc_id: [_concept("深度學習")]}
         mock_kg_repo = AsyncMock()
@@ -812,6 +833,9 @@ class TestE2EAnswerQuality:
         kg_obj.db_name = ""
 
         mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
         mock_concept_repo.get_all_kgs_concepts.return_value = {kg_id: [_concept("測試")]}
         mock_concept_repo.get_all_documents_concepts.return_value = {doc.id: [_concept("測試")]}
         mock_kg_repo = AsyncMock()
@@ -1015,6 +1039,9 @@ class TestE2EAnswerQuality:
         kg_obj.db_name = ""
 
         mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
         mock_concept_repo.get_all_documents_concepts.return_value = {}
         mock_kg_repo = AsyncMock()
         mock_kg_repo.get_by_id.return_value = kg_obj
@@ -1079,6 +1106,9 @@ class TestRefinementLoop:
         kg_obj.db_name = ""
 
         mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
         mock_concept_repo.get_all_kgs_concepts.return_value = {kg_id: [_concept("深度學習")]}
         mock_concept_repo.get_all_documents_concepts.return_value = {}
         mock_kg_repo = AsyncMock()
@@ -1143,6 +1173,9 @@ class TestRefinementLoop:
         kg_obj.db_name = ""
 
         mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
         mock_concept_repo.get_all_kgs_concepts.return_value = {kg_id: [_concept("量子計算")]}
         mock_concept_repo.get_all_documents_concepts.return_value = {}
         mock_kg_repo = AsyncMock()
