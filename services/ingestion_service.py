@@ -22,22 +22,19 @@ _ocr_reader = None
 def _get_ocr_reader():
     global _ocr_reader
     if _ocr_reader is None:
+        import paddle
         from paddleocr import PaddleOCR
         logger.info("初始化 PaddleOCR（中文 + 英文）…")
         # paddleocr>=3.0：舊版 use_gpu/use_angle_cls 參數已移除，改用 device/use_textline_orientation。
-        # enable_mkldnn=False：CPU-only 環境下 oneDNN 推論核心對本專案的模型組合會拋
-        # NotImplementedError（ConvertPirAttribute2RuntimeAttribute），關閉後即可正常運作。
-        try:
-            _ocr_reader = PaddleOCR(
-                use_textline_orientation=True, lang="ch", device="gpu", enable_mkldnn=False,
-            )
-            logger.info("PaddleOCR 載入完成（GPU）")
-        except Exception as e:
-            logger.warning(f"PaddleOCR GPU 初始化失敗，改用 CPU：{e}")
-            _ocr_reader = PaddleOCR(
-                use_textline_orientation=True, lang="ch", device="cpu", enable_mkldnn=False,
-            )
-            logger.info("PaddleOCR 載入完成（CPU）")
+        # 自行判斷 CUDA 是否可用，不依賴 device="gpu" 的內部自動退回機制——退回時
+        # enable_mkldnn 設定不會確實生效，CPU 推論會拋 NotImplementedError
+        # （ConvertPirAttribute2RuntimeAttribute），明確指定 device="cpu" 才會正確關閉 oneDNN。
+        has_gpu = paddle.device.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0
+        device = "gpu" if has_gpu else "cpu"
+        _ocr_reader = PaddleOCR(
+            use_textline_orientation=True, lang="ch", device=device, enable_mkldnn=False,
+        )
+        logger.info(f"PaddleOCR 載入完成（{device.upper()}）")
     return _ocr_reader
 
 # 副檔名 → (reader_func, file_type_str)
@@ -227,14 +224,14 @@ def _ocr_pdf(path: Path) -> str:
         pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
         img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, 3)
 
-        result = reader.ocr(img, cls=True)
+        # paddleocr>=3.0：ocr() 已棄用為 predict() 的相容殼，且不再接受 cls 參數，
+        # 回傳格式也從巢狀 list 改為含 rec_texts 欄位的 OCRResult。
+        result = reader.predict(img)
         page_lines: list[str] = []
-        if result and result[0]:
-            for line in result[0]:
-                if line and len(line) >= 2:
-                    text, _conf = line[1]
-                    if text.strip():
-                        page_lines.append(text)
+        for r in result or []:
+            for text in r.get("rec_texts", []):
+                if text.strip():
+                    page_lines.append(text)
 
         if page_lines:
             parts.append(f"[第 {i} 頁]\n" + "\n".join(page_lines))
