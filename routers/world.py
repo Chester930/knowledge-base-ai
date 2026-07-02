@@ -58,8 +58,7 @@ async def federation_registry():
 async def federation_refresh():
     from services.federation_service import get_federation_cache
     cache = get_federation_cache()
-    cache._fetched_at = 0.0   # 使快取過期
-    await cache.get_remote_registry()
+    await cache.force_refresh()
     return cache.status()
 
 
