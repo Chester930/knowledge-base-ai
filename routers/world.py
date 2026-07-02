@@ -20,6 +20,7 @@ from fastapi.responses import StreamingResponse
 
 from core.auth import require_api_key
 from core.constants import KG_ROUTE_THRESHOLD, MAX_KG_PER_QUERY
+from core.rate_limit import rate_limit
 from core.database import get_driver
 from core.providers.factory import get_llm_provider
 from repositories.concept_repo import ConceptRepository
@@ -261,7 +262,11 @@ async def world_stats():
 
 # ── POST /world/chat ──────────────────────────────────────────────────────────
 
-@router.post("/chat", summary="World Agent 問答（只查公開 KG，SSE 串流）")
+@router.post(
+    "/chat",
+    summary="World Agent 問答（只查公開 KG，SSE 串流）",
+    dependencies=[Depends(rate_limit)],
+)
 async def world_chat(req: dict):
     """
     與 /agent/chat 邏輯相同，但：

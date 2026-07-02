@@ -19,7 +19,12 @@ from core import database
 from core.database import get_driver
 from models.knowledge_graph import SVOTriple
 from repositories.concept_repo import ConceptRepository
-from services.svo_service import create_entity_index, merge_triples_to_neo4j, query_svo_facts
+from services.svo_service import (
+    cleanup_orphan_entities,
+    create_entity_index,
+    merge_triples_to_neo4j,
+    query_svo_facts,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -82,6 +87,43 @@ async def test_bfs_query_finds_merged_triples(neo4j_conn):
         )
         assert any("Transformer" in f for f in facts)
         assert str(doc_id) in source_docs
+    finally:
+        await driver.execute_query(
+            "MATCH (e:Entity {kg_id: $kg_id}) DETACH DELETE e", kg_id=str(kg_id)
+        )
+
+
+async def test_cleanup_orphan_entities_removes_only_degree_zero_nodes(neo4j_conn):
+    """驗證孤兒節點清理只刪除無任何關係邊的 Entity，不影響有邊的節點。"""
+    await create_entity_index()
+    driver = get_driver()
+    kg_id = uuid4()
+    doc_id = uuid4()
+
+    triples = [
+        SVOTriple(
+            subject="A", subject_type="概念", rel_type="RELATED_TO",
+            verb="相關", object="B", object_type="概念",
+            confidence=1, source_doc_id=doc_id,
+        ),
+    ]
+    try:
+        await merge_triples_to_neo4j(triples, kg_id, doc_id, db_name="")
+        # 手動插入一個無任何關係邊的孤兒節點
+        await driver.execute_query(
+            "CREATE (:Entity {id: $id, name: '孤兒節點', kg_id: $kg_id})",
+            id=str(uuid4()), kg_id=str(kg_id),
+        )
+
+        removed = await cleanup_orphan_entities(kg_id, db_name="")
+        assert removed == 1
+
+        result = await driver.execute_query(
+            "MATCH (e:Entity {kg_id: $kg_id}) RETURN e.name AS name",
+            kg_id=str(kg_id),
+        )
+        names = {r["name"] for r in result.records}
+        assert names == {"A", "B"}
     finally:
         await driver.execute_query(
             "MATCH (e:Entity {kg_id: $kg_id}) DETACH DELETE e", kg_id=str(kg_id)

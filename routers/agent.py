@@ -4,12 +4,13 @@ import logging
 import re
 from uuid import UUID
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
 from core.constants import KG_ROUTE_THRESHOLD, MAX_KG_PER_QUERY
 from core.database import get_driver
 from core.config import settings
+from core.rate_limit import rate_limit
 from core.providers.factory import get_llm_provider, get_embedding_provider
 from models.document import AgentQueryRequest, AgentQueryResponse, AgentContext, ChatMessage, ChatRequest
 from repositories.concept_repo import ConceptRepository
@@ -323,7 +324,7 @@ def _build_rag_prompt(
 
 # ── /agent/chat（雙層路由）────────────────────────────────────────────────────
 
-@router.post("/chat", summary="雙層路由 RAG 問答（SSE）")
+@router.post("/chat", summary="雙層路由 RAG 問答（SSE）", dependencies=[Depends(rate_limit)])
 async def chat(req: ChatRequest):
     """
     雙層路由 RAG 問答：
@@ -640,7 +641,12 @@ async def chat(req: ChatRequest):
 
 # ── /agent/query（非串流，向下相容）──────────────────────────────────────────
 
-@router.post("/query", response_model=AgentQueryResponse, summary="RAG 查詢（非串流）")
+@router.post(
+    "/query",
+    response_model=AgentQueryResponse,
+    summary="RAG 查詢（非串流）",
+    dependencies=[Depends(rate_limit)],
+)
 async def agent_query(req: AgentQueryRequest):
     """非串流版本，回傳最相關文件片段，供程式整合使用。"""
     query_concepts = await build_query_concepts(req.question)
