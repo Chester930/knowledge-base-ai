@@ -24,12 +24,19 @@ def _get_ocr_reader():
     if _ocr_reader is None:
         from paddleocr import PaddleOCR
         logger.info("初始化 PaddleOCR（中文 + 英文）…")
+        # paddleocr>=3.0：舊版 use_gpu/use_angle_cls 參數已移除，改用 device/use_textline_orientation。
+        # enable_mkldnn=False：CPU-only 環境下 oneDNN 推論核心對本專案的模型組合會拋
+        # NotImplementedError（ConvertPirAttribute2RuntimeAttribute），關閉後即可正常運作。
         try:
-            _ocr_reader = PaddleOCR(use_angle_cls=True, lang="ch", show_log=False, use_gpu=True)
+            _ocr_reader = PaddleOCR(
+                use_textline_orientation=True, lang="ch", device="gpu", enable_mkldnn=False,
+            )
             logger.info("PaddleOCR 載入完成（GPU）")
         except Exception as e:
             logger.warning(f"PaddleOCR GPU 初始化失敗，改用 CPU：{e}")
-            _ocr_reader = PaddleOCR(use_angle_cls=True, lang="ch", show_log=False, use_gpu=False)
+            _ocr_reader = PaddleOCR(
+                use_textline_orientation=True, lang="ch", device="cpu", enable_mkldnn=False,
+            )
             logger.info("PaddleOCR 載入完成（CPU）")
     return _ocr_reader
 

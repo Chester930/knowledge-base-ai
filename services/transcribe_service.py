@@ -218,7 +218,10 @@ def _get_ocr_reader():
     if _ocr_reader is None:
         from paddleocr import PaddleOCR
         logger.info("初始化 PaddleOCR（中文 + 英文）…")
-        # lang='ch' 支援繁/簡中文與英文；show_log=False 抑制冗長輸出
+        # lang='ch' 支援繁/簡中文與英文
+        # 固定使用 paddleocr 2.x 系列 API（見 requirements.txt 的版本上限）：
+        # 3.x 把 use_gpu/use_angle_cls 改名且底層推論引擎在本專案的 CPU-only
+        # 環境下有相容性問題（.predict() 會拋 NotImplementedError），故不隨意升級。
         try:
             _ocr_reader = PaddleOCR(use_angle_cls=True, lang="ch", show_log=False, use_gpu=True)
             logger.info("PaddleOCR 載入完成（GPU）")

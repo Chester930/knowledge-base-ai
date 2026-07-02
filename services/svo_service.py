@@ -125,189 +125,219 @@ async def build_graph_for_kg(
     progress_lock = asyncio.Lock()
 
     for doc in docs:
-        text = doc.content or ""
-        _doc_id = doc.id
-        _doc_title = doc.title
-
-        sent_chunks = sentence_chunk(str(_doc_id), text)
-        total_chunks = len(sent_chunks)
-
-        # 1. 建立/讀取本地進度檔
-        import json as _json
-        progress_dir = chunk_store._base / str(kg_id) / str(_doc_id)
-        progress_file = progress_dir / "svo_progress.json"
-        
-        if force_rebuild:
-            if progress_file.exists():
-                try:
-                    progress_file.unlink(missing_ok=True)
-                except Exception:
-                    pass
-            progress_data = {}
-        else:
-            try:
-                if progress_file.exists():
-                    with open(progress_file, "r", encoding="utf-8") as f:
-                        progress_data = _json.load(f)
-                else:
-                    progress_data = {}
-            except Exception as pe:
-                logger.warning(f"讀取進度檔失敗，重設：{pe}")
-                progress_data = {}
-
-        # 持久化 Chunk 檔案，同時計算並儲存 embedding 向量（☆6 優化）
         try:
-            from core.providers.factory import get_embedding_provider
-            _emb = get_embedding_provider()
-            _texts = [c.text for c in sent_chunks]
-            if hasattr(_emb, "encode_batch"):
-                _vectors = _emb.encode_batch(_texts)
+            text = doc.content or ""
+            _doc_id = doc.id
+            _doc_title = doc.title
+
+            sent_chunks = sentence_chunk(str(_doc_id), text)
+            total_chunks = len(sent_chunks)
+
+            # 1. 建立/讀取本地進度檔
+            import json as _json
+            progress_dir = chunk_store._base / str(kg_id) / str(_doc_id)
+            progress_file = progress_dir / "svo_progress.json"
+        
+            if force_rebuild:
+                if progress_file.exists():
+                    try:
+                        progress_file.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                progress_data = {}
             else:
-                _vectors = [_emb.encode(t) for t in _texts]
-        except Exception as _e:
-            logger.warning(f"Chunk 向量計算失敗，略過持久化向量：{_e}")
-            _vectors = None
-        await chunk_store.write(kg_id, _doc_id, sent_chunks, vectors=_vectors)
-
-        # 2. 分類：哪些 chunk 已完成，哪些待處理
-        to_process = []
-        skipped_results = []
-        for sc in sent_chunks:
-            chunk_status = progress_data.get(str(sc.idx))
-            if chunk_status and chunk_status.get("processed"):
-                skipped_results.append((sc.idx, chunk_status.get("triples_count", 0)))
-            else:
-                to_process.append(sc)
-
-        yield BuildProgress(
-            event="chunk_start",
-            chunk_idx=0, total_chunks=total_chunks,
-            message=f"[{_doc_title}] 句子感知切分 {total_chunks} 個 Chunk，已跳過 {len(skipped_results)} 個已處理 Chunk，剩餘 {len(to_process)} 個開始並行提取…",
-        )
-
-        # 3. 先把已跳過的進度 yield 給 UI 顯示
-        for idx, triples_cnt in sorted(skipped_results, key=lambda x: x[0]):
-            total_merged += triples_cnt
-            yield BuildProgress(
-                event="chunk_done",
-                chunk_idx=idx, total_chunks=total_chunks,
-                triples_extracted=triples_cnt, triples_merged=triples_cnt,
-                message=f"[{_doc_title}] 第 {idx} 段已跳過（已於先前提取）",
-            )
-
-        _MAX_CHUNK_RETRIES = 2
-
-        # 4. 用 Lock 保護進度寫入的 async 函式
-        async def _save_chunk_progress(chunk_idx: int, triples_count: int):
-            async with progress_lock:
                 try:
-                    current_progress = {}
                     if progress_file.exists():
                         with open(progress_file, "r", encoding="utf-8") as f:
-                            current_progress = _json.load(f)
-                    current_progress[str(chunk_idx)] = {
-                        "processed": True,
-                        "triples_count": triples_count,
-                        "ts": time.time()
-                    }
-                    progress_dir.mkdir(parents=True, exist_ok=True)
-                    with open(progress_file, "w", encoding="utf-8") as f:
-                        _json.dump(current_progress, f, ensure_ascii=False, indent=2)
+                            progress_data = _json.load(f)
+                    else:
+                        progress_data = {}
                 except Exception as pe:
-                    logger.warning(f"寫入 chunk 進度檔失敗: {pe}")
+                    logger.warning(f"讀取進度檔失敗，重設：{pe}")
+                    progress_data = {}
 
-        async def _process_chunk(
-            sc: SentenceChunk,
-            __doc_id=_doc_id, __doc_title=_doc_title,
-        ):
-            async with sem:
-                last_err = None
-                for attempt in range(1 + _MAX_CHUNK_RETRIES):
-                    try:
-                        # 決定是否使用 fallback model
-                        model_override = None
-                        if attempt == _MAX_CHUNK_RETRIES:
-                            # 最後一次重試，嘗試使用 fallback 模型
-                            try:
-                                current_model = settings.ollama_llm_model
-                                model_override = await _get_fallback_model(current_model)
-                                if model_override:
-                                    logger.warning(
-                                        f"SVO 提取重試 [{__doc_title} chunk {sc.idx}] "
-                                        f"最後一次重試：降級至備用模型 {model_override}"
-                                    )
-                            except Exception:
-                                pass
+            # 持久化 Chunk 檔案，同時計算並儲存 embedding 向量（☆6 優化）
+            try:
+                from core.providers.factory import get_embedding_provider
+                _emb = get_embedding_provider()
+                _texts = [c.text for c in sent_chunks]
+                if hasattr(_emb, "encode_batch"):
+                    _vectors = _emb.encode_batch(_texts)
+                else:
+                    _vectors = [_emb.encode(t) for t in _texts]
+            except Exception as _e:
+                logger.warning(f"Chunk 向量計算失敗，略過持久化向量：{_e}")
+                _vectors = None
+            await chunk_store.write(kg_id, _doc_id, sent_chunks, vectors=_vectors)
 
-                        triples = await extract_svo_from_text(sc.text, model_override=model_override)
-                        merged = await merge_triples_to_neo4j(
-                            triples, kg_id, __doc_id, db_name, chunk_id=sc.chunk_id
-                        )
-                        # 成功提取與寫入，保存進度
-                        await _save_chunk_progress(sc.idx, len(triples))
-                        return sc.idx, triples, merged, None
-                    except Exception as e:
-                        last_err = e
-                        if attempt < _MAX_CHUNK_RETRIES:
-                            wait = 2 ** attempt
-                            logger.warning(
-                                f"SVO 提取重試 [{__doc_title} chunk {sc.idx}] "
-                                f"第 {attempt + 1} 次（等 {wait}s）：{e}"
-                            )
-                            await asyncio.sleep(wait)
-                logger.warning(
-                    f"SVO 提取失敗 [{__doc_title} chunk {sc.idx}]"
-                    f"（已重試 {_MAX_CHUNK_RETRIES} 次）：{last_err}"
+            # 2. 分類：哪些 chunk 已完成，哪些待處理
+            to_process = []
+            skipped_results = []
+            for sc in sent_chunks:
+                chunk_status = progress_data.get(str(sc.idx))
+                if chunk_status and chunk_status.get("processed"):
+                    skipped_results.append((sc.idx, chunk_status.get("triples_count", 0)))
+                else:
+                    to_process.append(sc)
+
+            yield BuildProgress(
+                event="chunk_start",
+                chunk_idx=0, total_chunks=total_chunks,
+                message=f"[{_doc_title}] 句子感知切分 {total_chunks} 個 Chunk，已跳過 {len(skipped_results)} 個已處理 Chunk，剩餘 {len(to_process)} 個開始並行提取…",
+            )
+
+            # 3. 先把已跳過的進度 yield 給 UI 顯示
+            for idx, triples_cnt in sorted(skipped_results, key=lambda x: x[0]):
+                total_merged += triples_cnt
+                yield BuildProgress(
+                    event="chunk_done",
+                    chunk_idx=idx, total_chunks=total_chunks,
+                    triples_extracted=triples_cnt, triples_merged=triples_cnt,
+                    message=f"[{_doc_title}] 第 {idx} 段已跳過（已於先前提取）",
                 )
-                return sc.idx, [], 0, last_err
 
-        if to_process:
-            max_doc_attempts = 3
-            doc_attempt = 0
-            while to_process and doc_attempt < max_doc_attempts:
-                doc_attempt += 1
-                if doc_attempt > 1:
-                    yield BuildProgress(
-                        event="chunk_start",
-                        chunk_idx=0, total_chunks=total_chunks,
-                        message=f"[{_doc_title}] 重新對上一步失敗的 {len(to_process)} 個段落發起原地重試抽取（第 {doc_attempt} 次）...",
+            _MAX_CHUNK_RETRIES = 2
+
+            # 4. 用 Lock 保護進度寫入的 async 函式
+            async def _save_chunk_progress(chunk_idx: int, triples_count: int):
+                async with progress_lock:
+                    try:
+                        current_progress = {}
+                        if progress_file.exists():
+                            with open(progress_file, "r", encoding="utf-8") as f:
+                                current_progress = _json.load(f)
+                        current_progress[str(chunk_idx)] = {
+                            "processed": True,
+                            "triples_count": triples_count,
+                            "ts": time.time()
+                        }
+                        progress_dir.mkdir(parents=True, exist_ok=True)
+                        with open(progress_file, "w", encoding="utf-8") as f:
+                            _json.dump(current_progress, f, ensure_ascii=False, indent=2)
+                    except Exception as pe:
+                        logger.warning(f"寫入 chunk 進度檔失敗: {pe}")
+
+            async def _save_chunk_failure(chunk_idx: int, error_msg: str):
+                async with progress_lock:
+                    try:
+                        current_progress = {}
+                        if progress_file.exists():
+                            with open(progress_file, "r", encoding="utf-8") as f:
+                                current_progress = _json.load(f)
+                        current_progress[str(chunk_idx)] = {
+                            "processed": False,
+                            "error": error_msg[:500],
+                            "ts": time.time(),
+                        }
+                        progress_dir.mkdir(parents=True, exist_ok=True)
+                        with open(progress_file, "w", encoding="utf-8") as f:
+                            _json.dump(current_progress, f, ensure_ascii=False, indent=2)
+                    except Exception as pe:
+                        logger.warning(f"寫入 chunk 失敗記錄失敗: {pe}")
+
+            async def _process_chunk(
+                sc: SentenceChunk,
+                __doc_id=_doc_id, __doc_title=_doc_title,
+            ):
+                async with sem:
+                    last_err = None
+                    for attempt in range(1 + _MAX_CHUNK_RETRIES):
+                        try:
+                            # 決定是否使用 fallback model
+                            model_override = None
+                            if attempt == _MAX_CHUNK_RETRIES:
+                                # 最後一次重試，嘗試使用 fallback 模型
+                                try:
+                                    current_model = settings.ollama_llm_model
+                                    model_override = await _get_fallback_model(current_model)
+                                    if model_override:
+                                        logger.warning(
+                                            f"SVO 提取重試 [{__doc_title} chunk {sc.idx}] "
+                                            f"最後一次重試：降級至備用模型 {model_override}"
+                                        )
+                                except Exception:
+                                    pass
+
+                            triples = await extract_svo_from_text(sc.text, model_override=model_override)
+                            merged = await merge_triples_to_neo4j(
+                                triples, kg_id, __doc_id, db_name, chunk_id=sc.chunk_id
+                            )
+                            # 成功提取與寫入，保存進度
+                            await _save_chunk_progress(sc.idx, len(triples))
+                            return sc.idx, triples, merged, None
+                        except Exception as e:
+                            last_err = e
+                            if attempt < _MAX_CHUNK_RETRIES:
+                                wait = 2 ** attempt
+                                logger.warning(
+                                    f"SVO 提取重試 [{__doc_title} chunk {sc.idx}] "
+                                    f"第 {attempt + 1} 次（等 {wait}s）：{e}"
+                                )
+                                await asyncio.sleep(wait)
+                    logger.warning(
+                        f"SVO 提取失敗 [{__doc_title} chunk {sc.idx}]"
+                        f"（已重試 {_MAX_CHUNK_RETRIES} 次）：{last_err}"
+                    )
+                    return sc.idx, [], 0, last_err
+
+            if to_process:
+                max_doc_attempts = 3
+                doc_attempt = 0
+                last_errors: dict[int, str] = {}
+                while to_process and doc_attempt < max_doc_attempts:
+                    doc_attempt += 1
+                    if doc_attempt > 1:
+                        yield BuildProgress(
+                            event="chunk_start",
+                            chunk_idx=0, total_chunks=total_chunks,
+                            message=f"[{_doc_title}] 重新對上一步失敗的 {len(to_process)} 個段落發起原地重試抽取（第 {doc_attempt} 次）...",
+                        )
+
+                    chunk_results = await asyncio.gather(
+                        *[_process_chunk(sc) for sc in to_process]
                     )
 
-                chunk_results = await asyncio.gather(
-                    *[_process_chunk(sc) for sc in to_process]
-                )
+                    success_indices = set()
+                    doc_has_error = False
+                    for idx, triples, merged, err in sorted(chunk_results, key=lambda x: x[0]):
+                        if err:
+                            doc_has_error = True
+                            last_errors[idx] = str(err)
+                            yield BuildProgress(event="error", chunk_idx=idx, message=str(err))
+                        else:
+                            success_indices.add(idx)
+                            total_merged += merged
+                            yield BuildProgress(
+                                event="chunk_done",
+                                chunk_idx=idx, total_chunks=total_chunks,
+                                triples_extracted=len(triples), triples_merged=merged,
+                                message=f"[{_doc_title}] 第 {idx} 段完成：{len(triples)} 組三元組",
+                            )
 
-                success_indices = set()
-                doc_has_error = False
-                for idx, triples, merged, err in sorted(chunk_results, key=lambda x: x[0]):
-                    if err:
-                        doc_has_error = True
-                        yield BuildProgress(event="error", chunk_idx=idx, message=str(err))
-                    else:
-                        success_indices.add(idx)
-                        total_merged += merged
-                        yield BuildProgress(
-                            event="chunk_done",
-                            chunk_idx=idx, total_chunks=total_chunks,
-                            triples_extracted=len(triples), triples_merged=merged,
-                            message=f"[{_doc_title}] 第 {idx} 段完成：{len(triples)} 組三元組",
-                        )
+                    # 僅保留失敗的段落作為下一輪的 to_process
+                    to_process = [sc for sc in to_process if sc.idx not in success_indices]
 
-                # 僅保留失敗的段落作為下一輪的 to_process
-                to_process = [sc for sc in to_process if sc.idx not in success_indices]
+                    if not to_process:
+                        break
 
                 if not to_process:
-                    break
-
-            if not to_process:
-                # 100% 成功，標記為已處理
-                await _set_doc_svo_processed(_doc_id)
+                    # 100% 成功，標記為已處理
+                    await _set_doc_svo_processed(_doc_id)
+                else:
+                    logger.warning(
+                        f"[{_doc_title}] 達到原地重試上限 {max_doc_attempts} 次，仍有 {len(to_process)} 個 chunk 失敗，暫時跳過此文檔..."
+                    )
+                    for sc in to_process:
+                        await _save_chunk_failure(sc.idx, last_errors.get(sc.idx, "未知錯誤"))
             else:
-                logger.warning(
-                    f"[{_doc_title}] 達到原地重試上限 {max_doc_attempts} 次，仍有 {len(to_process)} 個 chunk 失敗，暫時跳過此文檔..."
-                )
-        else:
-            await _set_doc_svo_processed(_doc_id)
+                await _set_doc_svo_processed(_doc_id)
+        except Exception as _doc_err:
+            logger.exception(f"文件處理發生未預期錯誤，已跳過此文件：{doc.title}")
+            yield BuildProgress(
+                event="error",
+                message=f"[{doc.title}] 未預期錯誤，已跳過此文件：{_doc_err}",
+            )
+            continue
 
     await kg_repo.refresh_counts(kg_id)
     # 再次清除快取以反映最新合併的資料
