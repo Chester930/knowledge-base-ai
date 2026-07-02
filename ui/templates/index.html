@@ -1298,6 +1298,40 @@ function closeClusterPanel() {
 }
 
 // ══════════════════════════════════
+// ADD — 上傳共用：XHR 進度條 + 防重複提交
+// ══════════════════════════════════
+function uploadWithProgress(url, file, extraFields = {}) {
+  return new Promise((resolve, reject) => {
+    const form = new FormData();
+    form.append('file', file);
+    for (const [k, v] of Object.entries(extraFields)) form.append(k, v);
+
+    const progressEl = document.createElement('div');
+    progressEl.className = 'toast success';
+    progressEl.textContent = `上傳中…「${file.name}」0%`;
+    document.body.appendChild(progressEl);
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', url);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) {
+        const pct = Math.round((e.loaded / e.total) * 100);
+        progressEl.textContent = `上傳中…「${file.name}」${pct}%`;
+      }
+    };
+    xhr.onload = () => {
+      progressEl.remove();
+      let data = {};
+      try { data = JSON.parse(xhr.responseText); } catch {}
+      if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+      else reject(data.detail || `上傳失敗（HTTP ${xhr.status}）`);
+    };
+    xhr.onerror = () => { progressEl.remove(); reject('無法連線到伺服器'); };
+    xhr.send(form);
+  });
+}
+
+// ══════════════════════════════════
 // ADD — Transcribe upload
 // ══════════════════════════════════
 function onDragOver2(e) { e.preventDefault(); document.getElementById('drop-zone-transcribe').classList.add('drag-over'); }
@@ -1305,17 +1339,18 @@ function onDragLeave2() { document.getElementById('drop-zone-transcribe').classL
 function onDrop2(e) { e.preventDefault(); onDragLeave2(); if (e.dataTransfer.files[0]) doTranscribeFile(e.dataTransfer.files[0]); }
 function doTranscribeUpload(e) { doTranscribeFile(e.target.files[0]); }
 
+let _transcribeUploadBusy = false;
+
 async function doTranscribeFile(file) {
-  toast('上傳並轉譯中…');
-  const form = new FormData();
-  form.append('file', file);
-  const res = await fetch(`${API}/transcribe/file`, { method:'POST', body: form });
-  if (res.ok) {
-    const r = await res.json();
+  if (_transcribeUploadBusy) { toast('已有檔案上傳中，請稍候再試','error'); return; }
+  _transcribeUploadBusy = true;
+  try {
+    const r = await uploadWithProgress(`${API}/transcribe/file`, file);
     toast(`✅「${file.name}」→ ${r.char_count.toLocaleString()} 字，已存入暫存區`);
-  } else {
-    const e = await res.json().catch(()=>({}));
-    toast(e.detail||'轉譯失敗','error');
+  } catch (err) {
+    toast(typeof err === 'string' ? err : '轉譯失敗', 'error');
+  } finally {
+    _transcribeUploadBusy = false;
   }
 }
 
@@ -1342,12 +1377,20 @@ function onDragLeave() { document.getElementById('drop-zone').classList.remove('
 function onDrop(e) { e.preventDefault(); onDragLeave(); if (e.dataTransfer.files[0]) doUpload(e.dataTransfer.files[0]); }
 function uploadFile(e) { doUpload(e.target.files[0]); }
 
+let _docUploadBusy = false;
+
 async function doUpload(file) {
-  toast('上傳中，請稍候…');
-  const form = new FormData(); form.append('file', file);
-  const res = await fetch(`${API}/documents/upload`, { method:'POST', body: form });
-  if (res.ok) { toast(`✅「${file.name}」匯入成功`); loadSidebar(); }
-  else { const e=await res.json().catch(()=>({})); toast(e.detail||'上傳失敗','error'); }
+  if (_docUploadBusy) { toast('已有檔案上傳中，請稍候再試','error'); return; }
+  _docUploadBusy = true;
+  try {
+    await uploadWithProgress(`${API}/documents/upload`, file);
+    toast(`✅「${file.name}」匯入成功`);
+    loadSidebar();
+  } catch (err) {
+    toast(typeof err === 'string' ? err : '上傳失敗', 'error');
+  } finally {
+    _docUploadBusy = false;
+  }
 }
 
 async function submitDoc() {

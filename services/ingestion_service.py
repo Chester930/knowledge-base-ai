@@ -413,8 +413,10 @@ def generate_ingest_summary(success_count: int, fail_count: int, errors: list[st
         summary_content += "## 失敗詳情\n\n"
         for err in errors:
             summary_content += f"- {err}\n"
-            
-    summary_path = Path("ingest_summary.md")
+
+    from core.config import settings
+    summary_path = Path(settings.workspace_dir) / "ingest_summary.md"
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         summary_path.write_text(summary_content, encoding="utf-8")
         logger.info(f"已產生匯入統計摘要：{summary_path.absolute()}")
