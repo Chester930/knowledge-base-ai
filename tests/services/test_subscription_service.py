@@ -179,14 +179,44 @@ class TestSubscriptionManagerPersistence:
             await mgr._load()
         assert mgr._subs == []
 
-    async def test_save_writes_json(self):
+    async def test_save_writes_json(self, tmp_path):
         mgr = _fresh_manager()
         mgr._subs = [_make_sub()]
-        with patch("services.subscription_service._SUBSCRIPTIONS_FILE") as mock_path:
-            mock_path.write_text = MagicMock()
+        target = tmp_path / "subscriptions.json"
+        with patch("services.subscription_service._SUBSCRIPTIONS_FILE", target):
             with patch("services.subscription_service._now_iso", return_value="2026-06-21T00:00:00Z"):
                 await mgr._save()
-        mock_path.write_text.assert_called_once()
+
+        data = json.loads(target.read_text(encoding="utf-8"))
+        assert data["updated_at"] == "2026-06-21T00:00:00Z"
+        assert len(data["subscriptions"]) == 1
+
+    async def test_save_leaves_no_leftover_tmp_files(self, tmp_path):
+        mgr = _fresh_manager()
+        mgr._subs = [_make_sub()]
+        target = tmp_path / "subscriptions.json"
+        with patch("services.subscription_service._SUBSCRIPTIONS_FILE", target):
+            await mgr._save()
+
+        siblings = list(tmp_path.iterdir())
+        assert siblings == [target], f"應只留下 subscriptions.json，實際：{siblings}"
+
+    async def test_save_is_atomic_original_untouched_on_failure(self, tmp_path):
+        mgr = _fresh_manager()
+        mgr._subs = [_make_sub()]
+        target = tmp_path / "subscriptions.json"
+        with patch("services.subscription_service._SUBSCRIPTIONS_FILE", target):
+            await mgr._save()
+        original_content = target.read_text(encoding="utf-8")
+
+        mgr._subs = [_make_sub(kb_id="new-kb-id")]
+        with patch("services.subscription_service._SUBSCRIPTIONS_FILE", target), \
+             patch("os.replace", side_effect=OSError("模擬寫入中斷")):
+            with pytest.raises(OSError):
+                await mgr._save()
+
+        assert target.read_text(encoding="utf-8") == original_content
+        assert list(tmp_path.iterdir()) == [target]
 
 
 # ── sync_all_subscriptions ────────────────────────────────────────────────────

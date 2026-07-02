@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 import json
 import logging
 import re
@@ -489,8 +490,10 @@ async def chat(req: ChatRequest):
                 content = doc.content or ""
                 if not _is_readable(content):
                     continue
-                snippet = _pick_relevant_chunks(
-                    content, query_concepts, req.max_chars_per_doc,
+                # _pick_relevant_chunks 內部呼叫 embedding.encode_batch()（同步網路/CPU 呼叫），
+                # 丟進 thread pool 避免阻塞事件迴圈
+                snippet = await asyncio.to_thread(
+                    _pick_relevant_chunks, content, query_concepts, req.max_chars_per_doc,
                     boost_terms=svo_entity_names,
                 )
                 logger.info(f"[DEBUG graph chunk] {doc.title}: len={len(snippet)} snippet_start={snippet[:120].replace(chr(10),' ')!r}")
@@ -535,8 +538,8 @@ async def chat(req: ChatRequest):
                 content = doc.content or ""
                 if not _is_readable(content):
                     continue
-                snippet = _pick_relevant_chunks(
-                    content, query_concepts, req.max_chars_per_doc,
+                snippet = await asyncio.to_thread(
+                    _pick_relevant_chunks, content, query_concepts, req.max_chars_per_doc,
                     boost_terms=svo_entity_names,
                 )
                 contexts.append({"title": doc.title, "content": snippet, "source": "similarity"})

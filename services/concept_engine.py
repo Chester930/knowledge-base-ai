@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 import hashlib
 import logging
 from collections import OrderedDict
@@ -185,7 +186,9 @@ async def extract_and_init_document_concepts(
 
     for name in concepts:
         try:
-            vec = embedding.encode(name)
+            # encode() 為同步呼叫（ollama/openai provider 內部走網路 I/O），
+            # 丟進 thread pool 避免阻塞事件迴圈
+            vec = await asyncio.to_thread(embedding.encode, name)
             await repo.get_or_create(name, domain, vec)
             await repo.init_document_concept(doc_id, name, INTEREST_INIT, PROFESSIONAL_INIT)
         except Exception as e:
@@ -205,7 +208,7 @@ async def build_query_concepts(text: str) -> list[dict]:
 
     result = []
     for name in names:
-        vec = embedding.encode(name)
+        vec = await asyncio.to_thread(embedding.encode, name)
         result.append({
             "name": name,
             "q_vector": vec,

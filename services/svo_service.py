@@ -180,10 +180,13 @@ async def build_graph_for_kg(
                 from core.providers.factory import get_embedding_provider
                 _emb = get_embedding_provider()
                 _texts = [c.text for c in sent_chunks]
+                # encode()/encode_batch() 為同步呼叫，丟進 thread pool 避免阻塞事件迴圈
                 if hasattr(_emb, "encode_batch"):
-                    _vectors = _emb.encode_batch(_texts)
+                    _vectors = await asyncio.to_thread(_emb.encode_batch, _texts)
                 else:
-                    _vectors = [_emb.encode(t) for t in _texts]
+                    _vectors = await asyncio.to_thread(
+                        lambda: [_emb.encode(t) for t in _texts]
+                    )
             except Exception as _e:
                 logger.warning(f"Chunk 向量計算失敗，略過持久化向量：{_e}")
                 _vectors = None

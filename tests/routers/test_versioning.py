@@ -210,6 +210,21 @@ class TestKgDiff:
 
         assert res.status_code == 404
 
+    async def test_malformed_since_returns_422_not_500(self, test_app):
+        """格式錯誤的 since 應回 422，而非讓 Neo4j datetime() 拋未捕捉例外變成 500。"""
+        kg_id = str(uuid4())
+        driver = _make_driver()
+
+        with patch("routers.versioning.get_driver", return_value=driver), \
+             patch("routers.versioning.KnowledgeGraphRepository") as MockRepo:
+            MockRepo.return_value.get_by_id = AsyncMock(return_value=_make_kg(kg_id))
+            async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as c:
+                res = await c.get(f"/kg/{kg_id}/diff?since=not-a-real-date")
+
+        assert res.status_code == 422
+        # 驗證發生在查詢 KG 之前，Neo4j 完全不應被觸碰
+        driver.execute_query.assert_not_called()
+
 
 # ── GET /kg/{id}/snapshot ─────────────────────────────────────────────────────
 
@@ -269,3 +284,17 @@ class TestKgSnapshot:
         data = res.json()
         assert data["fact_count"] == 0
         assert data["facts"] == []
+
+    async def test_malformed_at_returns_422_not_500(self, test_app):
+        """格式錯誤的 at 應回 422，而非讓 Neo4j datetime() 拋未捕捉例外變成 500。"""
+        kg_id = str(uuid4())
+        driver = _make_driver()
+
+        with patch("routers.versioning.get_driver", return_value=driver), \
+             patch("routers.versioning.KnowledgeGraphRepository") as MockRepo:
+            MockRepo.return_value.get_by_id = AsyncMock(return_value=_make_kg(kg_id))
+            async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as c:
+                res = await c.get(f"/kg/{kg_id}/snapshot?at=yesterday")
+
+        assert res.status_code == 422
+        driver.execute_query.assert_not_called()

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 import logging
 import re
 from pathlib import Path
@@ -347,7 +348,7 @@ async def refresh_kg_concepts(kg_id: UUID, text: str | None = None) -> None:
         concept_names.update(extra)
 
     for name in concept_names:
-        vec = embedding.encode(name)
+        vec = await asyncio.to_thread(embedding.encode, name)
         await concept_repo.get_or_create(name, "general", vec)
         await concept_repo.init_kg_concept(kg_id, name, INTEREST_INIT, PROFESSIONAL_INIT)
 
