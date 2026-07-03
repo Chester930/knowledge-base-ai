@@ -219,7 +219,7 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
 
 為了進一步提升神經符號 Graph-MoE RAG 架構在極大規模與複雜邏輯下的推理精度，未來可在以下八個前沿方向進行架構擴展，各方向均有相關學術研究支撐：
 
-> **現況稽核（2026-07-03 初稽 / 同日追蹤更新）**：初次稽核時 ①-⑧ 全數為**尚未實作**的規劃方向（已用 Grep/Read 逐項確認專案 `*.py` 全庫中查無對應程式碼，關鍵字如 `GraphSAGE`、`node2vec`、`Louvain`、`Leiden`、`contrastive`、`valid_from`/`valid_to`、`db.index.vector.queryNodes` 等均為 0 匹配）。同日依優先度排序後已落地 **⑧ 二階段粗篩精篩**（詳見該節，這是既有系統的真實效能瓶頸而非單純前瞻優化）；①②③⑤⑥⑦ 仍為規劃/設計方案階段，狀態詳見各節標註。
+> **現況稽核（2026-07-03 初稽 / 同日追蹤更新）**：初次稽核時 ①-⑧ 全數為**尚未實作**的規劃方向（已用 Grep/Read 逐項確認專案 `*.py` 全庫中查無對應程式碼，關鍵字如 `GraphSAGE`、`node2vec`、`Louvain`、`Leiden`、`contrastive`、`valid_from`/`valid_to`、`db.index.vector.queryNodes` 等均為 0 匹配）。同日依優先度排序後已落地 **⑧ 二階段粗篩精篩**（既有系統的真實效能瓶頸）與 **⑥ 時序知識圖譜衰減**（落地範圍與原設計有出入，詳見該節）；①②③⑤⑦ 仍為規劃/設計方案階段，狀態詳見各節標註。
 
 ### ① 圖拓撲感知共嵌入空間 (Graph-Aware Co-embedding Space)
 * **當前局限**：目前的 ConceptNode 連續特徵向量（Embedding）是利用標準文本模型獨立計算的，未感知到 Neo4j 圖譜中 SVO 邊所承載的拓撲結構與關聯強度。
@@ -258,9 +258,17 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
   * Blondel, V., et al. (2008). *"Fast unfolding of communities in large networks."* Journal of Statistical Mechanics. (Louvain 算法經典)
   * Traag, V., et al. (2019). *"From Louvain to Leiden: guaranteeing well-behaved communities."* Scientific Reports. (Leiden 算法)
 
-### ⑥ 時序知識圖譜與陳舊性校正 (Temporal Knowledge Graphs & Decay)
+### ⑥ 時序知識圖譜與陳舊性校正 (Temporal Knowledge Graphs & Decay) — ✅ 已落地（2026-07-03，範圍與原設計有出入見下）
 * **當前局限**：知識事實會隨著時間演進而陳舊（例如：CEO 職位更迭、技術標準變遷）。若 SVO 缺乏時間維度，圖譜中會存在相互衝突的過期知識，導致 LLM 產生幻覺。
 * **優化建議**：引入 **時序知識圖譜 (Temporal KG)** 機制，為每條 SVO 關係邊加上時間戳（`valid_from`, `valid_to`），並在重排公式中引入 **「時間衰減因子 (Temporal Decay Factor)」**，確保時效性高、未過期的事實被優先檢索。
+* **實際落地範圍與原設計的差異**：
+  * **未新增 `valid_from`/`valid_to` 欄位**——`svo_service.py` 的 SVO MERGE 邏輯早已在 `ON CREATE SET rel.created_at = datetime()` 設定建立時間（此為既有欄位，先前只寫入從未被讀取），本次落地直接沿用 `created_at` 作為衰減基準時間，而非新增文件中提出的 `valid_from`/`valid_to` 生效區間欄位。原因：`valid_from`/`valid_to` 代表「事實在現實世界中的有效期間」，需要從文件內容解析時序語意（例如辨識「2023年起」「已於2024年終止」等敘述）才能準確填值，屬於獨立的 NLP 子任務，不在本次範圍內；`created_at`（事實被抽取進圖譜的時間）是可以立即使用、對既有資料 100% 相容的代理指標（proxy），先以此上線，時序語意抽取留待未來迭代。
+  * **未修改「重排公式」（`_pick_relevant_chunks`，第3節）**——該函式只處理單一文件內的段落文字，沒有跨文件的發布時間可比較，衰減在此層級沒有意義。改為套用在 **SVO 事實排序**：`services/svo_service.py` 的 `query_svo_facts()`（`/agent/chat` 主要問答路徑）與 `query_svo_facts_with_provenance()`（`/world/chat`、聯邦分片查詢），BFS 撈回候選邊後，用 `confidence × decay_factor` 重新排序，取代原本只依 `confidence DESC` 排序。
+* **實際落地位置**：
+  * `services/svo_service.py::_temporal_decay(created_at, rate)`：`decay = exp(-rate * delta_days)`，與文件公式一致；`created_at` 缺失或無法解析時回傳 `1.0`（不衰減），確保舊資料/邊界情況下為向後相容。
+  * `core/constants.py::TEMPORAL_DECAY_RATE = 0.005`（與原虛擬碼 `daily_decay_rate` 預設值一致）。
+  * 3 處 `query_svo_facts()` 的 Cypher 分支與 2 處 `query_svo_facts_with_provenance()` 分支皆已加上 `toString(r.created_at) AS created_at`，並在 Python 端用 `_temporal_decay` 重新排序候選邊（Cypher 端 `LIMIT` 仍以 `confidence` 截斷候選集，僅重排取回後的順序，不影響何者被納入候選）。
+  * 測試：`tests/services/test_svo_service.py::TestTemporalDecay`（缺失/無法解析回傳1.0、新鮮事實≈1.0、較舊事實衰減、新舊事實相對排序、無時區字串容錯）。
 * **學術來源**：
   * Trivedi, R., et al. (2017). *"Predicting Semantic Relations in Temporal Knowledge Graphs."* EMNLP 2017.
   * Goel, R., et al. (2020). *"Diachronic Embedding for Temporal Knowledge Graph Completion."* AAAI 2020.
@@ -290,7 +298,7 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
 
 ## 10. 核心流程優化與虛擬碼設計草稿（規劃中，尚未實作）(Algorithm Pseudocode & Workflow Integration — Design Draft, Not Yet Implemented)
 
-> **狀態聲明（2026-07-03稽核 / 同日追蹤更新）**：本章標題原為「虛擬碼落地方案」，容易誤讀為已完成工程落地。初次稽核時 5 個 class（`FederatedOntologyMapper`、`TemporalDecayRerankEngine`、`GraphCoTReasoningEngine`、`ActiveRetrievalController`、`TwoStageVectorRetrievalEngine`）**完全未出現在任何 `.py` 檔案中**，僅為設計草稿。同日已落地 ⑤ `TwoStageVectorRetrievalEngine`（拆成兩個函式而非單一 class，差異見該節說明）；其餘 4 個 class 仍為設計草稿，尚未寫入程式碼。
+> **狀態聲明（2026-07-03稽核 / 同日追蹤更新）**：本章標題原為「虛擬碼落地方案」，容易誤讀為已完成工程落地。初次稽核時 5 個 class（`FederatedOntologyMapper`、`TemporalDecayRerankEngine`、`GraphCoTReasoningEngine`、`ActiveRetrievalController`、`TwoStageVectorRetrievalEngine`）**完全未出現在任何 `.py` 檔案中**，僅為設計草稿。同日已落地 ②`TemporalDecayRerankEngine` 與 ⑤`TwoStageVectorRetrievalEngine`（兩者皆拆成獨立函式而非單一 class，差異見各節說明）；`FederatedOntologyMapper`、`GraphCoTReasoningEngine`、`ActiveRetrievalController` 仍為設計草稿，尚未寫入程式碼。
 
 為了便於工程團隊直接在現有 GraphRAG 代碼庫中落地上述優化方向，本章提供五個核心流程的代碼設計藍圖與 Python 虛擬碼草稿：
 
@@ -334,8 +342,10 @@ class FederatedOntologyMapper:
         return aligned_data
 ```
 
-### ② 融入時序衰減的圖譜引導重排流程 (Temporal Decay Reranking)
+### ② 融入時序衰減的圖譜引導重排流程 (Temporal Decay Reranking) — ✅ 已落地（2026-07-03，套用位置與原虛擬碼不同，見第9節⑥說明）
 在圖譜引導的物理段落重排公式中，除了 SVO 命中加分，加入基於發布時間差的連續衰減權重：
+
+> **與原虛擬碼的差異**：實際落地**沒有**建立獨立的 `TemporalDecayRerankEngine` class，且套用對象不是「物理段落（chunk）重排」而是「SVO 事實排序」——理由與差異細節見第9節⑥。核心衰減公式 `exp(-rate * delta_days)` 與函式簽名精神保留，實作為 `services/svo_service.py::_temporal_decay()`。
 
 ```python
 import math

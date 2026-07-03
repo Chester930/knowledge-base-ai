@@ -14,3 +14,6 @@ CLASSIFY_MIN_THRESHOLD = 0.05   # 低於此值視為完全無相關，留 _stagi
 
 # 二階段粗篩-精篩檢索（THEORETICAL_ARCHITECTURE.md 第9節⑧）
 TWO_STAGE_COARSE_TOP_K = 100    # Stage-1：每個 query concept 用 Neo4j Vector Index 取回的候選數上限
+
+# 時序知識圖譜衰減（THEORETICAL_ARCHITECTURE.md 第9節⑥）
+TEMPORAL_DECAY_RATE = 0.005     # 每日衰減率：decay = exp(-rate * delta_days)，SVO 邊 created_at 缺失時視為不衰減

@@ -1,13 +1,16 @@
 from __future__ import annotations
 import asyncio
 import logging
+import math
 import re
 import time
 import unicodedata as _unicodedata
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import AsyncIterator
 from uuid import UUID, uuid4
 
+from core.constants import TEMPORAL_DECAY_RATE
 from core.database import get_driver
 from core.providers.factory import get_llm_provider
 from models.knowledge_graph import SVOTriple
@@ -21,6 +24,24 @@ _SENTENCES_PER_CHUNK = 5  # 每個 Chunk 的句子數（可調整）
 _SVO_CONCURRENCY = 2      # 每份文件最大平行 LLM 呼叫數（對應 OLLAMA_NUM_PARALLEL=2）
 _BFS_CACHE_TTL = 300 # BFS 查詢快取 TTL（秒）
 _bfs_cache: dict = {} # (kg_id, terms, hops, min_conf) → (facts, docs, ts)
+
+
+def _temporal_decay(created_at: str | None, rate: float = TEMPORAL_DECAY_RATE) -> float:
+    """時序衰減因子（THEORETICAL_ARCHITECTURE.md 第9節⑥）：decay = exp(-rate * delta_days)。
+
+    `created_at` 缺失或無法解析時（例如舊資料、或此功能上線前建立的邊）視為不衰減，回傳 1.0，
+    確保既有資料的排序不受影響。
+    """
+    if not created_at:
+        return 1.0
+    try:
+        created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        delta_days = max(0.0, (datetime.now(timezone.utc) - created).total_seconds() / 86400)
+        return math.exp(-rate * delta_days)
+    except (ValueError, TypeError):
+        return 1.0
 
 
 # ── 進度事件（供 SSE 串流使用）────────────────────────────────────────────────
@@ -797,7 +818,8 @@ async def query_svo_facts(
             RETURN DISTINCT s.name AS subject, s.type AS subject_type,
                    type(r) AS rel_type, r.verb AS verb,
                    o.name AS object, o.type AS object_type,
-                   r.confidence AS confidence, r.source_doc_id AS source_doc_id
+                   r.confidence AS confidence, r.source_doc_id AS source_doc_id,
+                   toString(r.created_at) AS created_at
             ORDER BY confidence DESC LIMIT $limit
             """,
             **bfs_params, **db_kw,
@@ -823,7 +845,8 @@ async def query_svo_facts(
                 RETURN DISTINCT s.name AS subject, s.type AS subject_type,
                        type(r) AS rel_type, r.verb AS verb,
                        o.name AS object, o.type AS object_type,
-                       r.confidence AS confidence, r.source_doc_id AS source_doc_id
+                       r.confidence AS confidence, r.source_doc_id AS source_doc_id,
+                       toString(r.created_at) AS created_at
                 ORDER BY confidence DESC LIMIT $limit
                 """,
                 database_=db_name, **fallback_params,
@@ -843,7 +866,8 @@ async def query_svo_facts(
                 RETURN DISTINCT s.name AS subject, s.type AS subject_type,
                        type(r) AS rel_type, r.verb AS verb,
                        o.name AS object, o.type AS object_type,
-                       r.confidence AS confidence, r.source_doc_id AS source_doc_id
+                       r.confidence AS confidence, r.source_doc_id AS source_doc_id,
+                       toString(r.created_at) AS created_at
                 ORDER BY confidence DESC LIMIT $limit
                 """,
                 **fallback_params,
@@ -855,7 +879,15 @@ async def query_svo_facts(
     seen_docs: set[str] = set()
     entity_freq: dict[str, int] = {}    # 實體出現頻率，供 chunk_ids 排序
 
-    for r in result.records:
+    # 時序衰減重排（第9節⑥）：confidence 之外再乘上時間衰減因子，讓時效性高的事實優先排列。
+    # Cypher 端已用 confidence 做過 LIMIT 截斷，這裡只重排已取回的候選集，不影響何者被納入。
+    records = sorted(
+        result.records,
+        key=lambda r: (r.get("confidence") or 1) * _temporal_decay(r.get("created_at")),
+        reverse=True,
+    )
+
+    for r in records:
         rel_type = r.get("rel_type") or "RELATED_TO"
         verb = r.get("verb") or rel_type
         label = REL_TYPE_LABELS.get(rel_type, rel_type)
@@ -1053,6 +1085,13 @@ async def query_svo_facts_with_provenance(
     # ── 批次查詢文件標題 ──────────────────────────────────────────────────────
     doc_ids = list({r.get("source_doc_id") for r in raw_records if r.get("source_doc_id")})
     title_map = await _batch_get_doc_titles(doc_ids)
+
+    # 時序衰減重排（第9節⑥）：同 query_svo_facts，讓時效性高的事實優先排列。
+    raw_records = sorted(
+        raw_records,
+        key=lambda r: (r.get("confidence") or 1) * _temporal_decay(r.get("created_at")),
+        reverse=True,
+    )
 
     # ── 組裝 SourcedFact ──────────────────────────────────────────────────────
     sourced: list[SourcedFact] = []
