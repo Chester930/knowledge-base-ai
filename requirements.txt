@@ -18,3 +18,6 @@ python-pptx>=1.0.0
 pywin32>=306; sys_platform == "win32"
 faster-whisper>=1.0.0
 networkx>=3.0
+gensim>=4.0
+datasets>=3.0.0
+accelerate>=0.26.0
