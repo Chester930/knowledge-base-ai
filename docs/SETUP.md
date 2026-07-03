@@ -189,6 +189,33 @@ python run_build_kg.py --force
 
 ---
 
+## 對外部署前的安全性設定
+
+預設設定僅適合本機開發（localhost）。若要讓服務可從區域網路或公網存取，
+`.env` 至少應設定：
+
+```env
+# 管理端點需帶 X-API-Key header 才能存取（文件上傳/刪除、KG 管理、問答等）
+# 留空 = 不驗證，正式對外部署務必設定
+API_KEY=your_secret_key_here
+
+# World Agent（world_main.py，port 8001）CORS 允許來源，逗號分隔
+# "*" 適合公開嵌入情境；若不需要跨網域嵌入建議收斂為實際網域
+WORLD_CORS_ORIGINS=https://your-domain.com
+
+# 上傳大小上限（MB），預設 50
+MAX_UPLOAD_SIZE_MB=50
+
+# 問答端點每來源每分鐘請求上限，0 = 停用
+CHAT_RATE_LIMIT_PER_MINUTE=20
+```
+
+> 設定 `API_KEY` 後，內建網頁 UI（`/`）直接呼叫 API 會被拒絕（401），
+> 除非透過會注入該 header 的反向代理存取，或自行修改前端加入 header。
+> 詳細端點層級的認證/限流行為見 [API.md](API.md#認證)。
+
+---
+
 ## 常見問題
 
 ### Neo4j 連線失敗
