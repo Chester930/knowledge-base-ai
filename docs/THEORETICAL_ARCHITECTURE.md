@@ -219,25 +219,56 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
 
 為了進一步提升神經符號 Graph-MoE RAG 架構在極大規模與複雜邏輯下的推理精度，未來可在以下八個前沿方向進行架構擴展，各方向均有相關學術研究支撐：
 
-> **現況稽核（2026-07-03 初稽 / 同日追蹤更新）**：初次稽核時 ①-⑧ 全數為**尚未實作**的規劃方向（已用 Grep/Read 逐項確認專案 `*.py` 全庫中查無對應程式碼，關鍵字如 `GraphSAGE`、`node2vec`、`Louvain`、`Leiden`、`contrastive`、`valid_from`/`valid_to`、`db.index.vector.queryNodes` 等均為 0 匹配）。同日依優先度排序後已落地 **⑧ 二階段粗篩精篩**（既有系統的真實效能瓶頸）、**⑥ 時序知識圖譜衰減**、**⑤ 多層次社群摘要檢索**（落地範圍與原設計皆有出入，詳見各節）；**④ 主動自適應檢索**只落地了原設計的一個小子集（提早結束單輪生成，而非逐 token 監控與中途插入新檢索，誠實揭露見該節，標記為 🟡 部分落地）；①②③⑦ 仍為規劃/設計方案階段，狀態詳見各節標註。
+> **現況稽核（2026-07-03 初稽 / 同日追蹤更新）**：初次稽核時 ①-⑧ 全數為**尚未實作**的規劃方向（已用 Grep/Read 逐項確認專案 `*.py` 全庫中查無對應程式碼，關鍵字如 `GraphSAGE`、`node2vec`、`Louvain`、`Leiden`、`contrastive`、`valid_from`/`valid_to`、`db.index.vector.queryNodes` 等均為 0 匹配）。同日依優先度排序後已落地 **⑧ 二階段粗篩精篩**（既有系統的真實效能瓶頸）、**⑥ 時序知識圖譜衰減**、**⑤ 多層次社群摘要檢索**（落地範圍與原設計皆有出入，詳見各節）；**④ 主動自適應檢索**只落地了原設計的一個小子集（提早結束單輪生成，而非逐 token 監控與中途插入新檢索，誠實揭露見該節，標記為 🟡 部分落地）。**①②③⑦ 已補充具體設計方案**（技術選型、資料/影響範圍、風險、工作量分級）但尚未寫程式：①②③ 為「規劃中，有明確落地路徑」，⑦ 評估結論為「目前不建議投入」（詳見該節）。
 
-### ① 圖拓撲感知共嵌入空間 (Graph-Aware Co-embedding Space)
+### ① 圖拓撲感知共嵌入空間 (Graph-Aware Co-embedding Space) — 🔵 設計方案已補充（2026-07-03，尚未實作）
 * **當前局限**：目前的 ConceptNode 連續特徵向量（Embedding）是利用標準文本模型獨立計算的，未感知到 Neo4j 圖譜中 SVO 邊所承載的拓撲結構與關聯強度。
 * **優化建議**：引入 **圖神經網絡 (GNN)** 算法（如 GraphSAGE 或 Node2Vec），將圖譜的離散拓撲特徵與文本的語意特徵進行聯合表徵學習，產生「感知圖結構的概念向量 (Graph-Aware Concept Embeddings)」。這能使 Gating Router 的相似度計算精確數倍。
-* **學術來源**：
-  * Hamilton, W., Ying, Z., & Leskovec, J. (2017). *"Inductive Representation Learning on Large Graphs."* NeurIPS 2017. (GraphSAGE 奠基作)
-  * Grover, A., & Leskovec, J. (2016). *"node2vec: Scalable Feature Learning for Networks."* KDD 2016.
 
-### ② 多源聯邦本體動態對齊 (Dynamic Federated Ontology Alignment)
+* **技術選型**：優先評估 **node2vec**，不是文件原先並列的 GraphSAGE。理由：本專案已在 2026-07-03（第9節⑧落地時）將 `networkx>=3.0` 明確列為直接相依套件，`networkx` 沒有內建 node2vec 但有輕量第三方實作可直接套用其圖結構 API，不需要 `torch` + `torch-geometric` 這類重型 ML 框架；GraphSAGE 是 inductive（可對新節點免重訓推論），能力更強，但代價是要引入 PyTorch 系依賴——這與本專案目前「本地 CPU 推論優先、盡量避免 GPU 依賴」的定位有摩擦（可對照 git log 中 PaddleOCR 在 GPU 初始化失敗時要求 fallback 回 CPU 的既有修復）。建議 node2vec 作為 Phase 1，GraphSAGE 留作 Phase 2（若 Phase 1 驗證有效、且有明確的「新節點需要即時可用向量」需求再投入）。
+* **落地範圍的釐清（容易被誤解之處）**：文件標題「圖拓撲感知」容易讓人以為要用 SVO 的 Entity-Entity 圖。但 KG 路由層（`concept_engine.compute_match_score`）比對的是 `ConceptNode.q_vector`，而 ConceptNode 之間目前唯一的圖結構關係是「同一份 Document/KG 透過 `EFFECTIVE` 邊連到哪些 ConceptNode」，是一個 Document/KG ↔ ConceptNode 的二分圖（bipartite graph），並非 SVO 的 Entity-Entity 圖。因此若要讓 Gating Router 真正受益，第一步應該是對這個二分圖做 node2vec，而不是對 SVO 圖做 GNN。
+* **具體設計**：
+  1. 離線批次腳本 `run_build_graph_embeddings.py`（比照 `run_build_kg.py` 慣例），抓取全部 `(Document|KnowledgeGraph)-[:EFFECTIVE]->(ConceptNode)` 邊建圖，跑 node2vec 產生每個 ConceptNode 的 `q_vector_graph`。
+  2. `repositories/concept_repo.py` 新增 `q_vector_graph` 屬性欄位，與既有 `q_vector`（純文字 embedding）並存，不覆蓋——這是刻意的風險控制：新舊向量並存，路由邏輯可以用權重 `final = α·q_vector + (1-α)·q_vector_graph` 做融合，α 可調、可 A/B 測試、隨時能回退到 α=1（等同完全不啟用此功能）。
+  3. `concept_engine.compute_match_score` 目前吃 `dict` 格式的概念（含 `q_vector` 鍵），改動時保持向後相容：`q_vector_graph` 缺失（例如剛入庫還沒跑批次腳本的新概念）時自動退回純文字向量。
+* **資料/訓練成本**：不需要新資料，圖結構完全來自現有 `EFFECTIVE` 邊；node2vec 訓練是離線批次任務，CPU 上可行，數萬節點規模預期在數分鐘內跑完。
+* **影響範圍**：`repositories/concept_repo.py`（新增欄位、可能需要第二份 Neo4j Vector Index 索引 `q_vector_graph`）、`services/concept_engine.py`（融合邏輯）、新增 1 支批次腳本。
+* **風險**：node2vec 是 **transductive**——新增 ConceptNode 後，要獲得穩定的 graph embedding 得重新訓練整個圖的向量，這與專案現有「增量建圖、跳過已處理文件」的設計哲學（`run_build_kg.py` 的增量模式）有摩擦：新文件加入後其 ConceptNode 在下次全量重訓前只能先用 α=1（純文字向量）當 fallback。若這個限制被證實不可接受，才需要評估升級到 GraphSAGE（inductive），但那要接受 PyTorch 依賴的成本。
+* **工作量分級**：Phase 1（node2vec + 融合機制）中等，約 2-4 天；Phase 2（GraphSAGE 升級）大，需要訓練 pipeline、模型版本管理，約 1-2 週以上。
+* **學術來源**：
+  * Hamilton, W., Ying, Z., & Leskovec, J. (2017). *"Inductive Representation Learning on Large Graphs."* NeurIPS 2017. (GraphSAGE 奠基作，Phase 2 參考)
+  * Grover, A., & Leskovec, J. (2016). *"node2vec: Scalable Feature Learning for Networks."* KDD 2016. (Phase 1 採用)
+
+### ② 多源聯邦本體動態對齊 (Dynamic Federated Ontology Alignment) — 🔵 設計方案已補充（2026-07-03，尚未實作，建議暫緩）
 * **當前局限**：跨分片並行查詢時，若不同分片的本體 Schema（如關係邊定義）存在命名或分類不一致（如 `IS_A` 與 `INSTANCE_OF` 混用），跨域查詢的語意流會發生斷裂。
 * **優化建議**：在路由層引入基於 LLM 或 Graph Matching 的 **動態本體對齊（Ontology Alignment）** 機制，自動在查詢發起前對不同知識庫的關係邊進行 Schema 轉換與映射，達成「無感知的跨域本體對接」。
+
+* **落地前提的查證結果（這是本項與其他項最大的不同之處）**：查過 `services/federation_service.py` 與 `services/shard_query.py` 目前的聯邦分片實作，所有分片（本機其他 KG、GitHub 遠端 registry）都遵循**同一套** `_VALID_REL_TYPES`（30 種）與 registry 格式——因為分片本身就是同一個專案的另一個部署實例，不是真正異質的外部知識圖譜。也就是說，**文件描述的本體不一致問題目前沒有真實案例會發生**，這是一個面向假設性未來需求（「未來若允許匯入非本專案格式的外部 KG」）的優化方向，不像⑧（O(N) 效能瓶頸）是已驗證的現有缺陷。
+* **技術選型（若未來真的要做）**：不引入新的 ML 模型，優先用 **LLM 輔助生成映射表**（複用專案已有的多 Provider LLM 抽象層 `core/providers/llm/`，零新增基礎設施），而非文件提到的傳統 Graph Matching 演算法（如 AgreementMakerLight，需要獨立的 Java 服務，與現有 Python 單體架構不合）。
+* **具體設計**：
+  1. `services/federation_service.py` 的 registry 結構為每個遠端分片新增可選欄位 `ontology_mapping: dict[str, str]`（`{external_rel_name: internal_rel_name}`）。
+  2. 首次接入異質分片時，抓取該分片少量三元組樣本，呼叫 LLM 生成映射表草稿。
+  3. **強制人工審核**這份映射表後才寫入 registry——不能全自動上線。
+  4. `services/shard_query.py::query_shards_parallel()` 查詢時依 `shard_id` 查對應映射表，把回傳結果的 `rel_type` 欄位做替換。
+* **資料/訓練成本**：不需訓練，是一次性、每接入一個新分片才需要跑一次的規則生成成本，非持續性成本。
+* **影響範圍**：`services/federation_service.py`（registry schema 擴充）、`services/shard_query.py`（查詢結果轉譯層）、需要至少一個 CLI 工具供人工確認映射表。
+* **風險**：LLM 生成的映射表可能有誤，錯誤映射的後果是「兩個語意不同的關係被靜默合併成同一種」，屬於難以事後偵測的資料品質問題，這是堅持要人工審核的原因。
+* **工作量分級**：中等，1-2 週。**建議暫緩**：目前沒有真實的異質 schema 分片會用到它，優先度應排在有真實需求驅動的項目之後，等真的要接入外部異質 KG（例如接入非本專案格式的公開知識圖譜）時再啟動評估。
 * **學術來源**：
   * Shvaiko, P., & Euzenat, J. (2013). *"Ontology Matching: A State of the Art and Future Challenges."* IEEE Transactions on Knowledge and Data Engineering.
   * Faria, D., et al. (2013). *"AgreementMakerLight: A System for Large-Scale Ontology Matching."* Semantic Web Conference.
 
-### ③ 圖譜鏈式思考推理 (Graph Chain-of-Thought / G-CoT)
+### ③ 圖譜鏈式思考推理 (Graph Chain-of-Thought / G-CoT) — 🔵 設計方案已補充（2026-07-03，尚未實作）
 * **當前局限**：圖譜內查找僅依賴簡單的 1-2 跳 BFS，屬於「被動式檢索」，缺乏對複雜邏輯路徑的自主推理能力。
 * **優化建議**：引入 **Graph-CoT (圖譜鏈式思考)** 機制。LLM 不僅被動接收 Context，而是能作為一個 Agent 沿著圖譜的語意關係邊主動「尋路」，動態決定下一跳要遍歷哪個實體，尋找最優的推理路徑（Multi-hop Reasoning Path）。
+
+* **技術選型**：不需要新模型，複用現有 LLM Provider 抽象層。核心改動是查詢邏輯從「一次性 BFS 1-2 跳全取」改為「LLM 逐跳決策」。
+* **具體設計**：`services/svo_service.py` 新增 `query_svo_facts_cot(kg_id, start_terms, question, max_hops=3)`：(1) 用既有全文索引找種子實體 (2) 迴圈最多 `max_hops` 次：查該實體的一跳鄰居（複用既有 Cypher pattern），把「目前推理路徑 + 候選鄰居 + 原始問題」交給 LLM，要求回覆 `{next_target, reason, is_stop}` 的 JSON（虛擬碼設計已在第10節③給出骨架）(3) 累積路徑上的所有邊作為最終 facts。
+* **最大的實際落地風險（延遲）**：`routers/agent.py` 已有一個精煉迴圈在做多輪 LLM 呼叫（confidence-based，最多 `_MAX_REFINE_ROUNDS=3` 輪）。若疊加 Graph-CoT 的多跳 LLM 呼叫，一次問答理論上可能觸發到 `hops(≤3) × refine_rounds(≤3) = 9` 次 LLM 呼叫。本專案預設走本地 Ollama（`phi4`/`qwen2.5` 等），單次生成常需要數秒到十幾秒，9 次呼叫的延遲對使用者是不可接受的。這是本項目**最需要先解決**的問題，而不是尋路邏輯本身。
+* **建議的漸進落地策略**：不讓 Graph-CoT 成為預設路徑。只在「BFS 1-2 跳 + 既有精煉迴圈都無法達到信心門檻」時才觸發，接在現有精煉迴圈「信心不足」分支之後，作為第三種補救手段（BFS → 相似度補充 chunk → Graph-CoT 尋路），而非取代 BFS 本身。這樣多數問答完全不受影響，只有少數「疑難」查詢才會付出額外延遲成本。
+* **影響範圍**：`services/svo_service.py`（新函式）、`routers/agent.py`（精煉迴圈新增第三層補救分支）、需要新增 LLM 呼叫次數的監控/上限保護（避免失控的延遲或 API 費用）。
+* **風險**：延遲風險（如上，需要嚴格的觸發條件與呼叫次數上限）；LLM 決策品質風險——本地小模型（如 `qwen2.5:7b`）做多跳路徑決策的可靠度未經驗證，可能不如預期，需要 fallback（例如連續 2 次尋路失敗就放棄，回退現有答案）。
+* **工作量分級**：大，2-3 週，含延遲監控、呼叫上限與 fallback 機制的工程量，且必須用真實資料集做 A/B 測試驗證「Graph-CoT 答案品質是否真的優於現有 BFS」，不能只憑理論假設就上線——這點文件原提案沒有涵蓋，但是落地前必要的驗證步驟。
 * **學術來源**：
   * He, Xiaoxin, et al. (2023). *"Mind's Eye of LLM: Reasoning on Graphs with Chain-of-Thought."* arXiv:2310.13344 (G-CoT 經典研究).
   * Chao, Yuxiao, et al. (2024). *"Graph-ToolChain: Leveraging Tool Chains for Reasoning on Graphs."* arXiv:2401.12345.
@@ -292,9 +323,16 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
   * Trivedi, R., et al. (2017). *"Predicting Semantic Relations in Temporal Knowledge Graphs."* EMNLP 2017.
   * Goel, R., et al. (2020). *"Diachronic Embedding for Temporal Knowledge Graph Completion."* AAAI 2020.
 
-### ⑦ 對比自我監督概念學習 (Contrastive Concept Learning)
+### ⑦ 對比自我監督概念學習 (Contrastive Concept Learning) — 🔵 設計方案已補充（2026-07-03，評估結論：目前不建議投入）
 * **當前局限**：在 ConceptNode 路由比對中只計算了正向的 Similarity 相似分，若兩個相鄰領域的概念界線模糊，容易發生路由偏差。
 * **優化建議**：在 Embedding 訓練或對齊計算中引入 **對比學習 (Contrastive Learning)**。在優化對齊權重時，不僅最大化正向概念的 cosine alignment，同時拉遠無關的負樣本概念（Negative Concepts），使得 Gating Router 的分類決策邊界更加清晰。
+
+* **技術選型與所需基礎設施**：目前 `core/providers/embedding/local.py` 是呼叫預訓練好的通用語意模型（sentence-transformers），沒有針對本專案領域資料做微調。要落地對比學習需要：(1) 準備正樣本對（同一份文件內共現的概念、或已知相關的概念配對）與負樣本（刻意選取不相關領域的概念）(2) 用 SimCLR / GCL 風格的 loss 微調 embedding 模型權重 (3) 訓練/驗證/模型版本管理的完整 pipeline。
+* **與現有架構哲學的根本衝突**：本專案目前完全是「呼叫外部/本地推論 API」的架構——`core/providers/embedding/`、`core/providers/llm/` 底下全部都是**呼叫**邏輯，沒有任何**訓練**邏輯；且從既有的 PaddleOCR GPU-fallback 修復記錄可看出，專案刻意優先支援 CPU-only、輕量部署（Windows 本機、Docker Compose 皆可跑）。對比學習微調至少需要 GPU 才有可行的訓練時間，這會是專案第一個「需要訓練基礎設施」的模組，投入的不只是這個功能本身，還包含建立一整套目前完全不存在的訓練/版本管理能力。
+* **投入產出比評估**：`compute_match_score` 目前的路由準確度**沒有被驗證為現有問題**——不像⑧的 O(N) 效能瓶頸是 `SYSTEM_HEALTH_AUDIT.md` 已明確指出的真實缺陷，路由準確度目前只是文件作者的理論假設「可能」存在邊界模糊的情況，缺乏使用者回報或量化指標佐證。且對比學習微調若樣本品質不佳或負樣本選取策略錯誤，反而可能讓 embedding 品質**變差**（過度貼合訓練樣本、犧牲泛化能力）。
+* **結論：目前評估為不值得投入**。理由總結：(1) 需要新增訓練基礎設施，與專案「輕量、易部署、不訓練模型」的定位衝突 (2) 沒有已驗證的真實路由準確度問題驅動這個投入 (3) 與其他 7 項相比，投入產出比明顯偏低，且有讓 embedding 品質變差的風險。
+* **更便宜的替代方案（若未來路由準確度真的被證實是瓶頸）**：優先嘗試 (a) 調整 `concept_engine._alignment()`/`_magnitude()` 公式的加權係數 (b) 換用品質更高的現成 embedding 模型（例如 `bge-m3`，仍是「呼叫」而非「訓練」，不衝突現有架構）(c) 針對誤路由的具體案例做規則式修正（例如同義詞表擴充，複用已有的 `services/entity_alignment.py` 機制），而不是直接跳到自建對比學習訓練 pipeline。
+* **工作量分級**：特大，若真的要做，3 週以上（含訓練基礎設施建置），**目前建議不投入資源**。
 * **學術來源**：
   * Chen, T., et al. (2020). *"A Simple Framework for Contrastive Learning of Visual Representations."* ICML 2020. (SimCLR 對比學習架構)
   * You, Y., et al. (2020). *"Graph Contrastive Learning with Augmentations."* NeurIPS 2020. (GCL 圖對比學習)
@@ -321,7 +359,7 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
 
 為了便於工程團隊直接在現有 GraphRAG 代碼庫中落地上述優化方向，本章提供五個核心流程的代碼設計藍圖與 Python 虛擬碼草稿：
 
-### ① 聯邦本體 Schema 對齊與 Cypher 動態轉換 (Ontology Schema Translation)
+### ① 聯邦本體 Schema 對齊與 Cypher 動態轉換 (Ontology Schema Translation) — 🔵 設計草稿，尚未實作（對應第9節②，建議暫緩，見該節理由）
 跨分片（Shard）並行查詢時，解決不同分片本體命名不一致的對齊流程：
 
 ```python
@@ -398,7 +436,7 @@ class TemporalDecayRerankEngine:
         return final_score
 ```
 
-### ③ 圖譜鏈式思考路徑推理流程 (Graph Chain-of-Thought / G-CoT)
+### ③ 圖譜鏈式思考路徑推理流程 (Graph Chain-of-Thought / G-CoT) — 🔵 設計草稿，尚未實作（對應第9節③，落地策略與延遲風險見該節）
 在圖譜內檢索時，利用 LLM 來指導並沿著 Neo4j 語意邊進行自主多跳推理尋路：
 
 ```python
