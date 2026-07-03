@@ -67,10 +67,10 @@ $$Score_{\text{kg}} = \frac{\sum_{i,j} \alpha_{i,j}}{\sum_{i,j} \text{Mag}_{i,j}
 系統設定了 `KG_ROUTE_THRESHOLD` 作為篩選門檻。
 
 #### 【多專家激活與跨域語意融合 (Top-K Multi-Expert Activation)】
-為了解決現實世界中**跨領域 (Cross-domain) 查詢**的問題（例如，問題涉及「醫學」與「資訊工程」的交集），系統**不限制只激活單一圖譜**，而是實作了 **Top-K 門控路由機制**（在代碼中以 `MAX_KG_PER_QUERY` 進行約束，通常設為 3）：
+為了解決現實世界中**跨領域 (Cross-domain) 查詢**的問題（例如，問題涉及「醫學」與「資訊工程」的交集），系統**不限制只激活單一圖譜**，而是實作了 **Top-K 門控路由機制**（在代碼中以 `MAX_KG_PER_QUERY` 進行約束，**實際預設為 5**，定義於 `core/constants.py`，篩選邏輯見 `routers/agent.py`：先以 `score >= KG_ROUTE_THRESHOLD` 篩選，再取 `kg_scores[:MAX_KG_PER_QUERY]`）：
 $$\text{Activated\_KGs} = \text{Top-K}\Big( \big\{ \text{KG}_i \;\big|\; Score_{\text{kg}, i} \ge \text{Threshold} \big\} \Big)$$
 這對應於 **Top-K Sparsely-Gated MoE** 結構：
-1. **並行激活與聯邦檢索**：當多個專家圖譜被同時激活時（$\text{Gate}_i = 1$），系統會跨多個圖譜分片並行執行 BFS 遍歷（`query_shards_parallel`），獲取各自的離散 SVO Facts 與對應原文的物理座標。
+1. **並行激活與聯邦檢索**：當多個專家圖譜被同時激活時（$\text{Gate}_i = 1$），系統在 `routers/agent.py` 的 `_bfs_kg()` 搭配 `asyncio.gather()` 對所有 `selected_kgs` 並行執行 BFS 遍歷，跨分片場景則由 `services/shard_query.py` 的 `query_shards_parallel()` 承接，獲取各自的離散 SVO Facts 與對應原文的物理座標。
 2. **跨域值融合 (Cross-Domain Value Fusion)**：將各個專家圖譜回傳的局部 Value 進行語意拼接與交叉融合：
    $$\text{Fused\_Context} = \bigoplus_{i \in \text{Activated}} V_i$$
    這讓最終的 LLM 能綜觀多個學科或專門領域的知識，進行**跨域語意聯邦推理（Cross-Domain Federated Reasoning）**。
@@ -100,11 +100,13 @@ $$\text{Activated\_KGs} = \text{Top-K}\Big( \big\{ \text{KG}_i \;\big|\; Score_{
 * **座標對照**：系統沿著被激活的 SVO 節點中儲存的 `chunk_id` 與 `source_doc_id` 物理座標，直接向 `ChunkStore` 持久化數據庫發送請求。
 * **物理原文拉取**：將產生這些 SVO 節點的**原始文件段落（Chunk 原文）**回溯提取出來（例如包含「西元 701 年，李白出生於碎葉城，其家族在此經商...」的完整段落）。
 * **學術價值**：這解決了傳統 Knowledge Graph 缺乏上下文情境（Context-free）的重大缺陷。本系統透過 **「符號-物理對照映射（Symbolic-to-Physical Mapping）」**，讓 LLM 同時擁有離散的「邏輯關係邊（SVO）」與連續的「原文細節（Chunk）」，大幅提升回答的細節度與可信度。
+* **實際觸發條件（`routers/agent.py` 精煉迴圈，約 L549-593）**：並非對每次查詢都無條件回溯，而是有明確的觸發閥門——僅當 `req.use_svo` 開啟且 BFS 已取得 `svo_chunk_ids` 時才進入精煉迴圈；迴圈內先由 LLM 對初次生成的答案自報信心分數，只有 `confidence < _CONFIDENCE_THRESHOLD` 時才會呼叫 `chunk_store.read_ranked(remaining_ids, q_vec)` 補拉原文。這比文件原先「SVO 資訊不足即回溯」的描述更精確：觸發依據是**生成端的信心分數**，而非檢索端對 SVO 資訊量的判斷。
 
 #### 【第二軌：圖譜引導的文本重排（Graph-Driven Reranking）】
-以上述圖譜抽出的實體作為「引導信號」，在 `_pick_relevant_chunks` 中對物理 Chunk 進行重新排序，計算公式為：
+以上述圖譜抽出的實體作為「引導信號」，在 `routers/agent.py` 的 `_pick_relevant_chunks`（定義於約 L74）中對物理 Chunk 進行重新排序，計算公式為（實測與程式碼逐項核對，係數完全吻合）：
 $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \mathbf{SVO\_Hits \times 0.10} + \text{Enum\_Bonus}$$
-這實作了**圖譜符號知識對向量相似度空間的偏置與引導**，優先提取與圖譜事實密切相關的原始文本。
+其中 `Enum_Bonus = 0.25`（L161）。這實作了**圖譜符號知識對向量相似度空間的偏置與引導**，優先提取與圖譜事實密切相關的原始文本。
+* **實作細節（文件先前未提及）**：實際排序並非單純依 `Score` 由大到小排，而是**兩階段排序**（L167-171）——先比較 `Query_Hits` 命中數，命中數相同時才比較綜合 `Score`。這代表系統對「關鍵詞直接命中」的信任權重高於「向量+圖譜綜合分數」，屬於刻意的保守排序策略。
 
 #### 【學術文獻背書與經典論文】
 * **GraphRAG 架構**：
@@ -167,9 +169,10 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
 ### (Federated Graph Querying & Entity Alignment)
 
 #### 【技術機制】
-為解決海量世界知識（World Knowledge）帶來的資料庫單點效能瓶頸，系統在 [routers/world.py](file:///c:/Users/666/Desktop/智慧知識庫/routers/world.py) 中實作了：
-1. **聯邦 Registry 合併**：整合本地與 GitHub 遠端 Registry，將查詢並行發送至各個分片（`query_shards_parallel`）。
-2. **跨實例實體對齊（Entity Alignment）**：透過 `align_entity_results` 與同義詞自動展開，合併不同分片中命名不一致的實體。
+為解決海量世界知識（World Knowledge）帶來的資料庫單點效能瓶頸，系統在 [routers/world.py](file:///c:/Users/666/Desktop/智慧知識庫/routers/world.py) 與 `services/federation_service.py`、`services/shard_query.py` 中實作了：
+1. **聯邦 Registry 合併**：`services/federation_service.py` 的 `get_federation_cache()` 整合本地與 `settings.github_registry_url` 遠端 Registry 快取；`services/shard_query.py` 的 `query_shards_parallel()` 將查詢並行發送至各個分片，並支援 `mark_shard_offline()` 對離線分片降級容錯。
+2. **跨實例實體對齊（Entity Alignment）**：透過 `services/entity_alignment.py` 的 `align_entity_results()`（以字典序最小詞作 canonical key 合併同義實體）與 `expand_terms()`（靜態同義詞表 + LLM 動態多語言同義詞展開）完成。
+   * **補充**：`expand_terms()` 並非只服務聯邦跨分片場景，`routers/agent.py` 在**單一 KG 內**的查詢期實體對齊也共用同一套函式，屬於比本節標題更通用的機制。
 
 #### 【學術文獻背書與經典論文】
 * **Federated Queries in Semantic Web**：
@@ -191,6 +194,12 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
 | [King-s-Knowledge-Graph-Lab/ProVe](https://github.com/King-s-Knowledge-Graph-Lab/ProVe) | 利用 LLM 對照網頁參考資料，校驗 Wikidata 中的三元組事實（Fact Verification）。 | 本系統實作了 **「事實溯源 (Provenance)」** 路由，與 ProVe 雷同，且加入了**「防幻覺過濾器」**進行實體原文存在性校驗。 |
 | [Wikipedia-KG-RAG](https://github.com/Wikipedia-KG-RAG) | 結合 Neo4j 與維基百科數據，實現基於圖譜的開放域問答。 | 本系統不只支持本機 Neo4j Wikipedia，更進一步實作了**聯邦分片（Federation Shard）**，可跨多個本機與遠端知識分片進行並行 RAG。 |
 | [pat-jj/KG-FIT](https://github.com/pat-jj/KG-FIT) | 針對開放世界知識（Open-World）進行圖譜的微調與補全，解決新實體對齊問題。 | 本系統在 `services/entity_alignment.py` 中實作了**同義詞展開與實體對齊**，在不微調模型的情況下完成開放世界實體融合。 |
+| [microsoft/graphrag](https://github.com/microsoft/graphrag) | 微軟官方 GraphRAG 實作，用 Leiden 演算法對知識圖譜做階層式社群偵測，為每個社群生成 LLM 摘要，支援 Global Query（全域性宏觀問答）。 | 直接對應本文件第9節⑤「多層次社群摘要檢索」——本系統**尚未實作**此機制（見第9節現況稽核），若要落地可直接參考此專案的社群偵測與摘要生成流程，而非從頭設計。 |
+| [neo4j-contrib/ms-graphrag-neo4j](https://github.com/neo4j-contrib/ms-graphrag-neo4j) | 微軟 GraphRAG 與 Neo4j 的官方整合套件，提供 Leiden 社群偵測直接寫入 Neo4j 圖資料庫的參考實作。 | 本系統的資料庫本就是 Neo4j，技術棧高度重疊，是落地第9節⑤最低摩擦力的路徑。 |
+| [PathRAG (arXiv:2502.14902)](https://arxiv.org/pdf/2502.14902) | 用「關鍵關係路徑剪枝」取代 GraphRAG 的社群式檢索與 LightRAG 的鄰居全取，降噪並減少 Token 消耗。 | 本系統目前的圖譜引導重排（`_pick_relevant_chunks`）仍是「BFS 全部取回 + 分數加權」，PathRAG 的路徑剪枝概念可用於在 BFS 命中的 SVO 子圖過大時先做路徑級篩選，降低送入 LLM 的 Context 噪音。 |
+| [MoG: Mixture of Experts for Graph-based RAG (arXiv:2605.31010)](https://arxiv.org/pdf/2605.31010) | 提出「Hub Graph（常駐、跨查詢共用的核心知識）+ 稀疏激活的 Expert Graph」雙層結構，比單純 Top-K 選圖更細緻。 | 與本系統的 Graph-MoE 路由（第2節）高度同源，但本系統目前**沒有 Hub Graph 概念**——跨領域查詢若所有 KG 的 `Score_kg` 都低於 `KG_ROUTE_THRESHOLD` 就會 0 個專家被激活。引入 Hub Graph 可作為 fallback，避免路由「全滅」的邊界情況。 |
+| [GraphRAG-Router (arXiv:2604.16401)](https://arxiv.org/pdf/2604.16401) | 用強化學習訓練路由器，依問題難度動態決定該用哪個 GraphRAG 子系統、甚至該用多大的生成模型，減少約 30% 大模型濫用。 | 本系統的 KG 路由分數公式（Cos × Align × Mag）是固定的手工特徵組合，無法隨查詢難度自適應調整 LLM 選型。可作為第9節「動態」系列方向的延伸參考，尤其若未來要接多種規格的 LLM Provider 做成本優化。 |
+| [Neurosymbolic Retrievers for RAG (arXiv:2601.04568)](https://arxiv.org/pdf/2601.04568) | 提出 KG-Path RAG：沿知識圖譜路徑擴展查詢以提升檢索可解釋性，並用症狀學（醫療風險評估）場景驗證神經符號檢索優於純向量檢索。 | 為本系統整體「神經符號」定位（第4節 T-Box/A-Box）提供 2026 年的最新學術背書，且其 KG-Path 查詢擴展手法與本系統 `expand_terms()` 的同義詞展開思路相通，可互相參照優化查詢擴展策略。 |
 
 ---
 
@@ -208,7 +217,9 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
 
 ## 9. 架構前瞻與未來優化方向 (Architectural Extensions & Future Enhancements)
 
-為了進一步提升神經符號 Graph-MoE RAG 架構在極大規模與複雜邏輯下的推理精度，未來可在以下四個前沿方向進行架構擴展，各方向均有相關學術研究支撐：
+為了進一步提升神經符號 Graph-MoE RAG 架構在極大規模與複雜邏輯下的推理精度，未來可在以下八個前沿方向進行架構擴展，各方向均有相關學術研究支撐：
+
+> **現況稽核（2026-07-03）**：以下 ①-⑧ 全數為**尚未實作**的規劃方向，已用 Grep/Read 逐項確認專案 `*.py` 全庫中查無對應程式碼（關鍵字如 `GraphSAGE`、`node2vec`、`Louvain`、`Leiden`、`contrastive`、`valid_from`/`valid_to`、`db.index.vector.queryNodes` 等均為 0 匹配）。其中 **⑧ 二階段粗篩精篩應優先處理**——它解決的不是錦上添花的優化，而是 `concept_engine.py` 的 `compute_match_score()` 目前確實以 Python 內存 $O(N)$ 雙重迴圈運作（無任何 Neo4j Vector Index 加速），KG 規模成長後會是真實的效能瓶頸，優先度應高於 ①②③④⑤⑥⑦。
 
 ### ① 圖拓撲感知共嵌入空間 (Graph-Aware Co-embedding Space)
 * **當前局限**：目前的 ConceptNode 連續特徵向量（Embedding）是利用標準文本模型獨立計算的，未感知到 Neo4j 圖譜中 SVO 邊所承載的拓撲結構與關聯強度。
@@ -237,6 +248,8 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
 * **學術來源**：
   * Trivedi, H., et al. (2023). *"Active Retrieval Augmented Generation."* EMNLP 2023.
   * Asai, Akari, et al. (2024). *"Self-RAG: Learning to Retrieve, Generate, and Critique through Self-Reflection."* ICLR 2024.
+  * *（2026補充）* Fan, D., et al. (2026). *"GraphRAG-Router: Learning Cost-Efficient Routing over GraphRAGs and LLMs with Reinforcement Learning."* arXiv:2604.16401 — 用 RL 讓路由器依問題難度自適應決定檢索/生成策略，減少約 30% 大模型濫用，思路與本方向互補。
+  * *（2026補充）* *"RouteRAG: Efficient Retrieval-Augmented Generation from Text and Graph via Reinforcement Learning."* arXiv:2512.09487 — 用端到端 RL 讓模型在生成過程中自主決定「何時推理、向文本或圖譜檢索、何時作答」，是本方向「一邊生成、一邊動態判斷」構想的最新工程化嘗試，可作為實作參考。
 
 ### ⑤ 多層次社群摘要檢索 (Community-based Hierarchical Retrieval)
 * **當前局限**：當遭遇全域性（Global Query）或跨多個文檔的宏觀查詢（如：「請總結所有公開圖譜中的技術演進」）時，BFS 遍歷與向量路由僅能匹配局部實體，無法回答全局性問題。
@@ -268,9 +281,11 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
 
 ---
 
-## 10. 核心流程優化與虛擬碼落地方案 (Algorithm Pseudocode & Workflow Integration)
+## 10. 核心流程優化與虛擬碼設計草稿（規劃中，尚未實作）(Algorithm Pseudocode & Workflow Integration — Design Draft, Not Yet Implemented)
 
-為了便於工程團隊直接在現有 GraphRAG 代碼庫中落地上述優化方向，本章提供四個核心流程的代碼設計藍圖與 Python 虛擬碼實作：
+> **狀態聲明（2026-07-03稽核）**：本章標題原為「虛擬碼落地方案」，容易誤讀為已完成工程落地。經全庫查證，以下 5 個 class（`FederatedOntologyMapper`、`TemporalDecayRerankEngine`、`GraphCoTReasoningEngine`、`ActiveRetrievalController`、`TwoStageVectorRetrievalEngine`）**完全未出現在任何 `.py` 檔案中**，僅為設計草稿，尚未寫入程式碼。落地時應回頭在此加註「已落地」+ 實際檔案位置（依專案慣例，見 CLAUDE.md 引用規範）。
+
+為了便於工程團隊直接在現有 GraphRAG 代碼庫中落地上述優化方向，本章提供五個核心流程的代碼設計藍圖與 Python 虛擬碼草稿：
 
 ### ① 聯邦本體 Schema 對齊與 Cypher 動態轉換 (Ontology Schema Translation)
 跨分片（Shard）並行查詢時，解決不同分片本體命名不一致的對齊流程：
