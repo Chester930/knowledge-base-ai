@@ -533,3 +533,56 @@ class TwoStageVectorRetrievalEngine:
         refined_results.sort(key=lambda x: x["fine_score"], reverse=True)
         return refined_results
 ```
+
+---
+
+## 11. 實證評估與驗證框架 (Empirical Evaluation Framework)
+
+### (RAG System Evaluation & Empirical Validation)
+
+為了解決學術界與企業評審對於 GraphRAG 系統在「問答品質」、「防幻覺能力」與「檢索效率」上的質疑，本專案設計了完備的實證評估與驗證框架，將系統表現量化。
+
+#### 【三大核心評估指標 (The RAG Triad)】
+本系統採用 **RAGAS (Retrieval Augmented Generation Assessment)** 評估架構，透過 LLM-as-a-judge 機制對問答流程進行三維度評量：
+
+1. **Faithfulness（忠實度 / 幻覺抑制率）**：
+   * **定義**：生成答案中的所有事實陳述，是否皆能從檢索到的 Context（包含圖譜 SVO 與物理 Chunks）中找到依據。
+   * **公式概念**：$\text{Faithfulness} = \frac{\text{源自 Context 的答案事實數}}{\text{答案中總事實數}}$
+   * **驗證目的**：評估「防幻覺過濾器」與「自我精煉機制（Self-Refinement）」的有效性。
+2. **Answer Relevance（答案相關性）**：
+   * **定義**：生成答案是否切中用戶問題的核心意圖，無冗餘資訊。
+   * **驗證目的**：評估 `build_query_concepts` 提取關鍵詞的準確度。
+3. **Context Recall（檢索召回率）**：
+   * **定義**：檢索出的 Context 是否包含解答該問題所需的全部關鍵資訊。
+   * **驗證目的**：評估「圖譜門控路由（Concept Gating）」與「1-2 跳 BFS 圖遍歷」是否產生漏檢。
+
+#### 【消融實驗設計 (Ablation Study Framework)】
+為了驗證本系統「雙層路由」與「符號-物理回溯」的設計優越性，專案建立了以下對比消融實驗：
+
+| 實驗組 | 路由與檢索機制 | 檢索內容 | 自我精煉迴圈 | 評估指標預期表現 |
+| :--- | :--- | :--- | :--- | :--- |
+| **Baseline 1 (純向量)** | 僅向量搜尋 (Cosine Similarity) | 僅原始 Chunks (Top-K) | 關閉 | Context Recall 較低（面對多跳問題時容易遺漏） |
+| **Baseline 2 (純圖譜)** | 概念路由 + BFS 圖遍歷 | 僅 SVO 翻譯句子 | 關閉 | Answer Relevance 高，但 Faithfulness 易因細節丟失而降低 |
+| **本系統 (Hybrid RAG)** | **雙層路由（Concept + BFS）** | **SVO + 物理座標回溯 Chunk** | **開啟 (閾值 0.65)** | **三項指標（Recall、Faithfulness、Relevance）均達到最優** |
+
+#### 【自我精煉與收斂性驗證】
+* **驗證方法**：於測試集進行 1000 次蒙地卡羅模擬問答，記錄系統在不同閾值（如 0.65）下，觸發第 1 輪、第 2 輪、第 3 輪精煉（補充 Chunks）的比例與最終收斂率。
+* **目標**：確保系統在滿足回答精準度的前提下，平均推理輪數接近 1.2 輪，避免無限循環並控制 Token 開銷。
+
+---
+
+## 12. 補充學術文獻與背景知識 (Supplementary Academic References)
+
+為了加強本專案在學術發表或專利申請時的學術背書，建議參考並引用以下文獻：
+
+* **RAG 系統評估與 RAGAS 框架**：
+  * *Es, S., Shahul, H., Pradeep, A., et al. (2023). "Ragas: Automated Evaluation of Retrieval Augmented Generation."* arXiv:2309.15217.
+  * 奠定了使用 LLM 對 RAG 進行自動化無監督評估的理論基礎，是本系統實證評估的學術引用來源。
+* **多跳推理（Multi-hop Reasoning）基準**：
+  * *Yang, Z., Qi, P., Zhang, S., et al. (2018). "HotpotQA: A Dataset for Diverse, Explainable Multi-hop Question Answering."* EMNLP 2018.
+  * 證實了單純的語意相似度檢索在處理多個關聯實體時的瓶頸，為本系統導入「BFS 圖遍歷」提供了強力的問題背景支撐。
+* **關係圖注意力網絡 (Relational Graph Attention Networks)**：
+  * *Wang, X., Ji, H., Shi, C., et al. (2019). "Heterogeneous Graph Attention Network."* WWW 2019.
+  * *Busbridge, D., Sherburn, G., Cavallo, P., et al. (2019). "Relational Graph Attention Networks."* arXiv:1904.05837.
+  * 提供了節點特徵與關係特徵共同進行 Attention 加權計算的數學理論，支持本系統未來「圖拓撲感知共嵌入空間」的優化設計。
+```
