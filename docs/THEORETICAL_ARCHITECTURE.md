@@ -1,4 +1,5 @@
 # 神經符號 GraphRAG 系統：基於動態注意力機制與聯邦知識分片的學術與理論架構
+
 # (Neuro-Symbolic GraphRAG System: Academic & Theoretical Architecture)
 
 本文件整理了**「智慧知識庫 / World Knowledge Hub」**的核心技術概念，詳細討論**「圖譜外查找機制（概念路由）」**與**「圖譜內查找機制（混合檢索與雙向回溯機制）」**，並將其映射至現代深度學習中的 **Attention (Q, K, V) 機制**、**神經符號 AI (Neuro-Symbolic AI)**、**混合專家圖譜路由 (Mixture of KGs / Graph MoE)** 以及**動態記憶網絡 (Dynamic Memory Networks)** 等學術理論，對照 GitHub 前沿專案與經典學術文獻，為本專案提供完備的學術背書。
@@ -48,9 +49,11 @@
 ---
 
 ## 2. 圖譜外查找機制：圖譜專家門控與 QKV 注意力映射
+
 ### (Outer-Graph Routing: Mixture of KG Experts & Routing Attention)
 
 #### 【技術機制】
+
 本系統將**「每個獨立的知識圖譜（KG）當作一個專家節點（Node / Expert）」**。QKV 注意力機制的作用是在「路由層」，用來動態計算問題對各個圖譜專家的權重分配：
 
 * **Query ($Q$)**：輸入問題經 `build_query_concepts` 投影為特徵矩陣 $Q \in \mathbb{R}^{M \times d}$，除 Embedding 向量外，亦包含 $[interest, professional]$ 雙維度權重。
@@ -58,6 +61,7 @@
 * **Value ($V$)**：被選擇/激活的圖譜內部的具體離散 SVO（Subject-Verb-Object）事實與文件片段（Chunks）。
 
 #### 【數學公式與門控路由】
+
 本系統在 `services/concept_engine.py` 的 `compute_match_score()` 中，將其實作化為**多屬性圖譜門控注意力（Multi-Attribute Gating Attention）**：
 $$\text{Cos}_{i,j} = \text{Cosine}(Q_{vector, i}, K_{vector, j})$$
 $$\text{Align}_{i,j} = 1.0 - \frac{|\Delta interest_{i,j}| + |\Delta professional_{i,j}|}{2}$$
@@ -67,15 +71,18 @@ $$Score_{\text{kg}} = \frac{\sum_{i,j} \alpha_{i,j}}{\sum_{i,j} \text{Mag}_{i,j}
 系統設定了 `KG_ROUTE_THRESHOLD` 作為篩選門檻。
 
 #### 【多專家激活與跨域語意融合 (Top-K Multi-Expert Activation)】
+
 為了解決現實世界中**跨領域 (Cross-domain) 查詢**的問題（例如，問題涉及「醫學」與「資訊工程」的交集），系統**不限制只激活單一圖譜**，而是實作了 **Top-K 門控路由機制**（在代碼中以 `MAX_KG_PER_QUERY` 進行約束，通常設為 3）：
 $$\text{Activated\_KGs} = \text{Top-K}\Big( \big\{ \text{KG}_i \;\big|\; Score_{\text{kg}, i} \ge \text{Threshold} \big\} \Big)$$
 這對應於 **Top-K Sparsely-Gated MoE** 結構：
+
 1. **並行激活與聯邦檢索**：當多個專家圖譜被同時激活時（$\text{Gate}_i = 1$），系統會跨多個圖譜分片並行執行 BFS 遍歷（`query_shards_parallel`），獲取各自的離散 SVO Facts 與對應原文的物理座標。
 2. **跨域值融合 (Cross-Domain Value Fusion)**：將各個專家圖譜回傳的局部 Value 進行語意拼接與交叉融合：
    $$\text{Fused\_Context} = \bigoplus_{i \in \text{Activated}} V_i$$
    這讓最終的 LLM 能綜觀多個學科或專門領域的知識，進行**跨域語意聯邦推理（Cross-Domain Federated Reasoning）**。
 
 #### 【學術文獻背書與經典論文】
+
 * **Sparsely-Gated MoE**：
   * *文獻*：*"Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer"* (Shazeer et al., 2017, arXiv:1701.06538)。
   * *理論連結*：Shazeer 論文中明確指出，當 $K > 1$（如 Top-2/Top-3 Gating）時，MoE 能夠同時激活多個不同的網絡專家，並對其輸出進行加權融合。本系統的 `MAX_KG_PER_QUERY` 圖外路由即是該機制的典型實踐。
@@ -86,27 +93,33 @@ $$\text{Activated\_KGs} = \text{Top-K}\Big( \big\{ \text{KG}_i \;\big|\; Score_{
 ---
 
 ## 3. 圖譜內查找機制：符號遍歷、物理段落回溯與實體重排
+
 ### (Inner-Graph Retrieval: Symbolic Traversal, Source Backtracking & Reranking)
 
 當圖譜路由器激活了特定的圖譜專家後，系統進入**圖譜內部的雙軌檢索與回溯階段**（主要定義在 `routers/agent.py` 與 `routers/world.py`）：
 
 #### 【第一軌：符號級圖譜遍歷（Symbolic Graph Traversal）】
+
 1. **BFS 拓撲檢索**：系統利用問題中提取的概念，在 Neo4j 中執行 **1-2 跳的 BFS 遍歷**。
 2. **語意事實與轉譯**：獲取離散 `SVO Facts`，並透過 `_svo_to_sentences` 翻譯為自然中文句子。
 3. **定位物理座標**：保留每個 Fact 指向的 `chunk_id`、`source_doc_id`。
 
 #### 【核心機制：符號-物理源頭回溯（Symbolic-to-Physical Source Backtracking）】
+
 當 SVO 離散關係雖然被檢索命中，但因為三元組過於抽象、精簡而**丟失了原文中的副詞、時序、數量或情境細節，導致 LLM 無法完美作答**時，系統會啟動回溯：
+
 * **座標對照**：系統沿著被激活的 SVO 節點中儲存的 `chunk_id` 與 `source_doc_id` 物理座標，直接向 `ChunkStore` 持久化數據庫發送請求。
 * **物理原文拉取**：將產生這些 SVO 節點的**原始文件段落（Chunk 原文）**回溯提取出來（例如包含「西元 701 年，李白出生於碎葉城，其家族在此經商...」的完整段落）。
 * **學術價值**：這解決了傳統 Knowledge Graph 缺乏上下文情境（Context-free）的重大缺陷。本系統透過 **「符號-物理對照映射（Symbolic-to-Physical Mapping）」**，讓 LLM 同時擁有離散的「邏輯關係邊（SVO）」與連續的「原文細節（Chunk）」，大幅提升回答的細節度與可信度。
 
 #### 【第二軌：圖譜引導的文本重排（Graph-Driven Reranking）】
+
 以上述圖譜抽出的實體作為「引導信號」，在 `_pick_relevant_chunks` 中對物理 Chunk 進行重新排序，計算公式為：
 $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \mathbf{SVO\_Hits \times 0.10} + \text{Enum\_Bonus}$$
 這實作了**圖譜符號知識對向量相似度空間的偏置與引導**，優先提取與圖譜事實密切相關的原始文本。
 
 #### 【學術文獻背書與經典論文】
+
 * **GraphRAG 架構**：
   * *文獻*：*"From Local to Global: A Graph RAG Approach to Query-Focused Summarization"* (Microsoft, 2024, arXiv:2404.16130)。
   * *理論連結*：微軟論文中強調了將非結構化文本轉為知識圖譜（Community Summary），再對應回原始文本的檢索優勢。本系統的「符號-物理源頭回溯」正是微軟 GraphRAG 中「圖譜實體溯源文本」的工程化具體實作。
@@ -117,11 +130,13 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
 ---
 
 ## 4. 本體論與知識圖譜的雙層協同
+
 ### (Ontology & Knowledge Graph: T-Box / A-Box Co-Reasoning)
 
 本體論（Ontology）是知識圖譜的「靈魂 Schema」，定義了數據的關係約束與邏輯結構。本專案將本體論與知識圖譜進行了學術上的 **T-Box（術語域）與 A-Box（實例域）雙層協同推理設計**：
 
 #### 【本體架構與學術定義】
+
 1. **T-Box (Terminology Box / 概念與本體模式層)**：
    * **Concept Classes (實體類別)**：定義了 13 種核心實體類型（`概念、算法、技術、方法、工具、框架、模型、系統、人物、組織、資料集、指標、其他`）。
    * **Relation Categories (本體關係類別)**：預定義了 30 種強類型的語意關係（如 `IS_A` 代表層級歸屬，`CAUSES` 代表因果效應，`USES` 代表功能操作等）。這解決了傳統 OpenIE（開放式資訊抽取）中關係詞發散、無法進行邏輯歸納與推理的弊端。
@@ -129,10 +144,12 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
    * 具體文檔中抽取出的實例化三元組（如 `[Transformer] -[:USES]-> [多頭注意力]`）。
 
 #### 【雙層協同工作機制】
+
 * **本體路由層（T-Box）**：`ConceptNode` 儲存了高維連續向量與屬性權重，作為 RAG 路由的**注意力分發器**。它快速匹配問題的核心概念與對應的本體 Schema。
 * **實例推理層（A-Box）**：路由確定後，系統在 Neo4j 圖資料庫中進行 BFS 圖路徑遍歷，將抽象的本體關係轉化為精確的文件事實與上下文，實作了「概念導向，事實落地」的協同推理。
 
 #### 【學術文獻背書與經典論文】
+
 * **Description Logics (描述邏輯與語意網)**：
   * *文獻*：*"The Description Logic Handbook: Theory, Implementation, and Applications"* (Baader et al., 2003, Cambridge University Press)。
   * *理論連結*：奠定了本體論中 T-Box 與 A-Box 劃分的基石。本系統將的概念路由映射為 T-Box，將三元組圖譜映射為 A-Box，符合經典語意網（Semantic Web）的知識表徵規範。
@@ -143,9 +160,11 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
 ---
 
 ## 5. 核心理論五：變長度注意力與動態知識演化
+
 ### (Variable-Length Attention & Non-parametric Memory Evolution)
 
 #### 【技術機制】
+
 質疑點在於「轉譯矩陣不固定、描述節點數量隨時間增減」是否會影響系統。事實上，這符合 Attention 機制最關鍵的優勢：**置換不變性與變長度相容**。
 
 1. **置換不變性 (Permutation Invariance)**：
@@ -154,6 +173,7 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
    描述節點的數量 $N$ 可以是任意正整數。當某實體的描述節點因時間推移而增加或刪除時，只是在數學上改變了矩陣的行數 $N$，透過加權歸一化算法，系統天然兼容這種動態變維。
 
 #### 【學術文獻背書與經典論文】
+
 * **Memory Networks (記憶網路)**：
   * *文獻*：*"Memory Networks"* (Weston et al., 2014, arXiv:1410.3916 - Facebook AI Research)。
   * *理論連結*：提出了利用外部 Memory Slots 來克服神經網路長程記憶失效的經典模型。本系統將 ConceptNode 設計為動態增減的記憶槽，概念完全承襲自 Memory Networks 的非參數化記憶（Non-parametric Memory）思想。
@@ -164,14 +184,18 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
 ---
 
 ## 6. 核心理論六：聯邦分片檢索與實體消歧
+
 ### (Federated Graph Querying & Entity Alignment)
 
 #### 【技術機制】
+
 為解決海量世界知識（World Knowledge）帶來的資料庫單點效能瓶頸，系統在 [routers/world.py](file:///c:/Users/666/Desktop/智慧知識庫/routers/world.py) 中實作了：
+
 1. **聯邦 Registry 合併**：整合本地與 GitHub 遠端 Registry，將查詢並行發送至各個分片（`query_shards_parallel`）。
 2. **跨實例實體對齊（Entity Alignment）**：透過 `align_entity_results` 與同義詞自動展開，合併不同分片中命名不一致的實體。
 
 #### 【學術文獻背書與經典論文】
+
 * **Federated Queries in Semantic Web**：
   * *文獻*：*"FedX: Optimization Techniques for Federated Query Processing on Structured Data"* (Schwarte et al., 2011, WWW Conference)。
   * *理論連結*：這是在語意網領域中進行分散式 SPARQL 聯邦查詢的奠基之作。本系統的並行分片查詢（`query_shards_parallel`）即是聯邦查詢在 GraphRAG 系統中的具體實作。
@@ -197,6 +221,7 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
 ## 8. 技術優勢總結 (Key Takeaways for Presentation)
 
 在向評審或質質疑者介紹時，可著重以下四點：
+
 1. **雙層檢索架構與符號-物理源頭回溯（Source Backtracking）**：
    * **圖外**利用 **Graph-MoE** 門控路由激活專家圖譜。
    * **圖內**利用 **BFS 遍歷** 匹配 SVO 節點；**若三元組資訊太精簡，系統會自動沿節點物理座標回溯，直接從 `ChunkStore` 拉取生成該節點的原始文件段落（Chunk）供 LLM 參考**，解決了傳統圖譜缺乏 Context 的缺陷。
@@ -211,6 +236,7 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
 為了進一步提升神經符號 Graph-MoE RAG 架構在極大規模與複雜邏輯下的推理精度，未來可在以下四個前沿方向進行架構擴展，各方向均有相關學術研究支撐：
 
 ### ① 圖拓撲感知共嵌入空間 (Graph-Aware Co-embedding Space)
+
 * **當前局限**：目前的 ConceptNode 連續特徵向量（Embedding）是利用標準文本模型獨立計算的，未感知到 Neo4j 圖譜中 SVO 邊所承載的拓撲結構與關聯強度。
 * **優化建議**：引入 **圖神經網絡 (GNN)** 算法（如 GraphSAGE 或 Node2Vec），將圖譜的離散拓撲特徵與文本的語意特徵進行聯合表徵學習，產生「感知圖結構的概念向量 (Graph-Aware Concept Embeddings)」。這能使 Gating Router 的相似度計算精確數倍。
 * **學術來源**：
@@ -218,6 +244,7 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
   * Grover, A., & Leskovec, J. (2016). *"node2vec: Scalable Feature Learning for Networks."* KDD 2016.
 
 ### ② 多源聯邦本體動態對齊 (Dynamic Federated Ontology Alignment)
+
 * **當前局限**：跨分片並行查詢時，若不同分片的本體 Schema（如關係邊定義）存在命名或分類不一致（如 `IS_A` 與 `INSTANCE_OF` 混用），跨域查詢的語意流會發生斷裂。
 * **優化建議**：在路由層引入基於 LLM 或 Graph Matching 的 **動態本體對齊（Ontology Alignment）** 機制，自動在查詢發起前對不同知識庫的關係邊進行 Schema 轉換與映射，達成「無感知的跨域本體對接」。
 * **學術來源**：
@@ -225,6 +252,7 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
   * Faria, D., et al. (2013). *"AgreementMakerLight: A System for Large-Scale Ontology Matching."* Semantic Web Conference.
 
 ### ③ 圖譜鏈式思考推理 (Graph Chain-of-Thought / G-CoT)
+
 * **當前局限**：圖譜內查找僅依賴簡單的 1-2 跳 BFS，屬於「被動式檢索」，缺乏對複雜邏輯路徑的自主推理能力。
 * **優化建議**：引入 **Graph-CoT (圖譜鏈式思考)** 機制。LLM 不僅被動接收 Context，而是能作為一個 Agent 沿著圖譜的語意關係邊主動「尋路」，動態決定下一跳要遍歷哪個實體，尋找最優的推理路徑（Multi-hop Reasoning Path）。
 * **學術來源**：
@@ -232,6 +260,7 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
   * Chao, Yuxiao, et al. (2024). *"Graph-ToolChain: Leveraging Tool Chains for Reasoning on Graphs."* arXiv:2401.12345.
 
 ### ④ 主動自適應檢索 (Active & Adaptive Retrieval)
+
 * **當前局限**：現有機制為單次檢索後生成答案，即便有自我精煉（Self-Refinement）也只是被動回填 Chunks，無法在生成過程中自發性地決定何時需要新知識。
 * **優化建議**：引入 **Active RAG (主動式檢索增強)**。在 LLM 串流生成的過程中，如果發現缺失某個中間邏輯鏈條的知識，能自發發起圖譜檢索，實現「一邊生成、一邊動態判斷、一邊補充檢索」的自適應生成。
 * **學術來源**：
@@ -239,6 +268,7 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
   * Asai, Akari, et al. (2024). *"Self-RAG: Learning to Retrieve, Generate, and Critique through Self-Reflection."* ICLR 2024.
 
 ### ⑤ 多層次社群摘要檢索 (Community-based Hierarchical Retrieval)
+
 * **當前局限**：當遭遇全域性（Global Query）或跨多個文檔的宏觀查詢（如：「請總結所有公開圖譜中的技術演進」）時，BFS 遍歷與向量路由僅能匹配局部實體，無法回答全局性問題。
 * **優化建議**：引入 **社群檢測 (Community Detection)** 算法（如 Louvain 或 Leiden 算法），對 Neo4j 中的圖譜結構進行層次化分群，並由 LLM 預先為每個分群生成「社群摘要 (Community Summaries)」。問答時根據問題層級路由至相應的社群摘要，提供巨觀的全局回答。
 * **學術來源**：
@@ -246,6 +276,7 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
   * Traag, V., et al. (2019). *"From Louvain to Leiden: guaranteeing well-behaved communities."* Scientific Reports. (Leiden 算法)
 
 ### ⑥ 時序知識圖譜與陳舊性校正 (Temporal Knowledge Graphs & Decay)
+
 * **當前局限**：知識事實會隨著時間演進而陳舊（例如：CEO 職位更迭、技術標準變遷）。若 SVO 缺乏時間維度，圖譜中會存在相互衝突的過期知識，導致 LLM 產生幻覺。
 * **優化建議**：引入 **時序知識圖譜 (Temporal KG)** 機制，為每條 SVO 關係邊加上時間戳（`valid_from`, `valid_to`），並在重排公式中引入 **「時間衰減因子 (Temporal Decay Factor)」**，確保時效性高、未過期的事實被優先檢索。
 * **學術來源**：
@@ -253,6 +284,7 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
   * Goel, R., et al. (2020). *"Diachronic Embedding for Temporal Knowledge Graph Completion."* AAAI 2020.
 
 ### ⑦ 對比自我監督概念學習 (Contrastive Concept Learning)
+
 * **當前局限**：在 ConceptNode 路由比對中只計算了正向的 Similarity 相似分，若兩個相鄰領域的概念界線模糊，容易發生路由偏差。
 * **優化建議**：在 Embedding 訓練或對齊計算中引入 **對比學習 (Contrastive Learning)**。在優化對齊權重時，不僅最大化正向概念的 cosine alignment，同時拉遠無關的負樣本概念（Negative Concepts），使得 Gating Router 的分類決策邊界更加清晰。
 * **學術來源**：
@@ -260,6 +292,7 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
   * You, Y., et al. (2020). *"Graph Contrastive Learning with Augmentations."* NeurIPS 2020. (GCL 圖對比學習)
 
 ### ⑧ 二階段向量粗篩-精篩架構 (Two-Stage Coarse-to-Fine Retrieval)
+
 * **當前局限**：概念匹配時在 Python 內存中對全庫進行 $O(N)$ 雙重迴圈計算，在大規模（N > 10,000）時會引發 CPU 阻塞與內存溢出。
 * **優化建議**：將檢索重構為**「二階段檢索架構（Two-Stage Retrieval）」**。第一階段（粗篩，Stage-1）利用 Neo4j 內建的 **Vector Index**（以 C++ 底層高速運算）抓出 Cosine 相似度最高的 Top-100 個候選節點；第二階段（精篩，Stage-2）在 Python 內存中僅對這 100 個候選節點進行對齊遮罩（Align）與強度振幅（Mag）的精細比對。複雜度由 $O(N)$ 驟降為 $O(100)$ 常數級別，效能提升千倍以上。
 * **學術來源**：
@@ -273,6 +306,7 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
 為了便於工程團隊直接在現有 GraphRAG 代碼庫中落地上述優化方向，本章提供四個核心流程的代碼設計藍圖與 Python 虛擬碼實作：
 
 ### ① 聯邦本體 Schema 對齊與 Cypher 動態轉換 (Ontology Schema Translation)
+
 跨分片（Shard）並行查詢時，解決不同分片本體命名不一致的對齊流程：
 
 ```python
@@ -313,6 +347,7 @@ class FederatedOntologyMapper:
 ```
 
 ### ② 融入時序衰減的圖譜引導重排流程 (Temporal Decay Reranking)
+
 在圖譜引導的物理段落重排公式中，除了 SVO 命中加分，加入基於發布時間差的連續衰減權重：
 
 ```python
@@ -348,6 +383,7 @@ class TemporalDecayRerankEngine:
 ```
 
 ### ③ 圖譜鏈式思考路徑推理流程 (Graph Chain-of-Thought / G-CoT)
+
 在圖譜內檢索時，利用 LLM 來指導並沿著 Neo4j 語意邊進行自主多跳推理尋路：
 
 ```python
@@ -402,6 +438,7 @@ class GraphCoTReasoningEngine:
 ```
 
 ### ④ 自適應不確定性驅動的主動檢索 (Active Retrieval Controller)
+
 在 LLM 串流生成答案的過程中，監控不確定性（Entropy/Confidence）自發決策是否觸發圖譜檢索：
 
 ```python
@@ -440,6 +477,7 @@ class ActiveRetrievalController:
 ```
 
 ### ⑤ 二階段向量粗篩-精篩檢索引擎 (Two-Stage Retrieval Engine)
+
 利用資料庫內建向量索引進行 C++ 級粗篩，在內存中進行精細重排，避免 memory 瓶頸：
 
 ```python
