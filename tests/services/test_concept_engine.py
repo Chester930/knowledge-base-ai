@@ -13,6 +13,7 @@ from services.concept_engine import (
     compute_match_score,
     extract_concepts,
     build_query_concepts,
+    route_via_two_stage,
 )
 
 
@@ -133,6 +134,61 @@ class TestComputeMatchScore:
         dc = {"name": "b", "q_vector": [0.001, 1.0] + [0.0]*8, "interest_score": 0.9, "professional_score": 0.9}
         score, matched = compute_match_score([qc], [dc])
         assert "b" not in matched
+
+
+# ── route_via_two_stage（二階段粗篩精篩，第9節⑧）───────────────────────────
+
+class TestRouteViaTwoStage:
+    def _qc(self, name="q"):
+        return {"name": name, "q_vector": [1.0] + [0.0] * 9,
+                "interest_score": 0.8, "professional_score": 0.8}
+
+    async def test_falls_back_to_full_scan_when_stage1_raises(self):
+        fetch = AsyncMock(return_value={"kg1": ["all"]})
+        with patch("services.concept_engine.get_driver", side_effect=RuntimeError("資料庫未連線")):
+            result = await route_via_two_stage([self._qc()], fetch)
+
+        fetch.assert_awaited_once_with(None)
+        assert result == {"kg1": ["all"]}
+
+    async def test_falls_back_to_full_scan_when_no_candidates_found(self):
+        mock_repo = AsyncMock()
+        mock_repo.vector_search_concept_ids.return_value = []
+        fetch = AsyncMock(return_value={"kg1": ["all"]})
+
+        with patch("services.concept_engine.get_driver", return_value=MagicMock()), \
+             patch("services.concept_engine.ConceptRepository", return_value=mock_repo):
+            result = await route_via_two_stage([self._qc()], fetch)
+
+        fetch.assert_awaited_once_with(None)
+        assert result == {"kg1": ["all"]}
+
+    async def test_narrows_to_deduplicated_candidate_ids(self):
+        mock_repo = AsyncMock()
+        mock_repo.vector_search_concept_ids.side_effect = [
+            ["c1", "c2"], ["c2", "c3"],
+        ]
+        fetch = AsyncMock(return_value={"kg1": ["narrowed"]})
+
+        with patch("services.concept_engine.get_driver", return_value=MagicMock()), \
+             patch("services.concept_engine.ConceptRepository", return_value=mock_repo):
+            result = await route_via_two_stage([self._qc("a"), self._qc("b")], fetch)
+
+        assert mock_repo.vector_search_concept_ids.call_count == 2
+        called_ids = set(fetch.call_args[0][0])
+        assert called_ids == {"c1", "c2", "c3"}
+        assert result == {"kg1": ["narrowed"]}
+
+    async def test_stage1_error_mid_loop_falls_back(self):
+        mock_repo = AsyncMock()
+        mock_repo.vector_search_concept_ids.side_effect = Exception("Neo4j 索引未就緒")
+        fetch = AsyncMock(return_value={})
+
+        with patch("services.concept_engine.get_driver", return_value=MagicMock()), \
+             patch("services.concept_engine.ConceptRepository", return_value=mock_repo):
+            await route_via_two_stage([self._qc()], fetch)
+
+        fetch.assert_awaited_once_with(None)
 
 
 # ── extract_concepts ────────────────────────────────────────────────────────

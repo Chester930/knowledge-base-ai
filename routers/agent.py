@@ -16,7 +16,7 @@ from repositories.concept_repo import ConceptRepository
 from repositories.document_repo import DocumentRepository
 from repositories.knowledge_graph_repo import KnowledgeGraphRepository
 from services.chunk_store import get_chunk_store
-from services.concept_engine import build_query_concepts, compute_match_score
+from services.concept_engine import build_query_concepts, compute_match_score, route_via_two_stage
 from services.svo_service import query_svo_facts
 
 router = APIRouter(prefix="/agent", tags=["agent"])
@@ -356,7 +356,9 @@ async def chat(req: ChatRequest):
             if req.kg_id:
                 selected_kgs = [(req.kg_id, 1.0, [])]
             else:
-                all_kg_concepts = await concept_repo.get_all_kgs_concepts()
+                all_kg_concepts = await route_via_two_stage(
+                    query_concepts, concept_repo.get_all_kgs_concepts,
+                )
 
                 kg_scores: list[tuple[UUID, float, list[str]]] = []
                 for kg_id, kg_concepts in all_kg_concepts.items():
@@ -476,7 +478,10 @@ async def chat(req: ChatRequest):
 
             # 4b. 相似度補充：有圖譜文件時縮減補充量，並過濾亂碼
             sim_quota = max(1, req.top_k - len(contexts))  # 圖譜已覆蓋時少補
-            all_doc_concepts = await concept_repo.get_all_documents_concepts()
+            all_doc_concepts = await route_via_two_stage(
+                query_concepts,
+                lambda ids: concept_repo.get_all_documents_concepts(concept_ids=ids),
+            )
             allowed: set[str] = set()
             if selected_kgs:
                 for kg_id, _, _ in selected_kgs:
@@ -649,7 +654,10 @@ async def agent_query(req: AgentQueryRequest):
 
     concept_repo = ConceptRepository(get_driver())
     doc_repo = DocumentRepository(get_driver())
-    all_doc_concepts = await concept_repo.get_all_documents_concepts()
+    all_doc_concepts = await route_via_two_stage(
+        query_concepts,
+        lambda ids: concept_repo.get_all_documents_concepts(concept_ids=ids),
+    )
 
     scored = []
     for doc_id, doc_concepts in all_doc_concepts.items():

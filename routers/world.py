@@ -24,7 +24,7 @@ from core.providers.factory import get_llm_provider
 from repositories.concept_repo import ConceptRepository
 from repositories.document_repo import DocumentRepository
 from repositories.knowledge_graph_repo import KnowledgeGraphRepository
-from services.concept_engine import build_query_concepts, compute_match_score
+from services.concept_engine import build_query_concepts, compute_match_score, route_via_two_stage
 
 router = APIRouter(prefix="/world", tags=["world"])
 logger = logging.getLogger(__name__)
@@ -284,7 +284,9 @@ async def world_chat(req: dict):
             kg_repo = KnowledgeGraphRepository(driver)
 
             # 只取公開 KG 的概念
-            public_kg_concepts = await concept_repo.get_public_kgs_concepts()
+            public_kg_concepts = await route_via_two_stage(
+                query_concepts, concept_repo.get_public_kgs_concepts,
+            )
 
             kg_scores: list[tuple[UUID, float, list[str]]] = []
             for kg_id, kg_concepts in public_kg_concepts.items():
@@ -432,7 +434,10 @@ async def world_chat(req: dict):
                 sources.append({"title": doc.title, "source": "graph"})
                 seen_doc_ids_ctx.add(doc_id_str)
 
-            all_doc_concepts = await concept_repo.get_all_documents_concepts()
+            all_doc_concepts = await route_via_two_stage(
+                query_concepts,
+                lambda ids: concept_repo.get_all_documents_concepts(concept_ids=ids),
+            )
             allowed: set[str] = set()
             for kg_id, _, _ in selected_kgs:
                 for d in await kg_repo.get_documents(kg_id):

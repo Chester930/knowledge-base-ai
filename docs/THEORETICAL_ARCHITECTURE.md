@@ -219,7 +219,7 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
 
 為了進一步提升神經符號 Graph-MoE RAG 架構在極大規模與複雜邏輯下的推理精度，未來可在以下八個前沿方向進行架構擴展，各方向均有相關學術研究支撐：
 
-> **現況稽核（2026-07-03）**：以下 ①-⑧ 全數為**尚未實作**的規劃方向，已用 Grep/Read 逐項確認專案 `*.py` 全庫中查無對應程式碼（關鍵字如 `GraphSAGE`、`node2vec`、`Louvain`、`Leiden`、`contrastive`、`valid_from`/`valid_to`、`db.index.vector.queryNodes` 等均為 0 匹配）。其中 **⑧ 二階段粗篩精篩應優先處理**——它解決的不是錦上添花的優化，而是 `concept_engine.py` 的 `compute_match_score()` 目前確實以 Python 內存 $O(N)$ 雙重迴圈運作（無任何 Neo4j Vector Index 加速），KG 規模成長後會是真實的效能瓶頸，優先度應高於 ①②③④⑤⑥⑦。
+> **現況稽核（2026-07-03 初稽 / 同日追蹤更新）**：初次稽核時 ①-⑧ 全數為**尚未實作**的規劃方向（已用 Grep/Read 逐項確認專案 `*.py` 全庫中查無對應程式碼，關鍵字如 `GraphSAGE`、`node2vec`、`Louvain`、`Leiden`、`contrastive`、`valid_from`/`valid_to`、`db.index.vector.queryNodes` 等均為 0 匹配）。同日依優先度排序後已落地 **⑧ 二階段粗篩精篩**（詳見該節，這是既有系統的真實效能瓶頸而非單純前瞻優化）；①②③⑤⑥⑦ 仍為規劃/設計方案階段，狀態詳見各節標註。
 
 ### ① 圖拓撲感知共嵌入空間 (Graph-Aware Co-embedding Space)
 * **當前局限**：目前的 ConceptNode 連續特徵向量（Embedding）是利用標準文本模型獨立計算的，未感知到 Neo4j 圖譜中 SVO 邊所承載的拓撲結構與關聯強度。
@@ -272,9 +272,16 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
   * Chen, T., et al. (2020). *"A Simple Framework for Contrastive Learning of Visual Representations."* ICML 2020. (SimCLR 對比學習架構)
   * You, Y., et al. (2020). *"Graph Contrastive Learning with Augmentations."* NeurIPS 2020. (GCL 圖對比學習)
 
-### ⑧ 二階段向量粗篩-精篩架構 (Two-Stage Coarse-to-Fine Retrieval)
+### ⑧ 二階段向量粗篩-精篩架構 (Two-Stage Coarse-to-Fine Retrieval) — ✅ 已落地（2026-07-03）
 * **當前局限**：概念匹配時在 Python 內存中對全庫進行 $O(N)$ 雙重迴圈計算，在大規模（N > 10,000）時會引發 CPU 阻塞與內存溢出。
 * **優化建議**：將檢索重構為**「二階段檢索架構（Two-Stage Retrieval）」**。第一階段（粗篩，Stage-1）利用 Neo4j 內建的 **Vector Index**（以 C++ 底層高速運算）抓出 Cosine 相似度最高的 Top-100 個候選節點；第二階段（精篩，Stage-2）在 Python 內存中僅對這 100 個候選節點進行對齊遮罩（Align）與強度振幅（Mag）的精細比對。複雜度由 $O(N)$ 驟降為 $O(100)$ 常數級別，效能提升千倍以上。
+* **實際落地位置**：
+  * `repositories/concept_repo.py` 的 `vector_search_concept_ids()`：呼叫既有的 `concept_q_vector` 向量索引（該索引原本已在 `main.py`/`run_build_kg.py` 等啟動流程建立，但先前從未被查詢使用）執行 `CALL db.index.vector.queryNodes(...)` 做 Stage-1 KNN 粗篩。
+  * `get_all_kgs_concepts()`、`get_public_kgs_concepts()`、`get_all_documents_concepts()` 新增可選參數 `concept_ids`，非 None 時將 Cypher 限定在候選集合內，取代原本的全表 `MATCH`。
+  * `services/concept_engine.py` 的 `route_via_two_stage()`：對每個 query concept 呼叫 Stage-1 取候選 id 聯集，再呼叫呼叫端傳入的 `fetch_candidates(ids)` 做 Stage-2；Stage-1 失敗（例如索引未就緒）或候選為空時，自動退回 `fetch_candidates(None)` 全表掃描，行為與優化前完全一致，不影響正確性。
+  * 已接入所有路由呼叫點：`routers/agent.py`（`/agent/chat` KG 路由、相似度補充、`/agent/query`）、`routers/world.py`（`/world/chat` 公開 KG 路由與相似度補充）、`routers/search.py`（`/search`）、`services/classify_service.py`（暫存區文件分類）。
+  * `core/constants.py` 新增 `TWO_STAGE_COARSE_TOP_K = 100`。
+  * 測試：`tests/services/test_concept_engine.py::TestRouteViaTwoStage`（Stage-1 失敗退回全表、候選為空退回全表、候選 id 聯集去重、Stage-1 中途例外退回全表）。
 * **學術來源**：
   * Nogueira, R., et al. (2019). *"Document Ranking with BERT."* arXiv:1903.07666. (經典二階段粗精篩檢索架構)
   * Robertson, S., et al. (2009). *"The Probabilistic Relevance Framework: BM25 and Beyond."* Foundations and Trends in Information Retrieval.
@@ -283,7 +290,7 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
 
 ## 10. 核心流程優化與虛擬碼設計草稿（規劃中，尚未實作）(Algorithm Pseudocode & Workflow Integration — Design Draft, Not Yet Implemented)
 
-> **狀態聲明（2026-07-03稽核）**：本章標題原為「虛擬碼落地方案」，容易誤讀為已完成工程落地。經全庫查證，以下 5 個 class（`FederatedOntologyMapper`、`TemporalDecayRerankEngine`、`GraphCoTReasoningEngine`、`ActiveRetrievalController`、`TwoStageVectorRetrievalEngine`）**完全未出現在任何 `.py` 檔案中**，僅為設計草稿，尚未寫入程式碼。落地時應回頭在此加註「已落地」+ 實際檔案位置（依專案慣例，見 CLAUDE.md 引用規範）。
+> **狀態聲明（2026-07-03稽核 / 同日追蹤更新）**：本章標題原為「虛擬碼落地方案」，容易誤讀為已完成工程落地。初次稽核時 5 個 class（`FederatedOntologyMapper`、`TemporalDecayRerankEngine`、`GraphCoTReasoningEngine`、`ActiveRetrievalController`、`TwoStageVectorRetrievalEngine`）**完全未出現在任何 `.py` 檔案中**，僅為設計草稿。同日已落地 ⑤ `TwoStageVectorRetrievalEngine`（拆成兩個函式而非單一 class，差異見該節說明）；其餘 4 個 class 仍為設計草稿，尚未寫入程式碼。
 
 為了便於工程團隊直接在現有 GraphRAG 代碼庫中落地上述優化方向，本章提供五個核心流程的代碼設計藍圖與 Python 虛擬碼草稿：
 
@@ -454,8 +461,10 @@ class ActiveRetrievalController:
         return "幻覺邊界實體" in text
 ```
 
-### ⑤ 二階段向量粗篩-精篩檢索引擎 (Two-Stage Retrieval Engine)
-利用資料庫內建向量索引進行 C++ 級粗篩，在內存中進行精細重排，避免 memory 瓶頸：
+### ⑤ 二階段向量粗篩-精篩檢索引擎 (Two-Stage Retrieval Engine) — ✅ 已落地（2026-07-03，實作與虛擬碼有出入見下）
+利用資料庫內建向量索引進行 C++ 級粗篩，在內存中進行精細重排，避免 memory 瓶頸。
+
+> **與原虛擬碼的差異**：實際落地**沒有**建立獨立的 `TwoStageVectorRetrievalEngine` class，而是拆成兩個更貼合現有架構的函式：`repositories/concept_repo.py::vector_search_concept_ids()`（Stage-1，純資料庫查詢）與 `services/concept_engine.py::route_via_two_stage()`（協調 Stage-1/Stage-2，透過高階函式 `fetch_candidates` 讓既有的 4 個路由呼叫點各自决定 Stage-2 要抓 KG 概念還是文件概念，避免為每種場景各寫一個 class）。索引名稱也不同：程式碼延用既有的 `concept_q_vector`（非虛擬碼中的 `concept_vector_index`）。詳細落地位置見第9節⑧。
 
 ```python
 class TwoStageVectorRetrievalEngine:

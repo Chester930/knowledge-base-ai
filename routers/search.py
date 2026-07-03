@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 from models.document import SearchRequest, SearchResult
-from services.concept_engine import build_query_concepts, compute_match_score
+from services.concept_engine import build_query_concepts, compute_match_score, route_via_two_stage
 from repositories.concept_repo import ConceptRepository
 from repositories.document_repo import DocumentRepository
 from core.database import get_driver
@@ -17,7 +17,10 @@ async def search(req: SearchRequest):
     concept_repo = ConceptRepository(get_driver())
     doc_repo = DocumentRepository(get_driver())
 
-    all_doc_concepts = await concept_repo.get_all_documents_concepts()
+    all_doc_concepts = await route_via_two_stage(
+        query_concepts,
+        lambda ids: concept_repo.get_all_documents_concepts(concept_ids=ids),
+    )
     results = []
 
     for doc_id, doc_concepts in all_doc_concepts.items():

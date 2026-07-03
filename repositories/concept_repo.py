@@ -21,6 +21,22 @@ class ConceptRepository:
             dim=dim,
         )
 
+    async def vector_search_concept_ids(self, query_vector, top_k: int) -> list[str]:
+        """二階段檢索 Stage-1（粗篩）：用 concept_q_vector 向量索引取回最相近的 ConceptNode id。
+
+        由 Neo4j 底層執行 KNN 運算，取代 Python 端的全表雙迴圈比對。
+        """
+        vec = query_vector.tolist() if hasattr(query_vector, "tolist") else list(query_vector)
+        result = await self.driver.execute_query(
+            """
+            CALL db.index.vector.queryNodes('concept_q_vector', $top_k, $vector)
+            YIELD node
+            RETURN node.id AS id
+            """,
+            top_k=top_k, vector=vec,
+        )
+        return [r["id"] for r in result.records]
+
     async def get_or_create(self, name: str, domain: str, q_vector) -> UUID:
         vec = q_vector.tolist() if hasattr(q_vector, "tolist") else list(q_vector)
         result = await self.driver.execute_query(
@@ -81,19 +97,27 @@ class ConceptRepository:
         return [dict(r) for r in result.records]
 
     async def get_all_documents_concepts(
-        self, exclude_doc_ids: list[UUID] | None = None
+        self,
+        exclude_doc_ids: list[UUID] | None = None,
+        concept_ids: list[str] | None = None,
     ) -> dict[UUID, list[dict]]:
+        """取得所有文件的 EFFECTIVE 概念。
+
+        `concept_ids` 為二階段檢索 Stage-2（精篩）用的候選過濾——非 None 時只回傳
+        該候選集合內的概念，將原本的全表掃描縮限為 Stage-1 向量粗篩後的子集。
+        """
         exclude = [str(d) for d in exclude_doc_ids] if exclude_doc_ids else []
         result = await self.driver.execute_query(
             """
             MATCH (d:Document)-[e:EFFECTIVE]->(c:ConceptNode)
             WHERE NOT d.id IN $exclude
+              AND ($concept_ids IS NULL OR c.id IN $concept_ids)
             RETURN d.id AS doc_id, c.id AS concept_id, c.name AS name,
                    c.q_vector AS q_vector,
                    e.interest_score AS interest_score,
                    e.professional_score AS professional_score
             """,
-            exclude=exclude,
+            exclude=exclude, concept_ids=concept_ids,
         )
         result_map: dict[UUID, list[dict]] = {}
         for r in result.records:
@@ -153,16 +177,21 @@ class ConceptRepository:
         )
         return [dict(r) for r in result.records]
 
-    async def get_all_kgs_concepts(self) -> dict[UUID, list[dict]]:
-        """取得所有 KG 的 EFFECTIVE 概念，供分配器與路由器批次比對。"""
+    async def get_all_kgs_concepts(self, concept_ids: list[str] | None = None) -> dict[UUID, list[dict]]:
+        """取得所有 KG 的 EFFECTIVE 概念，供分配器與路由器批次比對。
+
+        `concept_ids` 非 None 時限定回傳該候選集合內的概念（二階段檢索 Stage-2 用）。
+        """
         result = await self.driver.execute_query(
             """
             MATCH (kg:KnowledgeGraph)-[e:EFFECTIVE]->(c:ConceptNode)
+            WHERE $concept_ids IS NULL OR c.id IN $concept_ids
             RETURN kg.id AS kg_id, c.id AS concept_id, c.name AS name,
                    c.q_vector AS q_vector,
                    e.interest_score AS interest_score,
                    e.professional_score AS professional_score
-            """
+            """,
+            concept_ids=concept_ids,
         )
         result_map: dict[UUID, list[dict]] = {}
         for r in result.records:
@@ -170,16 +199,21 @@ class ConceptRepository:
             result_map.setdefault(kg_id, []).append(dict(r))
         return result_map
 
-    async def get_public_kgs_concepts(self) -> dict[UUID, list[dict]]:
-        """取得所有 is_public=true 的 KG 的 EFFECTIVE 概念（World Agent 專用）。"""
+    async def get_public_kgs_concepts(self, concept_ids: list[str] | None = None) -> dict[UUID, list[dict]]:
+        """取得所有 is_public=true 的 KG 的 EFFECTIVE 概念（World Agent 專用）。
+
+        `concept_ids` 非 None 時限定回傳該候選集合內的概念（二階段檢索 Stage-2 用）。
+        """
         result = await self.driver.execute_query(
             """
             MATCH (kg:KnowledgeGraph {is_public: true})-[e:EFFECTIVE]->(c:ConceptNode)
+            WHERE $concept_ids IS NULL OR c.id IN $concept_ids
             RETURN kg.id AS kg_id, c.id AS concept_id, c.name AS name,
                    c.q_vector AS q_vector,
                    e.interest_score AS interest_score,
                    e.professional_score AS professional_score
-            """
+            """,
+            concept_ids=concept_ids,
         )
         result_map: dict[UUID, list[dict]] = {}
         for r in result.records:
