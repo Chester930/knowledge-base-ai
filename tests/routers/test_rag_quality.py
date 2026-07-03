@@ -34,6 +34,7 @@ from routers.agent import (
     _build_rag_prompt,
     _extract_confidence,
     _is_readable,
+    _is_global_query,
     _CONFIDENCE_THRESHOLD,
 )
 from core.constants import KG_ROUTE_THRESHOLD
@@ -511,6 +512,119 @@ class TestSVOFactInjection:
         facts_received = svo_events[0]["svo_facts"]
         assert len(facts_received) == 2, f"應收到 2 個 SVO 事實，實際收到 {len(facts_received)}"
         assert any("強化學習" in f for f in facts_received), "強化學習應出現在 SVO 事實中"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 第9節⑤：社群摘要檢索（全域性查詢路由）
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestGlobalQueryHeuristic:
+    def test_summary_keywords_detected_as_global(self):
+        assert _is_global_query("請總結這個知識庫的技術演進")
+        assert _is_global_query("整體來說有哪些主題？")
+        assert _is_global_query("give me an overview of this knowledge base")
+
+    def test_specific_question_not_global(self):
+        assert not _is_global_query("Transformer 使用什麼機制？")
+        assert not _is_global_query("強化學習怎麼運作？")
+
+
+class TestCommunitySummaryInjection:
+    """[第9節⑤] 全域性查詢時，若 KG 已建立社群摘要，須以 community_summaries SSE 事件回傳。"""
+
+    async def test_community_summaries_emitted_for_global_query(self, test_app):
+        kg_id = uuid4()
+        concepts = [_concept("知識庫")]
+        kg_obj = MagicMock()
+        kg_obj.name = "測試KG"
+        kg_obj.db_name = ""
+
+        mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_all_kgs_concepts.return_value = {kg_id: [_concept("知識庫")]}
+        mock_concept_repo.get_all_documents_concepts.return_value = {}
+        mock_kg_repo = AsyncMock()
+        mock_kg_repo.get_by_id.return_value = kg_obj
+        mock_kg_repo.get_documents.return_value = []
+        mock_doc_repo = AsyncMock()
+        mock_doc_repo.get_by_id.return_value = None
+
+        summaries = [{"summary": "這個知識庫涵蓋機器學習與資料庫兩大主題。",
+                      "member_count": 12, "top_entities": ["機器學習", "資料庫"]}]
+
+        with patch("routers.agent.build_query_concepts",
+                   new=AsyncMock(return_value=concepts)), \
+             patch("routers.agent.compute_match_score", return_value=(0.8, ["知識庫"])), \
+             patch("routers.agent.get_driver"), \
+             patch("routers.agent.ConceptRepository", return_value=mock_concept_repo), \
+             patch("routers.agent.DocumentRepository", return_value=mock_doc_repo), \
+             patch("routers.agent.KnowledgeGraphRepository", return_value=mock_kg_repo), \
+             patch("routers.agent.query_svo_facts",
+                   new=AsyncMock(return_value=([], [], []))), \
+             patch("services.community_service.get_community_summaries",
+                   new=AsyncMock(return_value=summaries)), \
+             patch("routers.agent.get_llm_provider") as mock_llm, \
+             patch("routers.agent.get_chunk_store") as mock_store:
+            mock_llm.return_value.stream = _make_stream(
+                "這個知識庫涵蓋機器學習與資料庫。\n", '{"confidence": 0.8}'
+            )
+            mock_store.return_value.read_ranked = AsyncMock(return_value=[])
+            async with AsyncClient(
+                transport=ASGITransport(app=test_app), base_url="http://test"
+            ) as c:
+                res = await c.post("/agent/chat", json={
+                    "question": "請總結這個知識庫的主題", "use_svo": True,
+                })
+                events = _parse_sse(res.content)
+
+        community_events = [e for e in events if "community_summaries" in e]
+        assert community_events, "全域性查詢且已有社群摘要時，應發送 community_summaries SSE 事件"
+        assert community_events[0]["community_summaries"] == summaries
+
+    async def test_no_community_summaries_event_for_specific_query(self, test_app):
+        """非全域性查詢不應觸發社群摘要查詢（即使 KG 已建立社群摘要）。"""
+        kg_id = uuid4()
+        concepts = [_concept("強化學習")]
+        kg_obj = MagicMock()
+        kg_obj.name = "測試KG"
+        kg_obj.db_name = ""
+
+        mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_all_kgs_concepts.return_value = {kg_id: [_concept("強化學習")]}
+        mock_concept_repo.get_all_documents_concepts.return_value = {}
+        mock_kg_repo = AsyncMock()
+        mock_kg_repo.get_by_id.return_value = kg_obj
+        mock_kg_repo.get_documents.return_value = []
+        mock_doc_repo = AsyncMock()
+        mock_doc_repo.get_by_id.return_value = None
+
+        mock_get_summaries = AsyncMock(return_value=[{"summary": "x", "member_count": 1, "top_entities": []}])
+
+        with patch("routers.agent.build_query_concepts",
+                   new=AsyncMock(return_value=concepts)), \
+             patch("routers.agent.compute_match_score", return_value=(0.8, ["強化學習"])), \
+             patch("routers.agent.get_driver"), \
+             patch("routers.agent.ConceptRepository", return_value=mock_concept_repo), \
+             patch("routers.agent.DocumentRepository", return_value=mock_doc_repo), \
+             patch("routers.agent.KnowledgeGraphRepository", return_value=mock_kg_repo), \
+             patch("routers.agent.query_svo_facts",
+                   new=AsyncMock(return_value=([], [], []))), \
+             patch("services.community_service.get_community_summaries", new=mock_get_summaries), \
+             patch("routers.agent.get_llm_provider") as mock_llm, \
+             patch("routers.agent.get_chunk_store") as mock_store:
+            mock_llm.return_value.stream = _make_stream(
+                "強化學習使用獎勵函數。\n", '{"confidence": 0.8}'
+            )
+            mock_store.return_value.read_ranked = AsyncMock(return_value=[])
+            async with AsyncClient(
+                transport=ASGITransport(app=test_app), base_url="http://test"
+            ) as c:
+                res = await c.post("/agent/chat", json={
+                    "question": "強化學習怎麼運作？", "use_svo": True,
+                })
+                events = _parse_sse(res.content)
+
+        assert not [e for e in events if "community_summaries" in e]
+        mock_get_summaries.assert_not_called()
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -194,8 +194,8 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
 | [King-s-Knowledge-Graph-Lab/ProVe](https://github.com/King-s-Knowledge-Graph-Lab/ProVe) | 利用 LLM 對照網頁參考資料，校驗 Wikidata 中的三元組事實（Fact Verification）。 | 本系統實作了 **「事實溯源 (Provenance)」** 路由，與 ProVe 雷同，且加入了**「防幻覺過濾器」**進行實體原文存在性校驗。 |
 | [Wikipedia-KG-RAG](https://github.com/Wikipedia-KG-RAG) | 結合 Neo4j 與維基百科數據，實現基於圖譜的開放域問答。 | 本系統不只支持本機 Neo4j Wikipedia，更進一步實作了**聯邦分片（Federation Shard）**，可跨多個本機與遠端知識分片進行並行 RAG。 |
 | [pat-jj/KG-FIT](https://github.com/pat-jj/KG-FIT) | 針對開放世界知識（Open-World）進行圖譜的微調與補全，解決新實體對齊問題。 | 本系統在 `services/entity_alignment.py` 中實作了**同義詞展開與實體對齊**，在不微調模型的情況下完成開放世界實體融合。 |
-| [microsoft/graphrag](https://github.com/microsoft/graphrag) | 微軟官方 GraphRAG 實作，用 Leiden 演算法對知識圖譜做階層式社群偵測，為每個社群生成 LLM 摘要，支援 Global Query（全域性宏觀問答）。 | 直接對應本文件第9節⑤「多層次社群摘要檢索」——本系統**尚未實作**此機制（見第9節現況稽核），若要落地可直接參考此專案的社群偵測與摘要生成流程，而非從頭設計。 |
-| [neo4j-contrib/ms-graphrag-neo4j](https://github.com/neo4j-contrib/ms-graphrag-neo4j) | 微軟 GraphRAG 與 Neo4j 的官方整合套件，提供 Leiden 社群偵測直接寫入 Neo4j 圖資料庫的參考實作。 | 本系統的資料庫本就是 Neo4j，技術棧高度重疊，是落地第9節⑤最低摩擦力的路徑。 |
+| [microsoft/graphrag](https://github.com/microsoft/graphrag) | 微軟官方 GraphRAG 實作，用 Leiden 演算法對知識圖譜做階層式社群偵測，為每個社群生成 LLM 摘要，支援 Global Query（全域性宏觀問答）。 | 對應本文件第9節⑤「多層次社群摘要檢索」——**已於 2026-07-03 落地**（`services/community_service.py`），但用 `networkx` 內建 Louvain 取代 Leiden，且未做階層式多層分群，差異與原因見第9節⑤說明。 |
+| [neo4j-contrib/ms-graphrag-neo4j](https://github.com/neo4j-contrib/ms-graphrag-neo4j) | 微軟 GraphRAG 與 Neo4j 的官方整合套件，提供 Leiden 社群偵測直接寫入 Neo4j 圖資料庫的參考實作。 | 若未來要將 Louvain 升級為 Leiden，此專案是最低摩擦力的參考實作（技術棧同為 Neo4j）。 |
 | [PathRAG (arXiv:2502.14902)](https://arxiv.org/pdf/2502.14902) | 用「關鍵關係路徑剪枝」取代 GraphRAG 的社群式檢索與 LightRAG 的鄰居全取，降噪並減少 Token 消耗。 | 本系統目前的圖譜引導重排（`_pick_relevant_chunks`）仍是「BFS 全部取回 + 分數加權」，PathRAG 的路徑剪枝概念可用於在 BFS 命中的 SVO 子圖過大時先做路徑級篩選，降低送入 LLM 的 Context 噪音。 |
 | [MoG: Mixture of Experts for Graph-based RAG (arXiv:2605.31010)](https://arxiv.org/pdf/2605.31010) | 提出「Hub Graph（常駐、跨查詢共用的核心知識）+ 稀疏激活的 Expert Graph」雙層結構，比單純 Top-K 選圖更細緻。 | 與本系統的 Graph-MoE 路由（第2節）高度同源，但本系統目前**沒有 Hub Graph 概念**——跨領域查詢若所有 KG 的 `Score_kg` 都低於 `KG_ROUTE_THRESHOLD` 就會 0 個專家被激活。引入 Hub Graph 可作為 fallback，避免路由「全滅」的邊界情況。 |
 | [GraphRAG-Router (arXiv:2604.16401)](https://arxiv.org/pdf/2604.16401) | 用強化學習訓練路由器，依問題難度動態決定該用哪個 GraphRAG 子系統、甚至該用多大的生成模型，減少約 30% 大模型濫用。 | 本系統的 KG 路由分數公式（Cos × Align × Mag）是固定的手工特徵組合，無法隨查詢難度自適應調整 LLM 選型。可作為第9節「動態」系列方向的延伸參考，尤其若未來要接多種規格的 LLM Provider 做成本優化。 |
@@ -219,7 +219,7 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
 
 為了進一步提升神經符號 Graph-MoE RAG 架構在極大規模與複雜邏輯下的推理精度，未來可在以下八個前沿方向進行架構擴展，各方向均有相關學術研究支撐：
 
-> **現況稽核（2026-07-03 初稽 / 同日追蹤更新）**：初次稽核時 ①-⑧ 全數為**尚未實作**的規劃方向（已用 Grep/Read 逐項確認專案 `*.py` 全庫中查無對應程式碼，關鍵字如 `GraphSAGE`、`node2vec`、`Louvain`、`Leiden`、`contrastive`、`valid_from`/`valid_to`、`db.index.vector.queryNodes` 等均為 0 匹配）。同日依優先度排序後已落地 **⑧ 二階段粗篩精篩**（既有系統的真實效能瓶頸）與 **⑥ 時序知識圖譜衰減**（落地範圍與原設計有出入，詳見該節）；①②③⑤⑦ 仍為規劃/設計方案階段，狀態詳見各節標註。
+> **現況稽核（2026-07-03 初稽 / 同日追蹤更新）**：初次稽核時 ①-⑧ 全數為**尚未實作**的規劃方向（已用 Grep/Read 逐項確認專案 `*.py` 全庫中查無對應程式碼，關鍵字如 `GraphSAGE`、`node2vec`、`Louvain`、`Leiden`、`contrastive`、`valid_from`/`valid_to`、`db.index.vector.queryNodes` 等均為 0 匹配）。同日依優先度排序後已落地 **⑧ 二階段粗篩精篩**（既有系統的真實效能瓶頸）、**⑥ 時序知識圖譜衰減**、**⑤ 多層次社群摘要檢索**（後兩者落地範圍與原設計皆有出入，詳見各節）；①②③⑦ 仍為規劃/設計方案階段，狀態詳見各節標註。
 
 ### ① 圖拓撲感知共嵌入空間 (Graph-Aware Co-embedding Space)
 * **當前局限**：目前的 ConceptNode 連續特徵向量（Embedding）是利用標準文本模型獨立計算的，未感知到 Neo4j 圖譜中 SVO 邊所承載的拓撲結構與關聯強度。
@@ -251,12 +251,25 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
   * *（2026補充）* Fan, D., et al. (2026). *"GraphRAG-Router: Learning Cost-Efficient Routing over GraphRAGs and LLMs with Reinforcement Learning."* arXiv:2604.16401 — 用 RL 讓路由器依問題難度自適應決定檢索/生成策略，減少約 30% 大模型濫用，思路與本方向互補。
   * *（2026補充）* *"RouteRAG: Efficient Retrieval-Augmented Generation from Text and Graph via Reinforcement Learning."* arXiv:2512.09487 — 用端到端 RL 讓模型在生成過程中自主決定「何時推理、向文本或圖譜檢索、何時作答」，是本方向「一邊生成、一邊動態判斷」構想的最新工程化嘗試，可作為實作參考。
 
-### ⑤ 多層次社群摘要檢索 (Community-based Hierarchical Retrieval)
+### ⑤ 多層次社群摘要檢索 (Community-based Hierarchical Retrieval) — ✅ 已落地（2026-07-03，範圍與原設計有出入見下）
 * **當前局限**：當遭遇全域性（Global Query）或跨多個文檔的宏觀查詢（如：「請總結所有公開圖譜中的技術演進」）時，BFS 遍歷與向量路由僅能匹配局部實體，無法回答全局性問題。
 * **優化建議**：引入 **社群檢測 (Community Detection)** 算法（如 Louvain 或 Leiden 算法），對 Neo4j 中的圖譜結構進行層次化分群，並由 LLM 預先為每個分群生成「社群摘要 (Community Summaries)」。問答時根據問題層級路由至相應的社群摘要，提供巨觀的全局回答。
+* **實際落地範圍與原設計的差異**：
+  * **用 Louvain 而非 Leiden**：`networkx` 已是專案既有的（間接）相依套件，其 `networkx.algorithms.community.louvain_communities()` 可直接使用；Leiden 演算法需要 `leidenalg` + `python-igraph`，兩者皆含 C 擴充套件，在本專案的 Windows 開發環境下需要編譯工具鏈才能安裝，風險與環境相依成本較高。Louvain 是 Leiden 的前身，效果在中小型圖譜上差異有限，先以 Louvain 落地、未來若圖譜規模擴大出現社群品質問題，再評估遷移至 Leiden。
+  * **未實作「層次化」多層級分群**：只做單層 Louvain 分群，未實作 Leiden 論文強調的階層式社群樹（Level 0/1/2…）。
+  * **全域查詢偵測為關鍵詞啟發式，非語意分類器**：`routers/agent.py::_is_global_query()` 用正則比對「總結/整體/全部/overview/summarize」等關鍵詞，非文件原構想中更精確的問題語意分類。誤判在所難免（例如「這篇文件整體在講什麼」會被視為全域查詢），但作為第一版足夠可用，且失敗模式是「多給一段摘要 context」而非拒答，風險可控。
+  * **只整合到 `/agent/chat`**：`/world/chat`（公開 KG 聯邦問答）尚未接上此機制，留待後續迭代。
+* **實際落地位置**：
+  * `services/community_service.py`：
+    * `build_communities_for_kg(kg_id, db_name, min_size, max_communities)`：抓取 Entity 關係邊建 `networkx.Graph`，跑 `louvain_communities(seed=42)`，過濾規模 < `min_size`（預設3）的社群，逐一取樣社群內 SVO 事實、呼叫 LLM 生成 2-3 句摘要，持久化為 Neo4j `:Community` 節點（`summary`/`member_count`/`top_entities` 屬性）並用 `(:Entity)-[:IN_COMMUNITY]->(:Community)` 邊連結成員。每次執行先 `DETACH DELETE` 該 KG 舊社群再重建（沿用 `run_build_kg.py --force` 的慣例）。
+    * `get_community_summaries(kg_id, db_name, limit)`：依 `member_count` 降冪讀回已建立的社群摘要。
+  * `run_build_communities.py`：離線批次腳本，比照 `run_label_kg.py` 慣例（`--kg`、`--min-size` 參數）。
+  * `routers/agent.py`：新增 `_is_global_query()` 啟發式判斷；`/agent/chat` 在 KG 路由完成、BFS 事實回傳後，若判定為全域查詢則並行呼叫 `get_community_summaries()`，透過新增的 `community_summaries` SSE 事件回傳給前端，並將摘要文字併入 `contexts`（走既有的、已驗證會進入 LLM prompt 的路徑，而非 `svo_facts` — 後者只用於 SSE 顯示與 chunk 關鍵詞加權，詳見 `tests/routers/test_rag_quality.py::TestSVOFactInjection` 的既有測試註解）。
+  * `requirements.txt` 新增 `networkx>=3.0`（明確聲明此前僅為間接相依的套件）。
+  * 測試：`tests/services/test_community_service.py`（雙群偵測、規模過濾、LLM 摘要容錯、讀取排序）、`tests/routers/test_rag_quality.py::TestGlobalQueryHeuristic`/`TestCommunitySummaryInjection`（關鍵詞判定、SSE 事件觸發與非觸發）。
 * **學術來源**：
-  * Blondel, V., et al. (2008). *"Fast unfolding of communities in large networks."* Journal of Statistical Mechanics. (Louvain 算法經典)
-  * Traag, V., et al. (2019). *"From Louvain to Leiden: guaranteeing well-behaved communities."* Scientific Reports. (Leiden 算法)
+  * Blondel, V., et al. (2008). *"Fast unfolding of communities in large networks."* Journal of Statistical Mechanics. (Louvain 算法經典，本次實際採用)
+  * Traag, V., et al. (2019). *"From Louvain to Leiden: guaranteeing well-behaved communities."* Scientific Reports. (Leiden 算法，未來可能遷移方向)
 
 ### ⑥ 時序知識圖譜與陳舊性校正 (Temporal Knowledge Graphs & Decay) — ✅ 已落地（2026-07-03，範圍與原設計有出入見下）
 * **當前局限**：知識事實會隨著時間演進而陳舊（例如：CEO 職位更迭、技術標準變遷）。若 SVO 缺乏時間維度，圖譜中會存在相互衝突的過期知識，導致 LLM 產生幻覺。
