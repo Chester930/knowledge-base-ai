@@ -604,12 +604,24 @@ async def chat(req: ChatRequest):
                         extra_chunks if extra_chunks else None,
                         history=req.history,
                     )
+                    # Active RAG（第9節④）：還有補充檢索的機會時（非最後一輪），
+                    # 串流生成過程中一旦偵測到「無資訊」信號就提前中斷，不必等模型把整段答案講完
+                    # 才判斷是否要補檢索——縮短低信心路徑的延遲，這是「一邊生成、一邊判斷」的
+                    # 有界版本（詳見 THEORETICAL_ARCHITECTURE.md 第9節④，與原始逐 token confidence
+                    # 監控設計的差異也記錄在該節）。
+                    _active_watch = round_num < _MAX_REFINE_ROUNDS - 1
                     try:
                         # ☆3：改用 stream() 收集，讓前端即時看到精煉中間結果
                         raw_parts: list[str] = []
+                        early_stop = False
                         async for tok in llm.stream(prompt):
                             raw_parts.append(tok)
+                            if _active_watch and _NO_INFO_RE.search("".join(raw_parts)):
+                                early_stop = True
+                                break
                         raw = "".join(raw_parts)
+                        if early_stop:
+                            logger.info(f"精煉 round {round_num}：串流中偵測到無資訊信號，提前中斷生成")
                         clean, confidence = _extract_confidence(raw)
                         last_clean_answer = clean
                         # 送出本輪的預覽答案（信心 JSON 已剝離）

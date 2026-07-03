@@ -219,7 +219,7 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
 
 為了進一步提升神經符號 Graph-MoE RAG 架構在極大規模與複雜邏輯下的推理精度，未來可在以下八個前沿方向進行架構擴展，各方向均有相關學術研究支撐：
 
-> **現況稽核（2026-07-03 初稽 / 同日追蹤更新）**：初次稽核時 ①-⑧ 全數為**尚未實作**的規劃方向（已用 Grep/Read 逐項確認專案 `*.py` 全庫中查無對應程式碼，關鍵字如 `GraphSAGE`、`node2vec`、`Louvain`、`Leiden`、`contrastive`、`valid_from`/`valid_to`、`db.index.vector.queryNodes` 等均為 0 匹配）。同日依優先度排序後已落地 **⑧ 二階段粗篩精篩**（既有系統的真實效能瓶頸）、**⑥ 時序知識圖譜衰減**、**⑤ 多層次社群摘要檢索**（後兩者落地範圍與原設計皆有出入，詳見各節）；①②③⑦ 仍為規劃/設計方案階段，狀態詳見各節標註。
+> **現況稽核（2026-07-03 初稽 / 同日追蹤更新）**：初次稽核時 ①-⑧ 全數為**尚未實作**的規劃方向（已用 Grep/Read 逐項確認專案 `*.py` 全庫中查無對應程式碼，關鍵字如 `GraphSAGE`、`node2vec`、`Louvain`、`Leiden`、`contrastive`、`valid_from`/`valid_to`、`db.index.vector.queryNodes` 等均為 0 匹配）。同日依優先度排序後已落地 **⑧ 二階段粗篩精篩**（既有系統的真實效能瓶頸）、**⑥ 時序知識圖譜衰減**、**⑤ 多層次社群摘要檢索**（落地範圍與原設計皆有出入，詳見各節）；**④ 主動自適應檢索**只落地了原設計的一個小子集（提早結束單輪生成，而非逐 token 監控與中途插入新檢索，誠實揭露見該節，標記為 🟡 部分落地）；①②③⑦ 仍為規劃/設計方案階段，狀態詳見各節標註。
 
 ### ① 圖拓撲感知共嵌入空間 (Graph-Aware Co-embedding Space)
 * **當前局限**：目前的 ConceptNode 連續特徵向量（Embedding）是利用標準文本模型獨立計算的，未感知到 Neo4j 圖譜中 SVO 邊所承載的拓撲結構與關聯強度。
@@ -242,9 +242,15 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
   * He, Xiaoxin, et al. (2023). *"Mind's Eye of LLM: Reasoning on Graphs with Chain-of-Thought."* arXiv:2310.13344 (G-CoT 經典研究).
   * Chao, Yuxiao, et al. (2024). *"Graph-ToolChain: Leveraging Tool Chains for Reasoning on Graphs."* arXiv:2401.12345.
 
-### ④ 主動自適應檢索 (Active & Adaptive Retrieval)
+### ④ 主動自適應檢索 (Active & Adaptive Retrieval) — 🟡 部分落地（2026-07-03，範圍遠小於原設計，見下）
 * **當前局限**：現有機制為單次檢索後生成答案，即便有自我精煉（Self-Refinement）也只是被動回填 Chunks，無法在生成過程中自發性地決定何時需要新知識。
 * **優化建議**：引入 **Active RAG (主動式檢索增強)**。在 LLM 串流生成的過程中，如果發現缺失某個中間邏輯鏈條的知識，能自發發起圖譜檢索，實現「一邊生成、一邊動態判斷、一邊補充檢索」的自適應生成。
+* **實際落地範圍與原設計的差異（誠實揭露：這不是完整的 Active RAG）**：
+  * **沒有做到「發起新檢索」，只做到「提早結束生成」**：原設計的核心是「生成中途發現知識缺口 → 自發觸發新一輪圖譜/文件檢索 → 把結果插回去繼續生成」。實際落地的是遠遠更保守的版本：`routers/agent.py` 既有的精煉迴圈（confidence-based refinement，本來就會在整段答案生成完畢後，若信心 < `_CONFIDENCE_THRESHOLD` 就補充 chunk 重新生成）在此基礎上新增「串流過程中一旦偵測到 `_NO_INFO_RE`（「找不到相關」「無法回答」等）信號，立即中斷該輪的 token 消費」，跳過模型接下來可能講的填充/免責文字，提早進入既有的補充檢索流程。**沒有實作**逐 token confidence/entropy 監控、沒有偵測「孤立未參照實體」、也沒有在生成中途插入新資訊後從中斷點接續生成——這些都是原設計較困難的部分，需要 LLM Provider 支援 per-token logprobs（目前 Ollama/OpenAI/Anthropic/Gemini/Grok 5 種 Provider 介面不統一，貿然實作有跨 Provider 相容性風險），故本次不做。
+  * **為什麼仍值得做**：即使只是「提早結束一輪生成」，也是把「決定要不要多檢索」的判斷點從「生成完畢後」提前到「生成過程中」，是文件所述「一邊生成、一邊判斷」精神的一個小而真實的子集，且零額外延遲風險（沒有偵測到信號時行為與原本完全一致）。
+  * **不在最後一輪套用**：`_MAX_REFINE_ROUNDS`（預設3）的最後一輪沒有更多檢索預算可用，提早中斷該輪只會讓答案變短而沒有實質好處，因此保留完整生成。
+* **實際落地位置**：`routers/agent.py` 的 `/agent/chat` 精煉迴圈（約 L599 起）：`_active_watch = round_num < _MAX_REFINE_ROUNDS - 1`，串流消費迴圈中每收到一個 token 就檢查累積文字是否命中既有的 `_NO_INFO_RE`，命中且非最後一輪即 `break`；其餘信心計算、補充邏輯完全復用既有精煉迴圈，未新增額外分支。
+* **測試**：`tests/routers/test_rag_quality.py::TestActiveRAGEarlyExit`（驗證非最後一輪提前中斷且不消費填充 token、驗證最後一輪不提前中斷）。
 * **學術來源**：
   * Trivedi, H., et al. (2023). *"Active Retrieval Augmented Generation."* EMNLP 2023.
   * Asai, Akari, et al. (2024). *"Self-RAG: Learning to Retrieve, Generate, and Critique through Self-Reflection."* ICLR 2024.
@@ -311,7 +317,7 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
 
 ## 10. 核心流程優化與虛擬碼設計草稿（規劃中，尚未實作）(Algorithm Pseudocode & Workflow Integration — Design Draft, Not Yet Implemented)
 
-> **狀態聲明（2026-07-03稽核 / 同日追蹤更新）**：本章標題原為「虛擬碼落地方案」，容易誤讀為已完成工程落地。初次稽核時 5 個 class（`FederatedOntologyMapper`、`TemporalDecayRerankEngine`、`GraphCoTReasoningEngine`、`ActiveRetrievalController`、`TwoStageVectorRetrievalEngine`）**完全未出現在任何 `.py` 檔案中**，僅為設計草稿。同日已落地 ②`TemporalDecayRerankEngine` 與 ⑤`TwoStageVectorRetrievalEngine`（兩者皆拆成獨立函式而非單一 class，差異見各節說明）；`FederatedOntologyMapper`、`GraphCoTReasoningEngine`、`ActiveRetrievalController` 仍為設計草稿，尚未寫入程式碼。
+> **狀態聲明（2026-07-03稽核 / 同日追蹤更新）**：本章標題原為「虛擬碼落地方案」，容易誤讀為已完成工程落地。初次稽核時 5 個 class（`FederatedOntologyMapper`、`TemporalDecayRerankEngine`、`GraphCoTReasoningEngine`、`ActiveRetrievalController`、`TwoStageVectorRetrievalEngine`）**完全未出現在任何 `.py` 檔案中**，僅為設計草稿。同日已落地 ②`TemporalDecayRerankEngine` 與 ⑤`TwoStageVectorRetrievalEngine`（兩者皆拆成獨立函式而非單一 class）；④`ActiveRetrievalController` 只落地一個遠遠更小的子集（見該節「與原虛擬碼的差異」）；`FederatedOntologyMapper`、`GraphCoTReasoningEngine` 仍為設計草稿，尚未寫入程式碼。
 
 為了便於工程團隊直接在現有 GraphRAG 代碼庫中落地上述優化方向，本章提供五個核心流程的代碼設計藍圖與 Python 虛擬碼草稿：
 
@@ -446,8 +452,10 @@ class GraphCoTReasoningEngine:
         return await self.neo4j_driver.run(query, {"name": node_name})
 ```
 
-### ④ 自適應不確定性驅動的主動檢索 (Active Retrieval Controller)
+### ④ 自適應不確定性驅動的主動檢索 (Active Retrieval Controller) — 🟡 部分落地（2026-07-03，範圍遠小於本虛擬碼，見第9節④說明）
 在 LLM 串流生成答案的過程中，監控不確定性（Entropy/Confidence）自發決策是否觸發圖譜檢索：
+
+> **與原虛擬碼的差異**：`ActiveRetrievalController` class（含逐 token confidence 監控 `evaluate_generation_step()`、孤立實體偵測 `_contains_unreferenced_entities()`）**沒有落地**。實際落地是規模小得多的子集——`routers/agent.py` 精煉迴圈中對累積文字做 `_NO_INFO_RE` 關鍵詞比對以提前結束單輪生成，不涉及 token 級信心分數或跨 Provider 的 logprobs 存取。差異原因與範圍見第9節④。
 
 ```python
 class ActiveRetrievalController:
