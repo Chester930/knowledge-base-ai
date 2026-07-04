@@ -57,6 +57,8 @@ async def index():
     return HTMLResponse(html)
 
 
-@app.get("/health")
+# 需明確加 HEAD：docker-compose healthcheck 用 `wget --spider` 送 HEAD 請求，
+# 純 GET route 不會自動接受 HEAD，會回 405 讓 healthcheck 永遠判定 unhealthy。
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
     return {"status": "ok", "service": "world-agent"}
