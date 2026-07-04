@@ -29,7 +29,7 @@ async def classify_document(
     3. auto_assign=True 且 top_score ≥ threshold → 自動呼叫 assign_document_to_kg
     回傳 ClassifyResult（含完整候選排名）。
     """
-    from services.concept_engine import build_query_concepts, compute_match_score
+    from services.concept_engine import build_query_concepts, compute_match_score, route_kgs
 
     staging = Path(settings.workspace_dir) / "_staging"
     txt_path = staging / txt_filename
@@ -41,7 +41,7 @@ async def classify_document(
 
     concept_repo = ConceptRepository(get_driver())
     kg_repo = KnowledgeGraphRepository(get_driver())
-    all_kg_concepts = await concept_repo.get_all_kgs_concepts()
+    all_kg_concepts = await route_kgs(concept_repo, doc_concepts)
 
     candidates: list[KGCandidate] = []
     for kg_id, kg_concepts in all_kg_concepts.items():

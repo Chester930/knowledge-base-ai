@@ -232,6 +232,31 @@ class ChunkStore:
             logger.debug(f"ChunkStore: 已刪除 {count} 個 chunks（doc={doc_str}）")
         return count
 
+    def delete_doc_by_id(self, doc_id: UUID) -> int:
+        """
+        依 doc_id 自動解析所屬 kg_id 並刪除（透過 _docs/{doc_id} 參照檔），
+        供不知道 kg_id 的呼叫端（如刪除文件端點）使用，不需另外查 Neo4j。
+        找不到參照檔（從未寫入過 chunk）時直接回傳 0，非錯誤。
+        """
+        kg_id_str = self._resolve_kg(str(doc_id))
+        if kg_id_str is None:
+            return 0
+        return self.delete_doc(UUID(kg_id_str), doc_id)
+
+    def delete_kg(self, kg_id: UUID) -> int:
+        """刪除整個 KG 底下的所有 chunk 檔案與目錄，回傳被清除的文件數。"""
+        kg_dir = self._base / str(kg_id)
+        if not kg_dir.exists():
+            return 0
+        doc_ids = [d.name for d in kg_dir.iterdir() if d.is_dir()]
+        import shutil
+        shutil.rmtree(kg_dir, ignore_errors=True)
+        for doc_id in doc_ids:
+            self._doc_ref_path(doc_id).unlink(missing_ok=True)
+        if doc_ids:
+            logger.debug(f"ChunkStore: 已刪除 KG {kg_id} 底下 {len(doc_ids)} 份文件的 chunks")
+        return len(doc_ids)
+
 
 # ── 模組層級 singleton ────────────────────────────────────────────────────────
 

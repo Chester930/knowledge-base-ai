@@ -246,6 +246,9 @@ class TestKGRoutingCriteria:
         mock_kg_repo.get_documents.side_effect = _mock_get_docs
 
         mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
         # 每個 KG 都有一個概念
         kgs_concepts = {kg_id: [_concept("測試")] for kg_id in kg_scores}
         mock_concept_repo.get_all_kgs_concepts.return_value = kgs_concepts
@@ -325,6 +328,9 @@ class TestKGRoutingCriteria:
             return (score_map[kid], ["測試"])
 
         mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
         mock_concept_repo.get_all_kgs_concepts.return_value = {k: [_concept("測試")] for k in score_map}
         mock_concept_repo.get_all_documents_concepts.return_value = {}
         mock_kg_repo = AsyncMock()
@@ -366,6 +372,9 @@ class TestKGRoutingCriteria:
         kg_obj.db_name = ""
 
         mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
         mock_concept_repo.get_all_kgs_concepts.return_value = {kg_id: [_concept("人工智慧")]}
         # 提供文件概念，使相似度補充路徑找到文件
         mock_concept_repo.get_all_documents_concepts.return_value = {
@@ -473,6 +482,9 @@ class TestSVOFactInjection:
         kg_obj.db_name = ""
 
         mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
         mock_concept_repo.get_all_kgs_concepts.return_value = {kg_id: [_concept("強化學習")]}
         mock_concept_repo.get_all_documents_concepts.return_value = {}
         mock_kg_repo = AsyncMock()
@@ -511,6 +523,136 @@ class TestSVOFactInjection:
         facts_received = svo_events[0]["svo_facts"]
         assert len(facts_received) == 2, f"應收到 2 個 SVO 事實，實際收到 {len(facts_received)}"
         assert any("強化學習" in f for f in facts_received), "強化學習應出現在 SVO 事實中"
+
+    async def test_sparse_bfs_triggers_deeper_hop_graph_cot(self, test_app):
+        """
+        [Graph-CoT 簡化版] 初始跳數命中的事實過少時（< 門檻），
+        應自動用同一組種子詞加深一跳重查，並合併兩次結果。
+        """
+        kg_id = uuid4()
+        doc_id = str(uuid4())
+        chunk_id = str(uuid4())
+
+        sparse_facts = ["A(Concept) -[相關:related]→ B(Concept)"]  # 只有 1 條，低於門檻 3
+        deeper_facts = sparse_facts + [
+            "B(Concept) -[使用:uses]→ C(Concept)",
+            "C(Concept) -[延伸:extends]→ D(Concept)",
+        ]
+
+        calls: list[int] = []
+
+        async def _fake_bfs(kg_id, terms, hops=2, limit=50, db_name=""):
+            calls.append(hops)
+            if hops <= 2:
+                return sparse_facts, [doc_id], [chunk_id]
+            return deeper_facts, [doc_id], [chunk_id]
+
+        concepts = [_concept("測試")]
+        kg_obj = MagicMock()
+        kg_obj.name = "測試知識庫"
+        kg_obj.db_name = ""
+
+        mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
+        mock_concept_repo.get_all_kgs_concepts.return_value = {kg_id: [_concept("測試")]}
+        mock_concept_repo.get_all_documents_concepts.return_value = {}
+        mock_kg_repo = AsyncMock()
+        mock_kg_repo.get_by_id.return_value = kg_obj
+        mock_kg_repo.get_documents.return_value = []
+        mock_doc_repo = AsyncMock()
+        mock_doc_repo.get_by_id.return_value = None
+
+        with patch("routers.agent.build_query_concepts",
+                   new=AsyncMock(return_value=concepts)), \
+             patch("routers.agent.compute_match_score",
+                   return_value=(0.8, ["測試"])), \
+             patch("routers.agent.get_driver"), \
+             patch("routers.agent.ConceptRepository", return_value=mock_concept_repo), \
+             patch("routers.agent.DocumentRepository", return_value=mock_doc_repo), \
+             patch("routers.agent.KnowledgeGraphRepository", return_value=mock_kg_repo), \
+             patch("routers.agent.query_svo_facts", side_effect=_fake_bfs), \
+             patch("routers.agent.get_llm_provider") as mock_llm, \
+             patch("routers.agent.get_chunk_store") as mock_store:
+            mock_llm.return_value.stream = _make_stream("答案。\n", '{"confidence": 0.8}')
+            mock_store.return_value.read_ranked = AsyncMock(return_value=[])
+            async with AsyncClient(
+                transport=ASGITransport(app=test_app), base_url="http://test"
+            ) as c:
+                res = await c.post("/agent/chat", json={
+                    "question": "測試問題",
+                    "use_svo": True,
+                    "svo_hops": 2,
+                })
+                events = _parse_sse(res.content)
+
+        assert 2 in calls, "應先以請求指定的 2 跳查詢一次"
+        assert 3 in calls, "證據稀疏時應加深至 3 跳重查一次"
+
+        svo_events = [e for e in events if "svo_facts" in e]
+        assert svo_events, "應收到 svo_facts SSE 事件"
+        facts_received = svo_events[0]["svo_facts"]
+        assert len(facts_received) == 3, f"應合併兩次查詢共 3 條不重複事實，實際 {len(facts_received)}"
+
+    async def test_dense_bfs_does_not_trigger_deeper_hop(self, test_app):
+        """[Graph-CoT 簡化版] 初始跳數已有足夠事實時，不應觸發加深查詢（避免多餘查詢成本）。"""
+        kg_id = uuid4()
+        doc_id = str(uuid4())
+        chunk_id = str(uuid4())
+
+        dense_facts = [
+            "A(Concept) -[相關:related]→ B(Concept)",
+            "B(Concept) -[使用:uses]→ C(Concept)",
+            "C(Concept) -[延伸:extends]→ D(Concept)",
+        ]
+
+        calls: list[int] = []
+
+        async def _fake_bfs(kg_id, terms, hops=2, limit=50, db_name=""):
+            calls.append(hops)
+            return dense_facts, [doc_id], [chunk_id]
+
+        concepts = [_concept("測試")]
+        kg_obj = MagicMock()
+        kg_obj.name = "測試知識庫"
+        kg_obj.db_name = ""
+
+        mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
+        mock_concept_repo.get_all_kgs_concepts.return_value = {kg_id: [_concept("測試")]}
+        mock_concept_repo.get_all_documents_concepts.return_value = {}
+        mock_kg_repo = AsyncMock()
+        mock_kg_repo.get_by_id.return_value = kg_obj
+        mock_kg_repo.get_documents.return_value = []
+        mock_doc_repo = AsyncMock()
+        mock_doc_repo.get_by_id.return_value = None
+
+        with patch("routers.agent.build_query_concepts",
+                   new=AsyncMock(return_value=concepts)), \
+             patch("routers.agent.compute_match_score",
+                   return_value=(0.8, ["測試"])), \
+             patch("routers.agent.get_driver"), \
+             patch("routers.agent.ConceptRepository", return_value=mock_concept_repo), \
+             patch("routers.agent.DocumentRepository", return_value=mock_doc_repo), \
+             patch("routers.agent.KnowledgeGraphRepository", return_value=mock_kg_repo), \
+             patch("routers.agent.query_svo_facts", side_effect=_fake_bfs), \
+             patch("routers.agent.get_llm_provider") as mock_llm, \
+             patch("routers.agent.get_chunk_store") as mock_store:
+            mock_llm.return_value.stream = _make_stream("答案。\n", '{"confidence": 0.8}')
+            mock_store.return_value.read_ranked = AsyncMock(return_value=[])
+            async with AsyncClient(
+                transport=ASGITransport(app=test_app), base_url="http://test"
+            ) as c:
+                await c.post("/agent/chat", json={
+                    "question": "測試問題",
+                    "use_svo": True,
+                    "svo_hops": 2,
+                })
+
+        assert calls == [2], f"事實充足時不應加深查詢，實際呼叫跳數：{calls}"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -562,6 +704,9 @@ class TestHallucinationDefense:
         concepts = [_concept("完全無關的主題")]
 
         mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
         mock_concept_repo.get_all_kgs_concepts.return_value = {}
         mock_concept_repo.get_all_documents_concepts.return_value = {}
         mock_kg_repo = AsyncMock()
@@ -689,6 +834,9 @@ class TestSourceAttribution:
         kg_obj.db_name = ""
 
         mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
         mock_concept_repo.get_all_kgs_concepts.return_value = {kg_id: [_concept("深度學習")]}
         mock_concept_repo.get_all_documents_concepts.return_value = {}
         mock_kg_repo = AsyncMock()
@@ -751,6 +899,9 @@ class TestSourceAttribution:
         kg_obj.db_name = ""
 
         mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
         mock_concept_repo.get_all_kgs_concepts.return_value = {kg_id: [_concept("深度學習")]}
         mock_concept_repo.get_all_documents_concepts.return_value = {doc_id: [_concept("深度學習")]}
         mock_kg_repo = AsyncMock()
@@ -812,6 +963,9 @@ class TestE2EAnswerQuality:
         kg_obj.db_name = ""
 
         mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
         mock_concept_repo.get_all_kgs_concepts.return_value = {kg_id: [_concept("測試")]}
         mock_concept_repo.get_all_documents_concepts.return_value = {doc.id: [_concept("測試")]}
         mock_kg_repo = AsyncMock()
@@ -1015,6 +1169,9 @@ class TestE2EAnswerQuality:
         kg_obj.db_name = ""
 
         mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
         mock_concept_repo.get_all_documents_concepts.return_value = {}
         mock_kg_repo = AsyncMock()
         mock_kg_repo.get_by_id.return_value = kg_obj
@@ -1079,6 +1236,9 @@ class TestRefinementLoop:
         kg_obj.db_name = ""
 
         mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
         mock_concept_repo.get_all_kgs_concepts.return_value = {kg_id: [_concept("深度學習")]}
         mock_concept_repo.get_all_documents_concepts.return_value = {}
         mock_kg_repo = AsyncMock()
@@ -1143,6 +1303,9 @@ class TestRefinementLoop:
         kg_obj.db_name = ""
 
         mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_public_kgs_concepts_for_query.return_value = None
+        mock_concept_repo.get_documents_concepts_for_query.return_value = None
         mock_concept_repo.get_all_kgs_concepts.return_value = {kg_id: [_concept("量子計算")]}
         mock_concept_repo.get_all_documents_concepts.return_value = {}
         mock_kg_repo = AsyncMock()

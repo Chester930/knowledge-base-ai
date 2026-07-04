@@ -49,6 +49,12 @@ services:
       - ${USERPROFILE}/.cache/huggingface:/root/.cache/huggingface:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
     restart: unless-stopped
 
   # ── World Agent 獨立服務（port 8001）────────────────────────────────────────
@@ -74,6 +80,12 @@ services:
       - ${USERPROFILE}/.cache/huggingface:/root/.cache/huggingface:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8001/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
     restart: unless-stopped
 
 volumes:

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 import logging
 import re
 from pathlib import Path
@@ -111,6 +112,9 @@ async def delete_kg(kg_id: UUID, delete_files: bool = False) -> bool:
             logger.warning(f"刪除 KG 資料庫失敗：{e}")
 
     ok = await kg_repo.delete(kg_id)
+    if ok:
+        from services.chunk_store import get_chunk_store
+        get_chunk_store().delete_kg(kg_id)
     if ok and delete_files:
         import shutil
         folder = Path(kg.folder_path)
@@ -344,7 +348,7 @@ async def refresh_kg_concepts(kg_id: UUID, text: str | None = None) -> None:
         concept_names.update(extra)
 
     for name in concept_names:
-        vec = embedding.encode(name)
+        vec = await asyncio.to_thread(embedding.encode, name)
         await concept_repo.get_or_create(name, "general", vec)
         await concept_repo.init_kg_concept(kg_id, name, INTEREST_INIT, PROFESSIONAL_INIT)
 

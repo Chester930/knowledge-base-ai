@@ -24,6 +24,11 @@ from services.svo_service import apply_type_labels, build_graph_for_kg, get_kg_g
 router = APIRouter(prefix="/knowledge-graphs", tags=["knowledge-graphs"])
 logger = logging.getLogger(__name__)
 
+# 同一 kg_id 不允許並行 build-graph：兩個 build_graph_for_kg() 並行跑
+# 會共用同一份 svo_progress.json 進度檔且無鎖保護，force_rebuild 互相干擾時
+# 可能導致部分三元組遺失或進度不一致。
+_building_kgs: set[str] = set()
+
 
 @router.post("", response_model=KnowledgeGraph, status_code=201, summary="建立 KG")
 async def create(body: KnowledgeGraphCreate):
@@ -142,45 +147,53 @@ async def build_graph(kg_id: UUID, body: BuildGraphRequest = BuildGraphRequest()
     if not await repo.get_by_id(kg_id):
         raise HTTPException(status_code=404, detail=f"KG 不存在：{kg_id}")
 
+    kg_key = str(kg_id)
+    if kg_key in _building_kgs:
+        raise HTTPException(status_code=409, detail="此 KG 正在建圖中，請等待完成後再試")
+    _building_kgs.add(kg_key)
+
     async def event_stream():
-        kg = await KnowledgeGraphRepository(get_driver()).get_by_id(kg_id)
-        db_name = kg.db_name if kg else ""
+        try:
+            kg = await KnowledgeGraphRepository(get_driver()).get_by_id(kg_id)
+            db_name = kg.db_name if kg else ""
 
-        async for progress in build_graph_for_kg(
-            kg_id,
-            doc_ids=body.doc_ids,
-            force_rebuild=body.force_rebuild,
-        ):
-            payload = {
-                "event": progress.event,
-                "chunk_idx": progress.chunk_idx,
-                "total_chunks": progress.total_chunks,
-                "triples_extracted": progress.triples_extracted,
-                "triples_merged": progress.triples_merged,
-                "message": progress.message,
-            }
-            yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            async for progress in build_graph_for_kg(
+                kg_id,
+                doc_ids=body.doc_ids,
+                force_rebuild=body.force_rebuild,
+            ):
+                payload = {
+                    "event": progress.event,
+                    "chunk_idx": progress.chunk_idx,
+                    "total_chunks": progress.total_chunks,
+                    "triples_extracted": progress.triples_extracted,
+                    "triples_merged": progress.triples_merged,
+                    "message": progress.message,
+                }
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
-            if progress.event == "done":
-                try:
-                    label_stats = await apply_type_labels(kg_id, db_name=db_name)
-                    total_labeled = sum(label_stats.values())
-                    yield f"data: {json.dumps({'event': 'labels_done', 'labeled': total_labeled, 'stats': label_stats}, ensure_ascii=False)}\n\n"
-                except Exception as e:
-                    logger.warning(f"標籤套用失敗：{e}")
-                    yield f"data: {json.dumps({'event': 'labels_error', 'message': str(e)}, ensure_ascii=False)}\n\n"
+                if progress.event == "done":
+                    try:
+                        label_stats = await apply_type_labels(kg_id, db_name=db_name)
+                        total_labeled = sum(label_stats.values())
+                        yield f"data: {json.dumps({'event': 'labels_done', 'labeled': total_labeled, 'stats': label_stats}, ensure_ascii=False)}\n\n"
+                    except Exception as e:
+                        logger.warning(f"標籤套用失敗：{e}")
+                        yield f"data: {json.dumps({'event': 'labels_error', 'message': str(e)}, ensure_ascii=False)}\n\n"
 
-                # 建圖完成後自動更新 registry（若 KG 為公開）
-                try:
-                    from services.kb_skill_service import generate_skill, upsert_skill
-                    _kg = await KnowledgeGraphRepository(get_driver()).get_by_id(kg_id)
-                    if _kg and _kg.is_public:
-                        skill = await generate_skill(kg_id, get_driver())
-                        upsert_skill(skill)
-                        logger.info(f"build-graph 完成，registry 已自動更新：{kg_id}")
-                        yield f"data: {json.dumps({'event': 'registry_updated', 'kb_id': str(kg_id)}, ensure_ascii=False)}\n\n"
-                except Exception as e:
-                    logger.warning(f"build-graph 後 registry 更新失敗：{e}")
+                    # 建圖完成後自動更新 registry（若 KG 為公開）
+                    try:
+                        from services.kb_skill_service import generate_skill, upsert_skill
+                        _kg = await KnowledgeGraphRepository(get_driver()).get_by_id(kg_id)
+                        if _kg and _kg.is_public:
+                            skill = await generate_skill(kg_id, get_driver())
+                            upsert_skill(skill)
+                            logger.info(f"build-graph 完成，registry 已自動更新：{kg_id}")
+                            yield f"data: {json.dumps({'event': 'registry_updated', 'kb_id': str(kg_id)}, ensure_ascii=False)}\n\n"
+                    except Exception as e:
+                        logger.warning(f"build-graph 後 registry 更新失敗：{e}")
+        finally:
+            _building_kgs.discard(kg_key)
 
     return StreamingResponse(
         event_stream(),

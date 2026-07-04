@@ -95,6 +95,7 @@ async def main(target_kg_id: str | None, force_rebuild: bool, relations_only: bo
     from core.providers.factory import init_providers
     from repositories.concept_repo import ConceptRepository
     from repositories.knowledge_graph_repo import KnowledgeGraphRepository
+    from services.svo_service import create_entity_index
 
     logger.info("=== 知識圖譜 SVO 批次建構開始 ===")
     logger.info(f"force_rebuild={force_rebuild}  target={target_kg_id or '全部'}")
@@ -102,6 +103,7 @@ async def main(target_kg_id: str | None, force_rebuild: bool, relations_only: bo
     await connect()
     embedding = init_providers()
     await ConceptRepository(get_driver()).create_vector_index(embedding.dim)
+    await create_entity_index()
     logger.info("資料庫連線完成")
 
     kg_repo = KnowledgeGraphRepository(get_driver())

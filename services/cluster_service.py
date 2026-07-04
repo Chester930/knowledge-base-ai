@@ -60,24 +60,30 @@ def _connected_components(
     sim_matrix: dict[tuple[str, str], float],
     threshold: float,
 ) -> list[list[str]]:
-    """閾值以上視為同群，回傳 connected components。"""
+    """
+    閾值以上視為同群，回傳 connected components。
+    用顯式堆疊做迭代式 DFS（而非遞迴），避免 _staging/ 累積大量 unmatched
+    文件時觸發 Python 遞迴深度限制（RecursionError）。
+    """
     visited = set()
     components = []
 
-    def dfs(node: str, group: list[str]):
-        visited.add(node)
-        group.append(node)
-        for other in nodes:
-            if other not in visited:
-                key = (min(node, other), max(node, other))
-                if sim_matrix.get(key, 0.0) >= threshold:
-                    dfs(other, group)
-
-    for n in nodes:
-        if n not in visited:
-            group: list[str] = []
-            dfs(n, group)
-            components.append(group)
+    for start in nodes:
+        if start in visited:
+            continue
+        group: list[str] = []
+        stack = [start]
+        visited.add(start)
+        while stack:
+            node = stack.pop()
+            group.append(node)
+            for other in nodes:
+                if other not in visited:
+                    key = (min(node, other), max(node, other))
+                    if sim_matrix.get(key, 0.0) >= threshold:
+                        visited.add(other)
+                        stack.append(other)
+        components.append(group)
 
     return components
 

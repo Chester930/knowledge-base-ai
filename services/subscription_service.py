@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -80,14 +82,30 @@ class SubscriptionManager:
             self._subs = []
 
     async def _save(self) -> None:
+        """
+        原子寫入 subscriptions.json：先寫暫存檔再 os.replace()，避免程式在
+        寫入中途崩潰留下截斷的 JSON（與 kb_skill_service.py 的 save_registry()
+        同一套修法）。
+        """
         data = {
             "version": 1,
             "updated_at": _now_iso(),
             "subscriptions": [asdict(s) for s in self._subs],
         }
-        _SUBSCRIPTIONS_FILE.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        content = json.dumps(data, ensure_ascii=False, indent=2)
+
+        _SUBSCRIPTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp_fd, tmp_name = tempfile.mkstemp(
+            dir=str(_SUBSCRIPTIONS_FILE.parent) or ".",
+            prefix=f".{_SUBSCRIPTIONS_FILE.name}.", suffix=".tmp",
         )
+        try:
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                f.write(content)
+            os.replace(tmp_name, _SUBSCRIPTIONS_FILE)
+        except Exception:
+            Path(tmp_name).unlink(missing_ok=True)
+            raise
 
     async def list_all(self) -> list[Subscription]:
         await self._ensure_loaded()

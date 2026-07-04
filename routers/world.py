@@ -15,16 +15,18 @@ import json
 import logging
 from uuid import UUID
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 
+from core.auth import require_api_key
 from core.constants import KG_ROUTE_THRESHOLD, MAX_KG_PER_QUERY
+from core.rate_limit import rate_limit
 from core.database import get_driver
 from core.providers.factory import get_llm_provider
 from repositories.concept_repo import ConceptRepository
 from repositories.document_repo import DocumentRepository
 from repositories.knowledge_graph_repo import KnowledgeGraphRepository
-from services.concept_engine import build_query_concepts, compute_match_score
+from services.concept_engine import build_query_concepts, compute_match_score, route_documents, route_kgs
 
 router = APIRouter(prefix="/world", tags=["world"])
 logger = logging.getLogger(__name__)
@@ -48,12 +50,15 @@ async def federation_registry():
 
 # ── POST /world/federation/refresh ───────────────────────────────────────────
 
-@router.post("/federation/refresh", summary="強制重新下載 GitHub registry（Phase 2b）")
+@router.post(
+    "/federation/refresh",
+    summary="強制重新下載 GitHub registry（Phase 2b）",
+    dependencies=[Depends(require_api_key)],
+)
 async def federation_refresh():
     from services.federation_service import get_federation_cache
     cache = get_federation_cache()
-    cache._fetched_at = 0.0   # 使快取過期
-    await cache.get_remote_registry()
+    await cache.force_refresh()
     return cache.status()
 
 
@@ -187,7 +192,11 @@ async def get_registry():
 
 # ── POST /world/sync ──────────────────────────────────────────────────────────
 
-@router.post("/sync", summary="同步所有公開 KG 到 registry.json")
+@router.post(
+    "/sync",
+    summary="同步所有公開 KG 到 registry.json",
+    dependencies=[Depends(require_api_key)],
+)
 async def sync_registry():
     from services.kb_skill_service import sync_public_kgs
     result = await sync_public_kgs(get_driver())
@@ -252,7 +261,11 @@ async def world_stats():
 
 # ── POST /world/chat ──────────────────────────────────────────────────────────
 
-@router.post("/chat", summary="World Agent 問答（只查公開 KG，SSE 串流）")
+@router.post(
+    "/chat",
+    summary="World Agent 問答（只查公開 KG，SSE 串流）",
+    dependencies=[Depends(rate_limit)],
+)
 async def world_chat(req: dict):
     """
     與 /agent/chat 邏輯相同，但：
@@ -283,8 +296,8 @@ async def world_chat(req: dict):
             doc_repo = DocumentRepository(driver)
             kg_repo = KnowledgeGraphRepository(driver)
 
-            # 只取公開 KG 的概念
-            public_kg_concepts = await concept_repo.get_public_kgs_concepts()
+            # 只取公開 KG 的概念（Vector Index 兩階段粗精篩）
+            public_kg_concepts = await route_kgs(concept_repo, query_concepts, public_only=True)
 
             kg_scores: list[tuple[UUID, float, list[str]]] = []
             for kg_id, kg_concepts in public_kg_concepts.items():
@@ -432,7 +445,7 @@ async def world_chat(req: dict):
                 sources.append({"title": doc.title, "source": "graph"})
                 seen_doc_ids_ctx.add(doc_id_str)
 
-            all_doc_concepts = await concept_repo.get_all_documents_concepts()
+            all_doc_concepts = await route_documents(concept_repo, query_concepts)
             allowed: set[str] = set()
             for kg_id, _, _ in selected_kgs:
                 for d in await kg_repo.get_documents(kg_id):

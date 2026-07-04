@@ -29,6 +29,7 @@ async def main(ingest_dir: str, kg_id: str | None):
     from repositories.concept_repo import ConceptRepository
     from core.providers.factory import init_providers
     from services.ingestion_service import ingest_directory, SUPPORTED_EXTENSIONS
+    from services.svo_service import create_entity_index
     from core.config import settings
 
     logger.info("=== 智慧知識庫批次匯入開始 ===")
@@ -49,6 +50,7 @@ async def main(ingest_dir: str, kg_id: str | None):
     await connect()
     embedding = init_providers()
     await ConceptRepository(get_driver()).create_vector_index(embedding.dim)
+    await create_entity_index()
     logger.info("資料庫連線完成，開始匯入…")
 
     start = time.time()

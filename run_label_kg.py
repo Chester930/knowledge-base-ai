@@ -31,7 +31,7 @@ async def main(target_kg_id: str | None):
     from core.providers.factory import init_providers
     from repositories.concept_repo import ConceptRepository
     from repositories.knowledge_graph_repo import KnowledgeGraphRepository
-    from services.svo_service import apply_type_labels
+    from services.svo_service import apply_type_labels, create_entity_index
 
     logger.info("=== KG 型別標籤套用開始 ===")
     logger.info(f"target={target_kg_id or '全部'}")
@@ -39,6 +39,7 @@ async def main(target_kg_id: str | None):
     await connect()
     embedding = init_providers()
     await ConceptRepository(get_driver()).create_vector_index(embedding.dim)
+    await create_entity_index()
 
     kg_repo = KnowledgeGraphRepository(get_driver())
 

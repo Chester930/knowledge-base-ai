@@ -15,6 +15,7 @@ POST   /knowledge-graphs/auto-cluster/confirm — 確認分群
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -465,6 +466,48 @@ class TestBuildGraph:
                              json={"force_rebuild": True})
 
         assert calls[0]["force_rebuild"] is True
+
+    async def test_concurrent_build_on_same_kg_returns_409(self, test_app):
+        """同一 kg_id 建圖進行中時，第二次觸發應被拒絕，避免共用 svo_progress.json 互相覆蓋。"""
+        kg_id = uuid4()
+        kg = _kg(kg_id=kg_id)
+        mock_repo = _mock_repo(kg=kg)
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _slow_build(kg_id, doc_ids=None, force_rebuild=False):
+            started.set()
+            await release.wait()
+            yield MagicMock(event="done", chunk_idx=1, total_chunks=1,
+                            triples_extracted=0, triples_merged=0, message="")
+
+        with patch("routers.knowledge_graph.get_driver"), \
+             patch("routers.knowledge_graph.KnowledgeGraphRepository", return_value=mock_repo), \
+             patch("routers.knowledge_graph.build_graph_for_kg", side_effect=_slow_build), \
+             patch("routers.knowledge_graph.apply_type_labels", new=AsyncMock(return_value={})):
+            async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as c:
+                async def _first_request():
+                    async with c.stream("POST", f"/knowledge-graphs/{kg_id}/build-graph") as res:
+                        async for _ in res.aiter_bytes():
+                            pass
+
+                first_task = asyncio.ensure_future(_first_request())
+                await asyncio.wait_for(started.wait(), timeout=2.0)
+
+                res2 = await c.post(f"/knowledge-graphs/{kg_id}/build-graph")
+                assert res2.status_code == 409
+
+                release.set()
+                await asyncio.wait_for(first_task, timeout=2.0)
+
+                # 第一次建圖結束後，鎖應已釋放，第三次請求應正常放行
+                async def _third_build(kg_id, doc_ids=None, force_rebuild=False):
+                    yield MagicMock(event="done", chunk_idx=1, total_chunks=1,
+                                    triples_extracted=0, triples_merged=0, message="")
+                with patch("routers.knowledge_graph.build_graph_for_kg", side_effect=_third_build):
+                    res3 = await c.post(f"/knowledge-graphs/{kg_id}/build-graph")
+                assert res3.status_code == 200
 
 
 # ── GET /knowledge-graphs/auto-cluster/preview ────────────────────────────────

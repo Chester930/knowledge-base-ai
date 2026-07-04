@@ -1,11 +1,12 @@
 from __future__ import annotations
+import asyncio
 import hashlib
 import logging
 from collections import OrderedDict
 from uuid import UUID
 
 from core.config import settings
-from core.constants import INTEREST_INIT, PROFESSIONAL_INIT
+from core.constants import CONCEPT_COARSE_TOP_K, INTEREST_INIT, PROFESSIONAL_INIT
 from core.providers.factory import get_embedding_provider, get_llm_provider
 from repositories.concept_repo import ConceptRepository
 from core.database import get_driver
@@ -137,6 +138,39 @@ def compute_match_score(
     return round(score, 4), top_concepts
 
 
+# ── 兩階段路由查詢（Vector Index 粗篩 + Python 精篩，索引不可用時自動 fallback）───
+
+async def route_kgs(
+    concept_repo: ConceptRepository,
+    query_concepts: list[dict],
+    top_k: int = CONCEPT_COARSE_TOP_K,
+    public_only: bool = False,
+) -> dict[UUID, list[dict]]:
+    vectors = [qc["q_vector"] for qc in query_concepts]
+    if public_only:
+        result = await concept_repo.get_public_kgs_concepts_for_query(vectors, top_k)
+        if result is None:
+            result = await concept_repo.get_public_kgs_concepts()
+    else:
+        result = await concept_repo.get_kgs_concepts_for_query(vectors, top_k)
+        if result is None:
+            result = await concept_repo.get_all_kgs_concepts()
+    return result
+
+
+async def route_documents(
+    concept_repo: ConceptRepository,
+    query_concepts: list[dict],
+    top_k: int = CONCEPT_COARSE_TOP_K,
+    exclude_doc_ids: list[UUID] | None = None,
+) -> dict[UUID, list[dict]]:
+    vectors = [qc["q_vector"] for qc in query_concepts]
+    result = await concept_repo.get_documents_concepts_for_query(vectors, top_k, exclude_doc_ids)
+    if result is None:
+        result = await concept_repo.get_all_documents_concepts(exclude_doc_ids)
+    return result
+
+
 # ── Document concept initialization ──────────────────────────────────────────
 
 async def extract_and_init_document_concepts(
@@ -152,7 +186,9 @@ async def extract_and_init_document_concepts(
 
     for name in concepts:
         try:
-            vec = embedding.encode(name)
+            # encode() 為同步呼叫（ollama/openai provider 內部走網路 I/O），
+            # 丟進 thread pool 避免阻塞事件迴圈
+            vec = await asyncio.to_thread(embedding.encode, name)
             await repo.get_or_create(name, domain, vec)
             await repo.init_document_concept(doc_id, name, INTEREST_INIT, PROFESSIONAL_INIT)
         except Exception as e:
@@ -172,7 +208,7 @@ async def build_query_concepts(text: str) -> list[dict]:
 
     result = []
     for name in names:
-        vec = embedding.encode(name)
+        vec = await asyncio.to_thread(embedding.encode, name)
         result.append({
             "name": name,
             "q_vector": vec,

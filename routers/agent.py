@@ -1,22 +1,24 @@
 from __future__ import annotations
+import asyncio
 import json
 import logging
 import re
 from uuid import UUID
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
 from core.constants import KG_ROUTE_THRESHOLD, MAX_KG_PER_QUERY
 from core.database import get_driver
 from core.config import settings
+from core.rate_limit import rate_limit
 from core.providers.factory import get_llm_provider, get_embedding_provider
 from models.document import AgentQueryRequest, AgentQueryResponse, AgentContext, ChatMessage, ChatRequest
 from repositories.concept_repo import ConceptRepository
 from repositories.document_repo import DocumentRepository
 from repositories.knowledge_graph_repo import KnowledgeGraphRepository
 from services.chunk_store import get_chunk_store
-from services.concept_engine import build_query_concepts, compute_match_score
+from services.concept_engine import build_query_concepts, compute_match_score, route_documents, route_kgs
 from services.svo_service import query_svo_facts
 
 router = APIRouter(prefix="/agent", tags=["agent"])
@@ -34,6 +36,9 @@ _MAX_REFINE_ROUNDS = 3        # 最多補充幾輪
 _CHUNKS_PER_ROUND = 3         # 每輪補充的 chunk 數
 _CONFIDENCE_RE = re.compile(r'\{"confidence":\s*([\d.]+)[^}]*\}\s*$', re.DOTALL)
 _NO_INFO_RE = re.compile(r"知識庫目前無此資訊|找不到相關|無法回答|沒有相關資訊", re.IGNORECASE)
+
+# Graph-CoT 簡化版：BFS 證據過於稀疏時，加深一跳重查（不呼叫 LLM 選路，只擴大搜尋半徑）
+_SVO_SPARSE_FACT_THRESHOLD = 3
 
 
 def _cosine(v1: list[float], v2: list[float]) -> float:
@@ -323,7 +328,7 @@ def _build_rag_prompt(
 
 # ── /agent/chat（雙層路由）────────────────────────────────────────────────────
 
-@router.post("/chat", summary="雙層路由 RAG 問答（SSE）")
+@router.post("/chat", summary="雙層路由 RAG 問答（SSE）", dependencies=[Depends(rate_limit)])
 async def chat(req: ChatRequest):
     """
     雙層路由 RAG 問答：
@@ -356,7 +361,7 @@ async def chat(req: ChatRequest):
             if req.kg_id:
                 selected_kgs = [(req.kg_id, 1.0, [])]
             else:
-                all_kg_concepts = await concept_repo.get_all_kgs_concepts()
+                all_kg_concepts = await route_kgs(concept_repo, query_concepts)
 
                 kg_scores: list[tuple[UUID, float, list[str]]] = []
                 for kg_id, kg_concepts in all_kg_concepts.items():
@@ -403,35 +408,55 @@ async def chat(req: ChatRequest):
                 seen_cids: set[str] = set()
 
                 # 多 KG 並行 BFS（☆4 優化）
-                async def _bfs_kg(kg_id):
+                async def _bfs_kg(kg_id, hops):
                     kg_obj = selected_kg_objects.get(kg_id)
                     db_name = getattr(kg_obj, "db_name", "") if kg_obj else ""
                     return await query_svo_facts(
-                        kg_id, terms, hops=req.svo_hops, limit=50, db_name=db_name
+                        kg_id, terms, hops=hops, limit=50, db_name=db_name
                     )
+
+                def _merge_bfs_results(results):
+                    for res in results:
+                        if isinstance(res, Exception):
+                            logger.warning(f"BFS 並行錯誤：{res}")
+                            continue
+                        facts, src_ids, cids = res
+                        for f in facts:
+                            if f not in seen_facts:
+                                seen_facts.add(f)
+                                svo_facts.append(f)
+                        for doc_id in src_ids:
+                            if doc_id not in seen_doc_ids:
+                                seen_doc_ids.add(doc_id)
+                                graph_doc_ids.append(doc_id)
+                        for cid in cids:
+                            if cid not in seen_cids:
+                                seen_cids.add(cid)
+                                svo_chunk_ids.append(cid)
 
                 import asyncio as _asyncio
                 bfs_results = await _asyncio.gather(
-                    *[_bfs_kg(kg_id) for kg_id, _, _ in selected_kgs],
+                    *[_bfs_kg(kg_id, req.svo_hops) for kg_id, _, _ in selected_kgs],
                     return_exceptions=True,
                 )
-                for res in bfs_results:
-                    if isinstance(res, Exception):
-                        logger.warning(f"BFS 並行錯誤：{res}")
-                        continue
-                    facts, src_ids, cids = res
-                    for f in facts:
-                        if f not in seen_facts:
-                            seen_facts.add(f)
-                            svo_facts.append(f)
-                    for doc_id in src_ids:
-                        if doc_id not in seen_doc_ids:
-                            seen_doc_ids.add(doc_id)
-                            graph_doc_ids.append(doc_id)
-                    for cid in cids:
-                        if cid not in seen_cids:
-                            seen_cids.add(cid)
-                            svo_chunk_ids.append(cid)
+                _merge_bfs_results(bfs_results)
+
+                # Graph-CoT 簡化版：命中事實過少（推理鏈可能斷在門檻跳數外）且
+                # 尚未查到最大跳數時，用同一組種子詞加深一跳重查，
+                # 不引入額外 LLM 呼叫，只是擴大 BFS 搜尋半徑。
+                if len(svo_facts) < _SVO_SPARSE_FACT_THRESHOLD and req.svo_hops < 3:
+                    deeper_hops = req.svo_hops + 1
+                    deeper_results = await _asyncio.gather(
+                        *[_bfs_kg(kg_id, deeper_hops) for kg_id, _, _ in selected_kgs],
+                        return_exceptions=True,
+                    )
+                    before = len(svo_facts)
+                    _merge_bfs_results(deeper_results)
+                    if len(svo_facts) > before:
+                        logger.info(
+                            f"[Graph-CoT] 證據稀疏（{before} 條），加深至 {deeper_hops} 跳，"
+                            f"補充後共 {len(svo_facts)} 條事實"
+                        )
 
             if svo_facts:
                 yield _sse({"svo_facts": svo_facts})
@@ -465,8 +490,10 @@ async def chat(req: ChatRequest):
                 content = doc.content or ""
                 if not _is_readable(content):
                     continue
-                snippet = _pick_relevant_chunks(
-                    content, query_concepts, req.max_chars_per_doc,
+                # _pick_relevant_chunks 內部呼叫 embedding.encode_batch()（同步網路/CPU 呼叫），
+                # 丟進 thread pool 避免阻塞事件迴圈
+                snippet = await asyncio.to_thread(
+                    _pick_relevant_chunks, content, query_concepts, req.max_chars_per_doc,
                     boost_terms=svo_entity_names,
                 )
                 logger.info(f"[DEBUG graph chunk] {doc.title}: len={len(snippet)} snippet_start={snippet[:120].replace(chr(10),' ')!r}")
@@ -476,7 +503,7 @@ async def chat(req: ChatRequest):
 
             # 4b. 相似度補充：有圖譜文件時縮減補充量，並過濾亂碼
             sim_quota = max(1, req.top_k - len(contexts))  # 圖譜已覆蓋時少補
-            all_doc_concepts = await concept_repo.get_all_documents_concepts()
+            all_doc_concepts = await route_documents(concept_repo, query_concepts)
             allowed: set[str] = set()
             if selected_kgs:
                 for kg_id, _, _ in selected_kgs:
@@ -511,8 +538,8 @@ async def chat(req: ChatRequest):
                 content = doc.content or ""
                 if not _is_readable(content):
                     continue
-                snippet = _pick_relevant_chunks(
-                    content, query_concepts, req.max_chars_per_doc,
+                snippet = await asyncio.to_thread(
+                    _pick_relevant_chunks, content, query_concepts, req.max_chars_per_doc,
                     boost_terms=svo_entity_names,
                 )
                 contexts.append({"title": doc.title, "content": snippet, "source": "similarity"})
@@ -640,7 +667,12 @@ async def chat(req: ChatRequest):
 
 # ── /agent/query（非串流，向下相容）──────────────────────────────────────────
 
-@router.post("/query", response_model=AgentQueryResponse, summary="RAG 查詢（非串流）")
+@router.post(
+    "/query",
+    response_model=AgentQueryResponse,
+    summary="RAG 查詢（非串流）",
+    dependencies=[Depends(rate_limit)],
+)
 async def agent_query(req: AgentQueryRequest):
     """非串流版本，回傳最相關文件片段，供程式整合使用。"""
     query_concepts = await build_query_concepts(req.question)
@@ -649,7 +681,7 @@ async def agent_query(req: AgentQueryRequest):
 
     concept_repo = ConceptRepository(get_driver())
     doc_repo = DocumentRepository(get_driver())
-    all_doc_concepts = await concept_repo.get_all_documents_concepts()
+    all_doc_concepts = await route_documents(concept_repo, query_concepts)
 
     scored = []
     for doc_id, doc_concepts in all_doc_concepts.items():

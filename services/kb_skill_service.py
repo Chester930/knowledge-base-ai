@@ -1,6 +1,8 @@
 from __future__ import annotations
 import json
 import logging
+import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
@@ -32,11 +34,25 @@ def load_registry() -> KBRegistry:
 
 
 def save_registry(registry: KBRegistry) -> None:
+    """
+    原子寫入 registry.json：先寫暫存檔再 os.replace()，避免程式在寫入中途
+    崩潰（斷電、OOM-kill）留下截斷的 JSON，導致 load_registry() 靜默重置為空
+    registry，讓 world federation 探索、跨 instance KB Skill 同步等功能全部失效。
+    """
     registry.updated_at = _now()
-    _registry_path().write_text(
-        registry.model_dump_json(indent=2, exclude_none=True),
-        encoding="utf-8",
+    path = _registry_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    tmp_fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
     )
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            f.write(registry.model_dump_json(indent=2, exclude_none=True))
+        os.replace(tmp_name, path)
+    except Exception:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
 
 
 def _now() -> str:
