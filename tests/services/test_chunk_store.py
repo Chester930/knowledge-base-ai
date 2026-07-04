@@ -302,6 +302,65 @@ class TestChunkStoreDeleteDoc:
         assert result is not None
 
 
+class TestChunkStoreDeleteDocById:
+
+    @pytest.mark.asyncio
+    async def test_resolves_kg_id_from_ref_file_and_deletes(self, tmp_store):
+        chunks = sentence_chunk(DOC_STR, "句子一詳細說明。句子二繼續說明。句子三提供範例。句子四總結要點。句子五結束段落。")
+        await tmp_store.write(KG_ID, DOC_ID, chunks)
+
+        count = tmp_store.delete_doc_by_id(DOC_ID)
+        assert count == len(chunks)
+
+        chunk_dir = Path(tmp_store._base) / KG_STR / DOC_STR
+        assert not chunk_dir.exists() or not list(chunk_dir.glob("chunk_*.json"))
+        ref = Path(tmp_store._docs_dir) / DOC_STR
+        assert not ref.exists()
+
+    def test_unknown_doc_id_returns_zero_without_error(self, tmp_store):
+        count = tmp_store.delete_doc_by_id(uuid4())
+        assert count == 0
+
+
+class TestChunkStoreDeleteKg:
+
+    @pytest.mark.asyncio
+    async def test_removes_all_docs_under_kg(self, tmp_store):
+        doc2 = uuid4()
+        text = "句子一詳細說明。句子二繼續說明。句子三提供範例。句子四總結要點。句子五結束段落。"
+        chunks1 = sentence_chunk(DOC_STR, text)
+        chunks2 = sentence_chunk(str(doc2), text)
+        await tmp_store.write(KG_ID, DOC_ID, chunks1)
+        await tmp_store.write(KG_ID, doc2, chunks2)
+
+        removed = tmp_store.delete_kg(KG_ID)
+        assert removed == 2
+
+        kg_dir = Path(tmp_store._base) / KG_STR
+        assert not kg_dir.exists()
+        assert not (Path(tmp_store._docs_dir) / DOC_STR).exists()
+        assert not (Path(tmp_store._docs_dir) / str(doc2)).exists()
+
+    @pytest.mark.asyncio
+    async def test_does_not_affect_other_kgs(self, tmp_store):
+        other_kg = uuid4()
+        other_doc = uuid4()
+        text = "句子一詳細說明。句子二繼續說明。句子三提供範例。句子四總結要點。句子五結束段落。"
+        chunks1 = sentence_chunk(DOC_STR, text)
+        chunks2 = sentence_chunk(str(other_doc), text)
+        await tmp_store.write(KG_ID, DOC_ID, chunks1)
+        await tmp_store.write(other_kg, other_doc, chunks2)
+
+        tmp_store.delete_kg(KG_ID)
+
+        # 其他 KG 的 chunk 仍然存在
+        result = tmp_store.read(chunks2[0].chunk_id)
+        assert result is not None
+
+    def test_nonexistent_kg_returns_zero(self, tmp_store):
+        assert tmp_store.delete_kg(uuid4()) == 0
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 多文件 / 多 KG 隔離
 # ══════════════════════════════════════════════════════════════════════════════

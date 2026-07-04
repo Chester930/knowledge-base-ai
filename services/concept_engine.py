@@ -1,11 +1,14 @@
 from __future__ import annotations
+import asyncio
 import hashlib
 import logging
 from collections import OrderedDict
 from uuid import UUID
 
+from typing import Awaitable, Callable, TypeVar
+
 from core.config import settings
-from core.constants import INTEREST_INIT, PROFESSIONAL_INIT
+from core.constants import CONCEPT_COARSE_TOP_K, INTEREST_INIT, PROFESSIONAL_INIT
 from core.providers.factory import get_embedding_provider, get_llm_provider
 from repositories.concept_repo import ConceptRepository
 from core.database import get_driver
@@ -137,6 +140,73 @@ def compute_match_score(
     return round(score, 4), top_concepts
 
 
+# ── 兩階段路由查詢（Vector Index 粗篩 + Python 精篩，索引不可用時自動 fallback）───
+# Stage-1（粗篩）：用 Neo4j `concept_q_vector` 向量索引，對每個 query concept 取回
+#   最相近的候選 ConceptNode id（KNN，由資料庫底層執行）。
+# Stage-2（精篩）：呼叫端沿用既有 compute_match_score() 對候選子集做 Align/Mag 比對。
+
+_T = TypeVar("_T")
+
+
+async def route_via_two_stage(
+    concept_repo: ConceptRepository,
+    query_concepts: list[dict],
+    fetch_candidates: Callable[[list[str] | None], Awaitable[_T]],
+    top_k_coarse: int = CONCEPT_COARSE_TOP_K,
+) -> _T:
+    """對 `fetch_candidates` 做二階段呼叫：先用向量索引篩出候選概念 id，再限定範圍查詢。
+
+    `fetch_candidates(concept_ids)`：概念 id 為 None 代表退回全表（Stage-1 失敗或無候選時的容錯）。
+    """
+    candidate_ids: set[str] = set()
+    try:
+        for qc in query_concepts:
+            hits = await concept_repo.vector_search_concept_ids(qc["q_vector"], top_k=top_k_coarse)
+            candidate_ids.update(hits)
+    except Exception as e:
+        logger.warning(f"[TwoStage] Stage-1 向量粗篩失敗，退回全表掃描：{e}")
+        return await fetch_candidates(None)
+
+    if not candidate_ids:
+        return await fetch_candidates(None)
+
+    return await fetch_candidates(list(candidate_ids))
+
+
+async def route_kgs(
+    concept_repo: ConceptRepository,
+    query_concepts: list[dict],
+    top_k: int = CONCEPT_COARSE_TOP_K,
+    public_only: bool = False,
+) -> dict[UUID, list[dict]]:
+    if public_only:
+        return await route_via_two_stage(
+            concept_repo, query_concepts,
+            lambda ids: concept_repo.get_public_kgs_concepts(concept_ids=ids),
+            top_k,
+        )
+    return await route_via_two_stage(
+        concept_repo, query_concepts,
+        lambda ids: concept_repo.get_all_kgs_concepts(concept_ids=ids),
+        top_k,
+    )
+
+
+async def route_documents(
+    concept_repo: ConceptRepository,
+    query_concepts: list[dict],
+    top_k: int = CONCEPT_COARSE_TOP_K,
+    exclude_doc_ids: list[UUID] | None = None,
+) -> dict[UUID, list[dict]]:
+    return await route_via_two_stage(
+        concept_repo, query_concepts,
+        lambda ids: concept_repo.get_all_documents_concepts(
+            exclude_doc_ids=exclude_doc_ids, concept_ids=ids,
+        ),
+        top_k,
+    )
+
+
 # ── Document concept initialization ──────────────────────────────────────────
 
 async def extract_and_init_document_concepts(
@@ -152,7 +222,9 @@ async def extract_and_init_document_concepts(
 
     for name in concepts:
         try:
-            vec = embedding.encode(name)
+            # encode() 為同步呼叫（ollama/openai provider 內部走網路 I/O），
+            # 丟進 thread pool 避免阻塞事件迴圈
+            vec = await asyncio.to_thread(embedding.encode, name)
             await repo.get_or_create(name, domain, vec)
             await repo.init_document_concept(doc_id, name, INTEREST_INIT, PROFESSIONAL_INIT)
         except Exception as e:
@@ -172,7 +244,7 @@ async def build_query_concepts(text: str) -> list[dict]:
 
     result = []
     for name in names:
-        vec = embedding.encode(name)
+        vec = await asyncio.to_thread(embedding.encode, name)
         result.append({
             "name": name,
             "q_vector": vec,

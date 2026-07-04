@@ -49,6 +49,15 @@ def mock_driver():
     return MagicMock()
 
 
+@pytest.fixture(autouse=True)
+def _reset_rate_limiter():
+    """避免 core.rate_limit 的模組級全域狀態在測試間累積，造成非預期的 429。"""
+    from core import rate_limit
+    rate_limit._requests.clear()
+    yield
+    rate_limit._requests.clear()
+
+
 @pytest.fixture
 def test_app():
     """最小化 FastAPI app，不啟動 DB lifespan，供 router 測試使用。"""

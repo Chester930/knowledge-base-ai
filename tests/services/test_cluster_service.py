@@ -52,6 +52,27 @@ class TestConnectedComponents:
         components = _connected_components(nodes, {}, 0.5)
         assert len(components) == 3
 
+    def test_large_chain_does_not_hit_recursion_limit(self):
+        """
+        迭代式 DFS 不應受 Python 遞迴深度限制影響：建立一條長度超過
+        sys.getrecursionlimit() 的鏈狀關聯圖，舊版遞迴實作在此規模下會拋出
+        RecursionError，改為顯式堆疊後應能正常處理並回傳單一 component。
+        """
+        import sys
+        n = sys.getrecursionlimit() + 500
+        # 補零到固定寬度，避免字典序排序造成 min/max 與數字順序不一致
+        nodes = [f"doc_{i:06d}" for i in range(n)]
+        # 鏈狀關聯：doc_0-doc_1-doc_2-...-doc_{n-1}，形成單一 connected component
+        sim_matrix = {
+            (min(nodes[i], nodes[i + 1]), max(nodes[i], nodes[i + 1])): 1.0
+            for i in range(n - 1)
+        }
+
+        components = _connected_components(nodes, sim_matrix, 0.5)
+
+        assert len(components) == 1
+        assert len(components[0]) == n
+
 
 # ── _intra_cluster_avg ───────────────────────────────────────────────────────
 

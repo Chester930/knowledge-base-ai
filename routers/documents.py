@@ -6,9 +6,11 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, UploadFile, File
 from pydantic import BaseModel
 
 from core.database import get_driver
+from core.upload_guard import write_upload_with_guard
 from models.document import Document, DocumentCreate, DocumentConcept
 from repositories.document_repo import DocumentRepository
 from repositories.concept_repo import ConceptRepository
+from services.chunk_store import get_chunk_store
 from services.concept_engine import extract_and_init_document_concepts
 from services.ingestion_service import (
     ingest_file, ingest_directory, move_and_ingest, SUPPORTED_EXTENSIONS
@@ -40,11 +42,10 @@ async def upload_document(file: UploadFile = File(...)):
         raise HTTPException(400, f"不支援的格式 {suffix}，支援：{', '.join(SUPPORTED_EXTENSIONS)}")
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(await file.read())
-        tmp_path = tmp.name
+        tmp_path = Path(tmp.name)
 
-    doc = await ingest_file(tmp_path)
-    return doc
+    await write_upload_with_guard(file, suffix, tmp_path)
+    return await ingest_file(str(tmp_path))
 
 
 @router.post("/ingest-dir")
@@ -111,3 +112,4 @@ async def delete_document(doc_id: UUID):
     deleted = await DocumentRepository(get_driver()).delete(doc_id)
     if not deleted:
         raise HTTPException(404, "文件不存在")
+    get_chunk_store().delete_doc_by_id(doc_id)

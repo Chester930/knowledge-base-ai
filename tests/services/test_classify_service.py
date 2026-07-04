@@ -39,13 +39,13 @@ class TestClassifyDocument:
         (staging / "a.txt").write_text("內容", encoding="utf-8")
 
         mock_concept_repo = AsyncMock()
-        mock_concept_repo.get_all_kgs_concepts.return_value = {}
 
         with _kg_candidate_settings(tmp_path), \
              patch("services.classify_service.get_driver"), \
              patch("services.classify_service.ConceptRepository", return_value=mock_concept_repo), \
              patch("services.classify_service.KnowledgeGraphRepository"), \
-             patch("services.concept_engine.build_query_concepts", new=AsyncMock(return_value={})):
+             patch("services.concept_engine.build_query_concepts", new=AsyncMock(return_value={})), \
+             patch("services.concept_engine.route_kgs", new=AsyncMock(return_value={})):
             result = await classify_document("a.txt")
 
         assert result.status == "unmatched"
@@ -58,7 +58,6 @@ class TestClassifyDocument:
 
         kg_id = uuid4()
         mock_concept_repo = AsyncMock()
-        mock_concept_repo.get_all_kgs_concepts.return_value = {kg_id: {"x": 1}}
         mock_kg_repo = AsyncMock()
 
         with _kg_candidate_settings(tmp_path), \
@@ -66,6 +65,7 @@ class TestClassifyDocument:
              patch("services.classify_service.ConceptRepository", return_value=mock_concept_repo), \
              patch("services.classify_service.KnowledgeGraphRepository", return_value=mock_kg_repo), \
              patch("services.concept_engine.build_query_concepts", new=AsyncMock(return_value={})), \
+             patch("services.concept_engine.route_kgs", new=AsyncMock(return_value={kg_id: {"x": 1}})), \
              patch("services.concept_engine.compute_match_score", return_value=(0.01, [])):
             result = await classify_document("a.txt")
 
@@ -79,7 +79,6 @@ class TestClassifyDocument:
 
         kg_id = uuid4()
         mock_concept_repo = AsyncMock()
-        mock_concept_repo.get_all_kgs_concepts.return_value = {kg_id: {"x": 1}}
         mock_kg_repo = AsyncMock()
         matched_kg = MagicMock()
         matched_kg.name = "軟體架構"
@@ -90,6 +89,7 @@ class TestClassifyDocument:
              patch("services.classify_service.ConceptRepository", return_value=mock_concept_repo), \
              patch("services.classify_service.KnowledgeGraphRepository", return_value=mock_kg_repo), \
              patch("services.concept_engine.build_query_concepts", new=AsyncMock(return_value={})), \
+             patch("services.concept_engine.route_kgs", new=AsyncMock(return_value={kg_id: {"x": 1}})), \
              patch("services.concept_engine.compute_match_score", return_value=(0.15, ["a"])):
             result = await classify_document("a.txt", threshold=0.30, auto_assign=True)
 
@@ -103,7 +103,6 @@ class TestClassifyDocument:
 
         kg_id = uuid4()
         mock_concept_repo = AsyncMock()
-        mock_concept_repo.get_all_kgs_concepts.return_value = {kg_id: {"x": 1}}
         mock_kg_repo = AsyncMock()
         matched_kg = MagicMock()
         matched_kg.name = "軟體架構"
@@ -114,6 +113,7 @@ class TestClassifyDocument:
              patch("services.classify_service.ConceptRepository", return_value=mock_concept_repo), \
              patch("services.classify_service.KnowledgeGraphRepository", return_value=mock_kg_repo), \
              patch("services.concept_engine.build_query_concepts", new=AsyncMock(return_value={})), \
+             patch("services.concept_engine.route_kgs", new=AsyncMock(return_value={kg_id: {"x": 1}})), \
              patch("services.concept_engine.compute_match_score", return_value=(0.9, ["a"])), \
              patch("services.classify_service.assign_document_to_kg", new=AsyncMock()) as mock_assign:
             result = await classify_document("a.txt", threshold=0.30, auto_assign=True)

@@ -32,16 +32,41 @@ class FederationCache:
         self._shard_status: dict[str, str] = {}      # kb_id -> "online" | "offline" | "local"
         self._offline_timestamps: dict[str, float] = {}  # kb_id -> timestamp (熔斷冷卻時間戳)
         self._lock = asyncio.Lock()
+        self._refreshing = False   # 避免快取過期時同時排入多個背景刷新任務
 
     # ── GitHub Registry ───────────────────────────────────────────────────────
 
     async def get_remote_registry(self) -> KBRegistry:
-        """回傳 GitHub 遠端 registry（快取 30 分鐘）。"""
-        async with self._lock:
-            if self._github_registry and (time.time() - self._fetched_at) < _CACHE_TTL:
-                return self._github_registry
-            await self._fetch()
+        """
+        回傳 GitHub 遠端 registry（快取 30 分鐘）。
+        快取過期時「不」同步等待下載完成 —— 直接回傳目前快取（可能稍舊），
+        並在背景排入一次刷新，避免 /world/chat 等熱路徑卡在 GitHub HTTP 請求上。
+        僅在完全冷啟動（尚無任何快取）時才同步等待一次。
+        """
+        if self._github_registry is None:
+            async with self._lock:
+                if self._github_registry is None:
+                    await self._fetch()
             return self._github_registry or KBRegistry(updated_at="")
+
+        if (time.time() - self._fetched_at) >= _CACHE_TTL and not self._refreshing:
+            self._refreshing = True
+            asyncio.create_task(self._background_refresh())
+
+        return self._github_registry
+
+    async def _background_refresh(self) -> None:
+        try:
+            async with self._lock:
+                await self._fetch()
+        finally:
+            self._refreshing = False
+
+    async def force_refresh(self) -> KBRegistry:
+        """強制同步刷新（供管理端點 /world/federation/refresh 呼叫，會阻塞直到完成）。"""
+        async with self._lock:
+            await self._fetch()
+        return self._github_registry or KBRegistry(updated_at="")
 
     async def _fetch(self) -> None:
         url = settings.github_registry_url

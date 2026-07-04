@@ -6,6 +6,33 @@
 
 ---
 
+## 認證
+
+設定 `.env` 的 `API_KEY` 後，除 `/health` 與 `/world/*` 的公開查詢端點外，
+所有管理端點（文件上傳/刪除、KG 管理、暫存區、agent 問答等）都需要在請求
+帶上 `X-API-Key` header：
+
+```
+X-API-Key: <你在 .env 設定的 API_KEY>
+```
+
+未帶或帶錯 key 會回 `401 Unauthorized`。`API_KEY` 留空（預設）時不驗證，
+僅建議本機開發使用；對外部署務必設定。
+
+`/world/*` 下的 `POST /world/sync`、`POST /world/federation/refresh` 兩個
+管理型端點固定需要 `API_KEY`（不受上述例外影響），其餘 `/world/*` 查詢端點
+（`/world/chat` 等）設計上維持公開，供外部或嵌入情境使用。
+
+**限流**：`/agent/chat`、`/agent/query`、`/world/chat` 依來源（`X-API-Key`
+或來源 IP）每分鐘限制請求數，預設 20 次/分鐘（`.env` 的
+`CHAT_RATE_LIMIT_PER_MINUTE`，設為 `0` 停用）。超過限額回 `429 Too Many Requests`。
+
+**上傳限制**：`POST /documents/upload`、`POST /transcribe/file` 有檔案大小上限
+（`.env` 的 `MAX_UPLOAD_SIZE_MB`，預設 50MB），超過回 `413 Payload Too Large`；
+檔案內容與副檔名不符（magic bytes 校驗）回 `400`。
+
+---
+
 ## 系統
 
 ### GET /health
@@ -347,6 +374,10 @@ data: {"done": true}
 | 狀態碼 | 說明 |
 |--------|------|
 | 400 | 請求格式錯誤 |
+| 401 | 缺少或錯誤的 `X-API-Key`（僅設定 `API_KEY` 後生效） |
 | 404 | 資源不存在 |
+| 409 | 資源衝突（如同一 KG 正在建圖中） |
+| 413 | 上傳檔案超過大小上限 |
 | 422 | 資料驗證失敗 |
+| 429 | 請求過於頻繁（超過 rate limit） |
 | 500 | 伺服器內部錯誤 |

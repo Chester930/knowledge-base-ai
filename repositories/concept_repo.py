@@ -2,9 +2,30 @@ from __future__ import annotations
 import logging
 from uuid import UUID, uuid4
 from neo4j import AsyncDriver
-from core.constants import INTEREST_INIT, PROFESSIONAL_INIT, VECTOR_DIM
+from core.constants import GRAPH_EMBEDDING_ALPHA, INTEREST_INIT, PROFESSIONAL_INIT, VECTOR_DIM
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize(vec: list[float]) -> list[float]:
+    norm = sum(x * x for x in vec) ** 0.5
+    return [x / norm for x in vec] if norm > 1e-9 else vec
+
+
+def _fuse_graph_vector(record: dict, alpha: float = GRAPH_EMBEDDING_ALPHA) -> dict:
+    """圖拓撲共嵌入融合（第9節①）：`final = alpha*text_vector + (1-alpha)*graph_vector`。
+
+    兩個向量先各自正規化再加權平均，避免不同向量空間的量級不一致主導融合結果。
+    `q_vector_graph` 缺失（尚未跑 `run_build_graph_embeddings.py`）時原樣返回，
+    向後相容既有純文字向量的行為。
+    """
+    graph_vec = record.pop("q_vector_graph", None)
+    text_vec = record.get("q_vector")
+    if not graph_vec or not text_vec or len(graph_vec) != len(text_vec):
+        return record
+    tv, gv = _normalize(text_vec), _normalize(graph_vec)
+    record["q_vector"] = [alpha * t + (1 - alpha) * g for t, g in zip(tv, gv)]
+    return record
 
 
 class ConceptRepository:
@@ -19,6 +40,44 @@ class ConceptRepository:
             OPTIONS { indexConfig: { `vector.dimensions`: $dim, `vector.similarity_function`: 'cosine' } }
             """,
             dim=dim,
+        )
+
+    # ── 兩階段向量粗精篩（Two-Stage Retrieval）───────────────────────────────────
+    # Stage-1：對每個 query concept 向量呼叫 Neo4j Vector Index 做 KNN 粗篩，
+    #          取代「拉全庫進 Python 記憶體再雙迴圈比對」的 O(N*M) 作法。
+    # Stage-2：呼叫端（concept_engine.route_kgs/route_documents）拿粗篩出的
+    #          concept_ids 過濾呼叫 get_all_kgs_concepts() 等既有方法。
+
+    async def vector_search_concept_ids(self, query_vector, top_k: int) -> list[str]:
+        """二階段檢索 Stage-1（粗篩）：用 concept_q_vector 向量索引取回最相近的 ConceptNode id。
+
+        由 Neo4j 底層執行 KNN 運算，取代 Python 端的全表雙迴圈比對。
+        """
+        vec = query_vector.tolist() if hasattr(query_vector, "tolist") else list(query_vector)
+        result = await self.driver.execute_query(
+            """
+            CALL db.index.vector.queryNodes('concept_q_vector', $top_k, $vector)
+            YIELD node
+            RETURN node.id AS id
+            """,
+            top_k=top_k, vector=vec,
+        )
+        return [r["id"] for r in result.records]
+
+    async def set_concept_graph_vectors(self, name_to_vector: dict[str, list[float]]) -> None:
+        """批次寫入 ConceptNode 的圖結構向量（`q_vector_graph`），供 `run_build_graph_embeddings.py` 使用。
+
+        與既有 `q_vector`（純文字向量）並存、不覆蓋——第9節①刻意的風險控制設計。
+        """
+        if not name_to_vector:
+            return
+        await self.driver.execute_query(
+            """
+            UNWIND $items AS item
+            MATCH (c:ConceptNode {name: item.name})
+            SET c.q_vector_graph = item.vector
+            """,
+            items=[{"name": n, "vector": v} for n, v in name_to_vector.items()],
         )
 
     async def get_or_create(self, name: str, domain: str, q_vector) -> UUID:
@@ -81,19 +140,27 @@ class ConceptRepository:
         return [dict(r) for r in result.records]
 
     async def get_all_documents_concepts(
-        self, exclude_doc_ids: list[UUID] | None = None
+        self,
+        exclude_doc_ids: list[UUID] | None = None,
+        concept_ids: list[str] | None = None,
     ) -> dict[UUID, list[dict]]:
+        """取得所有文件的 EFFECTIVE 概念。
+
+        `concept_ids` 為二階段檢索 Stage-2（精篩）用的候選過濾——非 None 時只回傳
+        該候選集合內的概念，將原本的全表掃描縮限為 Stage-1 向量粗篩後的子集。
+        """
         exclude = [str(d) for d in exclude_doc_ids] if exclude_doc_ids else []
         result = await self.driver.execute_query(
             """
             MATCH (d:Document)-[e:EFFECTIVE]->(c:ConceptNode)
             WHERE NOT d.id IN $exclude
+              AND ($concept_ids IS NULL OR c.id IN $concept_ids)
             RETURN d.id AS doc_id, c.id AS concept_id, c.name AS name,
                    c.q_vector AS q_vector,
                    e.interest_score AS interest_score,
                    e.professional_score AS professional_score
             """,
-            exclude=exclude,
+            exclude=exclude, concept_ids=concept_ids,
         )
         result_map: dict[UUID, list[dict]] = {}
         for r in result.records:
@@ -153,38 +220,50 @@ class ConceptRepository:
         )
         return [dict(r) for r in result.records]
 
-    async def get_all_kgs_concepts(self) -> dict[UUID, list[dict]]:
-        """取得所有 KG 的 EFFECTIVE 概念，供分配器與路由器批次比對。"""
+    async def get_all_kgs_concepts(self, concept_ids: list[str] | None = None) -> dict[UUID, list[dict]]:
+        """取得所有 KG 的 EFFECTIVE 概念，供分配器與路由器批次比對。
+
+        `concept_ids` 非 None 時限定回傳該候選集合內的概念（二階段檢索 Stage-2 用）。
+        路由用的 `q_vector` 已融合圖結構共嵌入（第9節①，`q_vector_graph` 存在時）。
+        """
         result = await self.driver.execute_query(
             """
             MATCH (kg:KnowledgeGraph)-[e:EFFECTIVE]->(c:ConceptNode)
+            WHERE $concept_ids IS NULL OR c.id IN $concept_ids
             RETURN kg.id AS kg_id, c.id AS concept_id, c.name AS name,
-                   c.q_vector AS q_vector,
+                   c.q_vector AS q_vector, c.q_vector_graph AS q_vector_graph,
                    e.interest_score AS interest_score,
                    e.professional_score AS professional_score
-            """
+            """,
+            concept_ids=concept_ids,
         )
         result_map: dict[UUID, list[dict]] = {}
         for r in result.records:
             kg_id = UUID(r["kg_id"])
-            result_map.setdefault(kg_id, []).append(dict(r))
+            result_map.setdefault(kg_id, []).append(_fuse_graph_vector(dict(r)))
         return result_map
 
-    async def get_public_kgs_concepts(self) -> dict[UUID, list[dict]]:
-        """取得所有 is_public=true 的 KG 的 EFFECTIVE 概念（World Agent 專用）。"""
+    async def get_public_kgs_concepts(self, concept_ids: list[str] | None = None) -> dict[UUID, list[dict]]:
+        """取得所有 is_public=true 的 KG 的 EFFECTIVE 概念（World Agent 專用）。
+
+        `concept_ids` 非 None 時限定回傳該候選集合內的概念（二階段檢索 Stage-2 用）。
+        路由用的 `q_vector` 已融合圖結構共嵌入（第9節①，`q_vector_graph` 存在時）。
+        """
         result = await self.driver.execute_query(
             """
             MATCH (kg:KnowledgeGraph {is_public: true})-[e:EFFECTIVE]->(c:ConceptNode)
+            WHERE $concept_ids IS NULL OR c.id IN $concept_ids
             RETURN kg.id AS kg_id, c.id AS concept_id, c.name AS name,
-                   c.q_vector AS q_vector,
+                   c.q_vector AS q_vector, c.q_vector_graph AS q_vector_graph,
                    e.interest_score AS interest_score,
                    e.professional_score AS professional_score
-            """
+            """,
+            concept_ids=concept_ids,
         )
         result_map: dict[UUID, list[dict]] = {}
         for r in result.records:
             kg_id = UUID(r["kg_id"])
-            result_map.setdefault(kg_id, []).append(dict(r))
+            result_map.setdefault(kg_id, []).append(_fuse_graph_vector(dict(r)))
         return result_map
 
     async def get_all_concepts(self) -> list[dict]:

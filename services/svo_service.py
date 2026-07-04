@@ -1,13 +1,17 @@
 from __future__ import annotations
 import asyncio
 import logging
+import math
 import re
 import time
 import unicodedata as _unicodedata
+from collections import OrderedDict
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import AsyncIterator
 from uuid import UUID, uuid4
 
+from core.constants import TEMPORAL_DECAY_RATE
 from core.database import get_driver
 from core.providers.factory import get_llm_provider
 from models.knowledge_graph import SVOTriple
@@ -19,8 +23,44 @@ logger = logging.getLogger(__name__)
 
 _SENTENCES_PER_CHUNK = 5  # 每個 Chunk 的句子數（可調整）
 _SVO_CONCURRENCY = 2      # 每份文件最大平行 LLM 呼叫數（對應 OLLAMA_NUM_PARALLEL=2）
-_BFS_CACHE_TTL = 300 # BFS 查詢快取 TTL（秒）
-_bfs_cache: dict = {} # (kg_id, terms, hops, min_conf) → (facts, docs, ts)
+_BFS_CACHE_TTL = 300      # BFS 查詢快取 TTL（秒）
+_BFS_CACHE_MAX = 1000     # LRU 容量上限，避免長時間運行無上限增長造成記憶體洩漏
+_bfs_cache: OrderedDict = OrderedDict()  # (kg_id, terms, hops, min_conf) → (facts, docs, chunk_ids, ts)
+
+
+def _bfs_cache_get(key: tuple):
+    cached = _bfs_cache.get(key)
+    if cached is None:
+        return None
+    _bfs_cache.move_to_end(key)
+    return cached
+
+
+def _bfs_cache_set(key: tuple, value: tuple) -> None:
+    if key in _bfs_cache:
+        _bfs_cache.move_to_end(key)
+    else:
+        if len(_bfs_cache) >= _BFS_CACHE_MAX:
+            _bfs_cache.popitem(last=False)
+    _bfs_cache[key] = value
+
+
+def _temporal_decay(created_at: str | None, rate: float = TEMPORAL_DECAY_RATE) -> float:
+    """時序衰減因子（THEORETICAL_ARCHITECTURE.md 第9節⑥）：decay = exp(-rate * delta_days)。
+
+    `created_at` 缺失或無法解析時（例如舊資料、或此功能上線前建立的邊）視為不衰減，回傳 1.0，
+    確保既有資料的排序不受影響。
+    """
+    if not created_at:
+        return 1.0
+    try:
+        created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        delta_days = max(0.0, (datetime.now(timezone.utc) - created).total_seconds() / 86400)
+        return math.exp(-rate * delta_days)
+    except (ValueError, TypeError):
+        return 1.0
 
 
 # ── 進度事件（供 SSE 串流使用）────────────────────────────────────────────────
@@ -161,10 +201,13 @@ async def build_graph_for_kg(
                 from core.providers.factory import get_embedding_provider
                 _emb = get_embedding_provider()
                 _texts = [c.text for c in sent_chunks]
+                # encode()/encode_batch() 為同步呼叫，丟進 thread pool 避免阻塞事件迴圈
                 if hasattr(_emb, "encode_batch"):
-                    _vectors = _emb.encode_batch(_texts)
+                    _vectors = await asyncio.to_thread(_emb.encode_batch, _texts)
                 else:
-                    _vectors = [_emb.encode(t) for t in _texts]
+                    _vectors = await asyncio.to_thread(
+                        lambda: [_emb.encode(t) for t in _texts]
+                    )
             except Exception as _e:
                 logger.warning(f"Chunk 向量計算失敗，略過持久化向量：{_e}")
                 _vectors = None
@@ -339,15 +382,21 @@ async def build_graph_for_kg(
             )
             continue
 
+    # 清除本次 build 可能遺留的孤兒 Entity 節點（無任何關係邊）
+    orphans_removed = await cleanup_orphan_entities(kg_id, db_name)
+
     await kg_repo.refresh_counts(kg_id)
     # 再次清除快取以反映最新合併的資料
     to_del = [k for k in _bfs_cache.keys() if k[0] == str(kg_id)]
     for k in to_del:
         _bfs_cache.pop(k, None)
+    done_message = f"圖譜建立完成，共合併 {total_merged} 組三元組"
+    if orphans_removed:
+        done_message += f"，清除 {orphans_removed} 個孤兒節點"
     yield BuildProgress(
         event="done",
         triples_merged=total_merged,
-        message=f"圖譜建立完成，共合併 {total_merged} 組三元組",
+        message=done_message,
     )
 
 
@@ -726,7 +775,7 @@ async def query_svo_facts(
         return [], []
 
     cache_key = (str(kg_id), tuple(sorted(terms)), hops, min_confidence)
-    cached = _bfs_cache.get(cache_key)
+    cached = _bfs_cache_get(cache_key)
     if cached and time.time() - cached[3] < _BFS_CACHE_TTL:
         return cached[0], cached[1], cached[2]
 
@@ -797,7 +846,8 @@ async def query_svo_facts(
             RETURN DISTINCT s.name AS subject, s.type AS subject_type,
                    type(r) AS rel_type, r.verb AS verb,
                    o.name AS object, o.type AS object_type,
-                   r.confidence AS confidence, r.source_doc_id AS source_doc_id
+                   r.confidence AS confidence, r.source_doc_id AS source_doc_id,
+                   toString(r.created_at) AS created_at
             ORDER BY confidence DESC LIMIT $limit
             """,
             **bfs_params, **db_kw,
@@ -823,7 +873,8 @@ async def query_svo_facts(
                 RETURN DISTINCT s.name AS subject, s.type AS subject_type,
                        type(r) AS rel_type, r.verb AS verb,
                        o.name AS object, o.type AS object_type,
-                       r.confidence AS confidence, r.source_doc_id AS source_doc_id
+                       r.confidence AS confidence, r.source_doc_id AS source_doc_id,
+                       toString(r.created_at) AS created_at
                 ORDER BY confidence DESC LIMIT $limit
                 """,
                 database_=db_name, **fallback_params,
@@ -843,7 +894,8 @@ async def query_svo_facts(
                 RETURN DISTINCT s.name AS subject, s.type AS subject_type,
                        type(r) AS rel_type, r.verb AS verb,
                        o.name AS object, o.type AS object_type,
-                       r.confidence AS confidence, r.source_doc_id AS source_doc_id
+                       r.confidence AS confidence, r.source_doc_id AS source_doc_id,
+                       toString(r.created_at) AS created_at
                 ORDER BY confidence DESC LIMIT $limit
                 """,
                 **fallback_params,
@@ -855,7 +907,15 @@ async def query_svo_facts(
     seen_docs: set[str] = set()
     entity_freq: dict[str, int] = {}    # 實體出現頻率，供 chunk_ids 排序
 
-    for r in result.records:
+    # 時序衰減重排（第9節⑥）：confidence 之外再乘上時間衰減因子，讓時效性高的事實優先排列。
+    # Cypher 端已用 confidence 做過 LIMIT 截斷，這裡只重排已取回的候選集，不影響何者被納入。
+    records = sorted(
+        result.records,
+        key=lambda r: (r.get("confidence") or 1) * _temporal_decay(r.get("created_at")),
+        reverse=True,
+    )
+
+    for r in records:
         rel_type = r.get("rel_type") or "RELATED_TO"
         verb = r.get("verb") or rel_type
         label = REL_TYPE_LABELS.get(rel_type, rel_type)
@@ -921,7 +981,7 @@ async def query_svo_facts(
         except Exception as e:
             logger.debug(f"chunk_ids 收集失敗（非必要）：{e}")
 
-    _bfs_cache[cache_key] = (facts, source_docs, chunk_ids, time.time())
+    _bfs_cache_set(cache_key, (facts, source_docs, chunk_ids, time.time()))
     return facts, source_docs, chunk_ids
 
 
@@ -1053,6 +1113,13 @@ async def query_svo_facts_with_provenance(
     # ── 批次查詢文件標題 ──────────────────────────────────────────────────────
     doc_ids = list({r.get("source_doc_id") for r in raw_records if r.get("source_doc_id")})
     title_map = await _batch_get_doc_titles(doc_ids)
+
+    # 時序衰減重排（第9節⑥）：同 query_svo_facts，讓時效性高的事實優先排列。
+    raw_records = sorted(
+        raw_records,
+        key=lambda r: (r.get("confidence") or 1) * _temporal_decay(r.get("created_at")),
+        reverse=True,
+    )
 
     # ── 組裝 SourcedFact ──────────────────────────────────────────────────────
     sourced: list[SourcedFact] = []
@@ -1355,6 +1422,40 @@ async def _clear_kg_relations(kg_id: UUID, db_name: str = "") -> None:
             kg_id=str(kg_id),
         )
     logger.info(f"KG {kg_id} 關係邊清除完成（rebuild_relations_only）")
+
+
+async def cleanup_orphan_entities(kg_id: UUID, db_name: str = "") -> int:
+    """
+    清除沒有任何關係邊的孤兒 Entity 節點（degree = 0）。
+    典型成因：rebuild_relations_only 重建後舊實體不再被任何新三元組引用、
+    merge_triples_to_neo4j 批次 MERGE 部分失敗遺留的殘留節點。
+    每次 build_graph_for_kg 完成後自動呼叫一次，回傳實際刪除的節點數。
+    """
+    driver = get_driver()
+    if db_name:
+        result = await driver.execute_query(
+            """
+            MATCH (e:Entity) WHERE NOT (e)--()
+            WITH e LIMIT 5000
+            DETACH DELETE e
+            RETURN count(e) AS removed
+            """,
+            database_=db_name,
+        )
+    else:
+        result = await driver.execute_query(
+            """
+            MATCH (e:Entity {kg_id: $kg_id}) WHERE NOT (e)--()
+            WITH e LIMIT 5000
+            DETACH DELETE e
+            RETURN count(e) AS removed
+            """,
+            kg_id=str(kg_id),
+        )
+    removed = result.records[0]["removed"] if result.records else 0
+    if removed:
+        logger.info(f"[SVO] KG {kg_id} 清除 {removed} 個孤兒 Entity 節點（degree=0）")
+    return removed
 
 
 async def _filter_unprocessed_docs(docs: list) -> list:

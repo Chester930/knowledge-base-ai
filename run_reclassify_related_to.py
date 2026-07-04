@@ -218,9 +218,11 @@ async def reclassify_kg(
 async def main(target_kg_id: str | None, dry_run: bool):
     from core.database import connect, disconnect, get_driver
     from core.providers.factory import init_providers, get_llm_provider
+    from services.svo_service import create_entity_index
 
     init_providers()
     await connect()
+    await create_entity_index()
     driver = get_driver()
     llm = get_llm_provider()
 

@@ -220,8 +220,12 @@ Neo4j Entity + RELATION（知識圖譜）
 | `MAX_KG_PER_QUERY` | 5 | 每次問答最多路由到幾個 KG |
 | `SCORE_THRESHOLD` | 0.70 | 文件向量搜尋相似度門檻 |
 | `CONCEPT_EXTRACTION_MAX` | 8 | 每次提取最多概念數 |
+| `CONCEPT_COARSE_TOP_K` | 100 | 兩階段檢索 Stage-1 向量粗篩候選數 |
 | `_SVO_CONCURRENCY` | 2 | SVO 提取並行 chunk 數 |
+| `_SVO_SPARSE_FACT_THRESHOLD` | 3 | Graph-CoT 簡化版：BFS 事實數低於此值時加深一跳重查 |
 | `INTEREST_INIT` | 1.0 | ConceptNode 初始 interest 分數 |
 | `PROFESSIONAL_INIT` | 1.0 | ConceptNode 初始 professional 分數 |
-| BFS hops | 1-2 | 圖遍歷跳數（根據 query 長度動態選擇）|
-| BFS cache TTL | 300s | BFS 結果快取時間 |
+| BFS hops | 1-2（最深 3） | 圖遍歷跳數（根據 query 長度動態選擇，證據稀疏時加深至 3）|
+| BFS cache | TTL 300s，LRU 上限 1000 筆 | BFS 結果快取（超過上限淘汰最舊項目） |
+| `MAX_UPLOAD_SIZE_MB` | 50 | 上傳檔案大小上限（`.env`） |
+| `CHAT_RATE_LIMIT_PER_MINUTE` | 20 | 問答端點每來源每分鐘請求上限（`.env`，0=停用） |

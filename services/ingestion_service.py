@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 import logging
 import re
 import shutil
@@ -59,7 +60,10 @@ async def ingest_file(file_path: str) -> Document:
         raise ValueError(f"不支援的檔案格式：{suffix}（支援：{', '.join(SUPPORTED_EXTENSIONS)}）")
 
     reader_name, file_type = _READERS[suffix]
-    content = globals()[reader_name](path)
+    # 各格式讀取函式（PaddleOCR、python-docx/pptx、Windows COM）皆為同步阻塞呼叫，
+    # 丟進 thread pool 執行，避免匯入大型/掃描檔案時卡住整個事件迴圈，
+    # 讓其他並發請求（含 /health）在匯入期間仍能正常回應。
+    content = await asyncio.to_thread(globals()[reader_name], path)
 
     if not content.strip():
         raise ValueError(f"檔案內容為空或無法解析：{path.name}")
@@ -409,8 +413,10 @@ def generate_ingest_summary(success_count: int, fail_count: int, errors: list[st
         summary_content += "## 失敗詳情\n\n"
         for err in errors:
             summary_content += f"- {err}\n"
-            
-    summary_path = Path("ingest_summary.md")
+
+    from core.config import settings
+    summary_path = Path(settings.workspace_dir) / "ingest_summary.md"
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         summary_path.write_text(summary_content, encoding="utf-8")
         logger.info(f"已產生匯入統計摘要：{summary_path.absolute()}")

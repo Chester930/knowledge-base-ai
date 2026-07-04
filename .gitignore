@@ -28,6 +28,7 @@ _test_*.py
 *_log.txt
 ingest_err.txt
 reingest_ocr_log.txt
+ingest_summary.md
 
 # IDE
 .vscode/

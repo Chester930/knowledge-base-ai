@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     registry_path: str = "./registry.json"   # 本機 registry 路徑
     github_registry_url: str = ""       # GitHub Raw URL（Phase 2b 遠端分片發現）
 
+    # ── 安全性 ────────────────────────────────────────────────────────────────
+    api_key: str = ""                   # 設定後，管理端點需帶 X-API-Key header；留空 = 不驗證（僅建議本機開發使用）
+    world_cors_origins: str = "*"       # World Agent（port 8001）CORS 允許來源，逗號分隔；"*" = 全開
+    max_upload_size_mb: int = 50        # 單一檔案上傳大小上限（MB）
+    chat_rate_limit_per_minute: int = 20  # 問答端點每來源（IP 或 API Key）每分鐘請求上限；0 = 停用
+
     # 向下相容舊 .env（mapping 舊欄位名稱）
     @property
     def llm_model(self) -> str:

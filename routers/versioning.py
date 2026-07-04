@@ -9,6 +9,7 @@ KG Version Control — Phase 3c
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query
@@ -25,6 +26,18 @@ _ALL_REL = (
     "DEFINED_AS|HAS_PROPERTY|MEASURED_BY|APPLIES_TO|PRECEDES|FOLLOWS|CO_OCCURS|"
     "INPUTS|TRANSFORMS|CREATED_BY|SOLVES|RELATED_TO"
 )
+
+
+def _validate_iso_datetime(value: str, param_name: str) -> None:
+    """驗證時間字串為合法 ISO 8601 格式，避免格式錯誤直接傳給 Neo4j 的
+    datetime() 函式時變成未捕捉例外（500）而非明確的 422。"""
+    try:
+        datetime.fromisoformat(value)
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{param_name} 格式錯誤，需為 ISO 8601（如 2026-06-21T00:00:00）",
+        )
 
 
 async def _get_kg_or_404(kg_id: str):
@@ -119,6 +132,7 @@ async def kg_diff(
     limit: int = Query(200, ge=1, le=1000),
 ):
     """回傳 since 之後新增或修改的所有 SVO 事實。"""
+    _validate_iso_datetime(since, "since")
     kg = await _get_kg_or_404(kg_id)
     driver = get_driver()
 
@@ -172,6 +186,7 @@ async def kg_snapshot(
     limit: int = Query(500, ge=1, le=2000),
 ):
     """回傳指定時間點時 KG 中存在的所有 SVO 事實（created_at ≤ at）。"""
+    _validate_iso_datetime(at, "at")
     kg = await _get_kg_or_404(kg_id)
     driver = get_driver()
 

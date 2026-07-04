@@ -1,68 +1,89 @@
+"""
+GeminiLLMProvider 測試。
+
+重點迴歸案例：stream() 過去只用 asyncio.to_thread 包住「取得 response 物件」
+這一步，實際逐 chunk 迭代仍是同步阻塞呼叫（generate_content(stream=True)
+回傳的同步 generator），會讓事件迴圈整段卡住。修復後改用
+generate_content_async(stream=True) 搭配 `async for`，本檔案驗證：
+1. generate()/stream() 都呼叫非同步 API（*_async），不是同步版本
+2. stream() 正確透過 async iteration 逐 chunk yield
+"""
 from __future__ import annotations
-import sys
-import types
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
-from unittest.mock import MagicMock, patch
 
 from core.providers.llm.gemini import GeminiLLMProvider
 
 
-def _make_provider():
-    """
-    GeminiLLMProvider.__init__ 內部使用 `import google.generativeai as genai`。
-    `google-generativeai` 是選用套件（不在 requirements.txt，CI 環境未安裝，
-    僅 `google` 命名空間套件因其他依賴而存在），因此把整個 `google.generativeai`
-    子模組注入 sys.modules，測試不依賴該套件是否實際安裝。
-    """
-    mock_configure = MagicMock()
-    mock_model_cls = MagicMock()
-    mock_model = MagicMock()
-    mock_model_cls.return_value = mock_model
+class _AsyncChunkIterator:
+    """模擬 google-generativeai 的 AsyncGenerateContentResponse 串流回應。"""
 
-    fake_module = types.ModuleType("google.generativeai")
-    fake_module.configure = mock_configure
-    fake_module.GenerativeModel = mock_model_cls
+    def __init__(self, texts: list[str]):
+        self._texts = texts
 
-    with patch.dict(sys.modules, {"google.generativeai": fake_module}):
-        provider = GeminiLLMProvider(api_key="g-key", model="gemini-x")
-    return provider, mock_model, mock_configure, mock_model_cls
+    def __aiter__(self):
+        return self._gen()
+
+    async def _gen(self):
+        for t in self._texts:
+            chunk = MagicMock()
+            chunk.text = t
+            yield chunk
 
 
-class TestInit:
-    def test_configures_api_key_and_builds_model(self):
-        provider, mock_model, mock_configure, mock_model_cls = _make_provider()
-        mock_configure.assert_called_once_with(api_key="g-key")
-        mock_model_cls.assert_called_once_with("gemini-x")
+@pytest.fixture
+def mock_genai_model():
+    with patch("google.generativeai.configure"), \
+         patch("google.generativeai.GenerativeModel") as mock_cls:
+        mock_model = MagicMock()
+        mock_cls.return_value = mock_model
+        yield mock_model
 
 
 class TestGenerate:
-    async def test_returns_response_text(self):
-        provider, mock_model, _, _ = _make_provider()
-        response = MagicMock(text="生成的內容")
-        mock_model.generate_content.return_value = response
+    async def test_uses_async_api_not_sync(self, mock_genai_model):
+        response = MagicMock()
+        response.text = "回答內容"
+        mock_genai_model.generate_content_async = AsyncMock(return_value=response)
 
+        provider = GeminiLLMProvider(api_key="fake-key", model="gemini-1.5-flash")
         result = await provider.generate("問題")
 
-        assert result == "生成的內容"
-        mock_model.generate_content.assert_called_once_with("問題")
+        assert result == "回答內容"
+        mock_genai_model.generate_content_async.assert_awaited_once_with("問題")
+        mock_genai_model.generate_content.assert_not_called()
 
 
 class TestStream:
-    async def test_yields_chunk_text_when_present(self):
-        provider, mock_model, _, _ = _make_provider()
-        chunks = [MagicMock(text="a"), MagicMock(text=""), MagicMock(text="b")]
-        mock_model.generate_content.return_value = chunks
+    async def test_yields_chunks_via_async_iteration(self, mock_genai_model):
+        mock_genai_model.generate_content_async = AsyncMock(
+            return_value=_AsyncChunkIterator(["這是", "串流", "回應"])
+        )
 
-        tokens = [t async for t in provider.stream("問題")]
+        provider = GeminiLLMProvider(api_key="fake-key", model="gemini-1.5-flash")
+        chunks = [c async for c in provider.stream("問題")]
 
-        assert tokens == ["a", "b"]
+        assert chunks == ["這是", "串流", "回應"]
 
-    async def test_passes_stream_true(self):
-        provider, mock_model, _, _ = _make_provider()
-        mock_model.generate_content.return_value = []
+    async def test_calls_async_api_with_stream_true_not_sync_generate_content(self, mock_genai_model):
+        """回歸測試：不可再呼叫同步的 generate_content(stream=True)。"""
+        mock_genai_model.generate_content_async = AsyncMock(
+            return_value=_AsyncChunkIterator(["x"])
+        )
 
-        async for _ in provider.stream("問題"):
-            pass
+        provider = GeminiLLMProvider(api_key="fake-key", model="gemini-1.5-flash")
+        _ = [c async for c in provider.stream("問題")]
 
-        _, kwargs = mock_model.generate_content.call_args
-        assert kwargs["stream"] is True
+        mock_genai_model.generate_content_async.assert_awaited_once_with("問題", stream=True)
+        mock_genai_model.generate_content.assert_not_called()
+
+    async def test_skips_empty_chunks(self, mock_genai_model):
+        mock_genai_model.generate_content_async = AsyncMock(
+            return_value=_AsyncChunkIterator(["有內容", "", "也有內容"])
+        )
+
+        provider = GeminiLLMProvider(api_key="fake-key", model="gemini-1.5-flash")
+        chunks = [c async for c in provider.stream("問題")]
+
+        assert chunks == ["有內容", "也有內容"]
