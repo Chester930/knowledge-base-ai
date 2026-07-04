@@ -29,6 +29,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    image: kg-shared:latest
     container_name: kg-api
     ports:
       - "8000:8000"
@@ -57,11 +58,16 @@ services:
       start_period: 60s
     restart: unless-stopped
 
-  # ── World Agent 獨立服務（port 8001）────────────────────────────────────────
+  # ── World Agent 獨立服務（port 8001）─────────────────────────────────────────
+  # 與 api 共用同一份程式碼與相依套件，只是啟動指令不同（world_main:app / port 8001）。
+  # 兩者共用同一個 image tag（kg-shared），docker compose build 只會實際建置一次，
+  # 避免各自獨立 build 導致重複下載安裝一整套相依套件（尤其是 torch/paddlepaddle
+  # 這類數百 MB～數 GB 的套件，重複下載一次的成本很高）。
   world:
     build:
       context: .
       dockerfile: Dockerfile
+    image: kg-shared:latest
     container_name: kg-world
     ports:
       - "8001:8001"
