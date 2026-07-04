@@ -1,4 +1,6 @@
 from __future__ import annotations
+import sys
+import types
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -6,9 +8,18 @@ from core.providers.llm.grok import GrokLLMProvider, _GROK_BASE_URL
 
 
 def _make_provider():
-    with patch("openai.AsyncOpenAI") as mock_cls:
-        mock_client = MagicMock()
-        mock_cls.return_value = mock_client
+    """
+    GrokLLMProvider 相容 OpenAI SDK，內部用 `from openai import AsyncOpenAI`。
+    `openai` 是選用套件（不在 requirements.txt，CI 環境未安裝），因此用假模組
+    注入 sys.modules，測試不依賴該套件是否實際安裝。
+    """
+    mock_cls = MagicMock()
+    mock_client = MagicMock()
+    mock_cls.return_value = mock_client
+    fake_module = types.ModuleType("openai")
+    fake_module.AsyncOpenAI = mock_cls
+
+    with patch.dict(sys.modules, {"openai": fake_module}):
         provider = GrokLLMProvider(api_key="grok-key", model="grok-x")
     return provider, mock_client, mock_cls
 

@@ -1,4 +1,6 @@
 from __future__ import annotations
+import sys
+import types
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -6,9 +8,18 @@ from core.providers.llm.openai import OpenAILLMProvider
 
 
 def _make_provider():
-    with patch("openai.AsyncOpenAI") as mock_cls:
-        mock_client = MagicMock()
-        mock_cls.return_value = mock_client
+    """
+    OpenAILLMProvider.__init__ 內部使用 `from openai import AsyncOpenAI`。
+    `openai` 是選用套件（不在 requirements.txt，CI 環境未安裝），因此用假模組
+    注入 sys.modules，測試不依賴該套件是否實際安裝。
+    """
+    mock_cls = MagicMock()
+    mock_client = MagicMock()
+    mock_cls.return_value = mock_client
+    fake_module = types.ModuleType("openai")
+    fake_module.AsyncOpenAI = mock_cls
+
+    with patch.dict(sys.modules, {"openai": fake_module}):
         provider = OpenAILLMProvider(api_key="sk-test", model="gpt-4o-mini")
     return provider, mock_client, mock_cls
 

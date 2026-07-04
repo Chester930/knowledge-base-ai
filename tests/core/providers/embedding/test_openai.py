@@ -1,4 +1,6 @@
 from __future__ import annotations
+import sys
+import types
 import pytest
 from unittest.mock import MagicMock, patch
 
@@ -6,9 +8,18 @@ from core.providers.embedding.openai import OpenAIEmbeddingProvider
 
 
 def _make_provider(model="text-embedding-3-small"):
-    with patch("openai.OpenAI") as mock_cls:
-        mock_client = MagicMock()
-        mock_cls.return_value = mock_client
+    """
+    OpenAIEmbeddingProvider.__init__ 內部使用 `from openai import OpenAI`。
+    `openai` 是選用套件（不在 requirements.txt，CI 環境未安裝），因此用假模組
+    注入 sys.modules，測試不依賴該套件是否實際安裝。
+    """
+    mock_cls = MagicMock()
+    mock_client = MagicMock()
+    mock_cls.return_value = mock_client
+    fake_module = types.ModuleType("openai")
+    fake_module.OpenAI = mock_cls
+
+    with patch.dict(sys.modules, {"openai": fake_module}):
         provider = OpenAIEmbeddingProvider(api_key="sk-test", model=model)
     return provider, mock_client, mock_cls
 

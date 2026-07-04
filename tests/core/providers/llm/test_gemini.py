@@ -1,4 +1,6 @@
 from __future__ import annotations
+import sys
+import types
 import pytest
 from unittest.mock import MagicMock, patch
 
@@ -6,10 +8,22 @@ from core.providers.llm.gemini import GeminiLLMProvider
 
 
 def _make_provider():
-    with patch("google.generativeai.configure") as mock_configure, \
-         patch("google.generativeai.GenerativeModel") as mock_model_cls:
-        mock_model = MagicMock()
-        mock_model_cls.return_value = mock_model
+    """
+    GeminiLLMProvider.__init__ 內部使用 `import google.generativeai as genai`。
+    `google-generativeai` 是選用套件（不在 requirements.txt，CI 環境未安裝，
+    僅 `google` 命名空間套件因其他依賴而存在），因此把整個 `google.generativeai`
+    子模組注入 sys.modules，測試不依賴該套件是否實際安裝。
+    """
+    mock_configure = MagicMock()
+    mock_model_cls = MagicMock()
+    mock_model = MagicMock()
+    mock_model_cls.return_value = mock_model
+
+    fake_module = types.ModuleType("google.generativeai")
+    fake_module.configure = mock_configure
+    fake_module.GenerativeModel = mock_model_cls
+
+    with patch.dict(sys.modules, {"google.generativeai": fake_module}):
         provider = GeminiLLMProvider(api_key="g-key", model="gemini-x")
     return provider, mock_model, mock_configure, mock_model_cls
 
