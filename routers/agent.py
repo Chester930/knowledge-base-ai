@@ -231,6 +231,18 @@ _TRIPLE_RE = __import__("re").compile(
     r"([^(]+)\([^)]*\)\s*-\[([^:]+):[^\]]*\]→\s*([^(]+)\([^)]*\)"
 )
 
+# 全域性查詢啟發式偵測（THEORETICAL_ARCHITECTURE.md 第9節⑤）：
+# 命中時代表問題偏向宏觀/跨文檔總覽，BFS 1-2 跳局部遍歷不足以回答，改為額外附加社群摘要。
+_GLOBAL_QUERY_RE = re.compile(
+    r"(總結|整體|全部|總覽|概覽|綜覽|全域|整個知識庫|有哪些.{0,6}(領域|主題|類別|方向)|"
+    r"overview|summar(y|ize)|entire knowledge\s*base)",
+    re.IGNORECASE,
+)
+
+
+def _is_global_query(question: str) -> bool:
+    return bool(_GLOBAL_QUERY_RE.search(question))
+
 # 需要翻轉主賓語才自然的關係（verb 在 object 前）
 _FLIP_RELS = {"歸屬"}
 
@@ -338,7 +350,8 @@ async def chat(req: ChatRequest):
     4. 統合成 RAG prompt → LLM 串流回答
 
     SSE 事件序列：
-      status:searching → kg_route → svo_facts → sources → status:generating → token... → done
+      status:searching → kg_route → svo_facts → [community_summaries] → sources → status:generating → token... → done
+      （community_summaries 僅在全域性查詢且已建立社群摘要時出現，見 _is_global_query）
     """
 
     async def generate():
@@ -461,9 +474,41 @@ async def chat(req: ChatRequest):
             if svo_facts:
                 yield _sse({"svo_facts": svo_facts})
 
+            # ── Step 3b：全域性查詢 → 附加社群摘要（第9節⑤）────────────────────
+            # BFS 只能匹配局部命中實體的鄰居，遇到「總結」「整體」等宏觀問題時不足以回答，
+            # 改為額外拉取該 KG 已建立的社群摘要（run_build_communities.py 離線建立）。
+            contexts: list[dict] = []
+            if selected_kgs and _is_global_query(req.question):
+                import asyncio as _asyncio
+                from services.community_service import get_community_summaries
+
+                async def _fetch_summaries(kg_id):
+                    kg_obj = selected_kg_objects.get(kg_id)
+                    db_name = getattr(kg_obj, "db_name", "") if kg_obj else ""
+                    try:
+                        return await get_community_summaries(kg_id, db_name=db_name, limit=5)
+                    except Exception as e:
+                        logger.warning(f"社群摘要查詢失敗（KG {kg_id}）：{e}")
+                        return []
+
+                summary_results = await _asyncio.gather(
+                    *[_fetch_summaries(kg_id) for kg_id, _, _ in selected_kgs]
+                )
+                community_summaries = [s for group in summary_results for s in group]
+                if community_summaries:
+                    yield _sse({"community_summaries": community_summaries})
+                    summary_text = "\n\n".join(
+                        f"【社群 {i}，共 {s['member_count']} 個相關概念】{s['summary']}"
+                        for i, s in enumerate(community_summaries, 1)
+                    )
+                    contexts.append({
+                        "title": "知識圖譜全域社群摘要",
+                        "content": summary_text,
+                        "source": "community",
+                    })
+
             # ── Step 4：混合搜尋（圖譜驅動 + 相似度補充）────────────────────────
             from uuid import UUID as _UUID
-            contexts: list[dict] = []
             sources: list[dict] = []
             seen_doc_ids_ctx: set[str] = set()
 
@@ -581,12 +626,24 @@ async def chat(req: ChatRequest):
                         extra_chunks if extra_chunks else None,
                         history=req.history,
                     )
+                    # Active RAG（第9節④）：還有補充檢索的機會時（非最後一輪），
+                    # 串流生成過程中一旦偵測到「無資訊」信號就提前中斷，不必等模型把整段答案講完
+                    # 才判斷是否要補檢索——縮短低信心路徑的延遲，這是「一邊生成、一邊判斷」的
+                    # 有界版本（詳見 THEORETICAL_ARCHITECTURE.md 第9節④，與原始逐 token confidence
+                    # 監控設計的差異也記錄在該節）。
+                    _active_watch = round_num < _MAX_REFINE_ROUNDS - 1
                     try:
                         # ☆3：改用 stream() 收集，讓前端即時看到精煉中間結果
                         raw_parts: list[str] = []
+                        early_stop = False
                         async for tok in llm.stream(prompt):
                             raw_parts.append(tok)
+                            if _active_watch and _NO_INFO_RE.search("".join(raw_parts)):
+                                early_stop = True
+                                break
                         raw = "".join(raw_parts)
+                        if early_stop:
+                            logger.info(f"精煉 round {round_num}：串流中偵測到無資訊信號，提前中斷生成")
                         clean, confidence = _extract_confidence(raw)
                         last_clean_answer = clean
                         # 送出本輪的預覽答案（信心 JSON 已剝離）

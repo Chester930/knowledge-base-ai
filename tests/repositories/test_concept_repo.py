@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 from core.constants import INTEREST_INIT, PROFESSIONAL_INIT, VECTOR_DIM
-from repositories.concept_repo import ConceptRepository
+from repositories.concept_repo import ConceptRepository, _fuse_graph_vector
 
 
 class _FakeResult:
@@ -214,3 +214,177 @@ class TestGetAllConcepts:
         repo, driver = _repo_with_driver()
         driver.execute_query.return_value = _FakeResult([])
         assert await repo.get_all_concepts() == []
+
+
+# ── vector_search_concept_ids（兩階段檢索 Stage-1）────────────────────────────
+
+class TestVectorSearchConceptIds:
+    async def test_returns_ids_from_index_query(self):
+        repo, driver = _repo_with_driver()
+        driver.execute_query.return_value = _FakeResult([{"id": "c1"}, {"id": "c2"}])
+
+        result = await repo.vector_search_concept_ids([0.1, 0.2], top_k=50)
+
+        assert result == ["c1", "c2"]
+        _, kwargs = driver.execute_query.call_args
+        assert kwargs["top_k"] == 50
+        assert kwargs["vector"] == [0.1, 0.2]
+
+    async def test_numpy_like_vector_converted_via_tolist(self):
+        repo, driver = _repo_with_driver()
+        driver.execute_query.return_value = _FakeResult([])
+        fake_vector = MagicMock()
+        fake_vector.tolist.return_value = [0.5, 0.6]
+
+        await repo.vector_search_concept_ids(fake_vector, top_k=10)
+
+        _, kwargs = driver.execute_query.call_args
+        assert kwargs["vector"] == [0.5, 0.6]
+
+    async def test_empty_index_returns_empty_list(self):
+        repo, driver = _repo_with_driver()
+        driver.execute_query.return_value = _FakeResult([])
+        assert await repo.vector_search_concept_ids([0.1], top_k=10) == []
+
+
+# ── set_concept_graph_vectors（圖拓撲共嵌入寫入）──────────────────────────────
+
+class TestSetConceptGraphVectors:
+    async def test_skips_query_when_empty(self):
+        repo, driver = _repo_with_driver()
+        await repo.set_concept_graph_vectors({})
+        driver.execute_query.assert_not_called()
+
+    async def test_sends_unwind_with_items(self):
+        repo, driver = _repo_with_driver()
+        driver.execute_query.return_value = _FakeResult([])
+
+        await repo.set_concept_graph_vectors({
+            "機器學習": [0.1, 0.2], "深度學習": [0.3, 0.4],
+        })
+
+        call = driver.execute_query.call_args
+        assert "SET c.q_vector_graph" in call.args[0]
+        items = call.kwargs["items"]
+        assert {"name": "機器學習", "vector": [0.1, 0.2]} in items
+        assert {"name": "深度學習", "vector": [0.3, 0.4]} in items
+
+
+# ── _fuse_graph_vector（圖拓撲共嵌入融合公式，第9節①）─────────────────────────
+
+class TestFuseGraphVector:
+    def test_missing_graph_vector_returns_unchanged(self):
+        record = {"q_vector": [1.0, 0.0], "name": "x"}
+        result = _fuse_graph_vector(dict(record))
+        assert result["q_vector"] == [1.0, 0.0]
+
+    def test_none_graph_vector_returns_unchanged(self):
+        record = {"q_vector": [1.0, 0.0], "q_vector_graph": None}
+        result = _fuse_graph_vector(record)
+        assert result["q_vector"] == [1.0, 0.0]
+        assert "q_vector_graph" not in result
+
+    def test_mismatched_dimensions_returns_unchanged(self):
+        record = {"q_vector": [1.0, 0.0], "q_vector_graph": [1.0, 0.0, 0.0]}
+        result = _fuse_graph_vector(record)
+        assert result["q_vector"] == [1.0, 0.0]
+
+    def test_fuses_with_alpha_weighting(self):
+        # 兩個已正規化的正交向量，alpha=0.85 應主要偏向文字向量
+        record = {"q_vector": [1.0, 0.0], "q_vector_graph": [0.0, 1.0]}
+        result = _fuse_graph_vector(record, alpha=0.85)
+        fused = result["q_vector"]
+        assert fused[0] == pytest.approx(0.85)
+        assert fused[1] == pytest.approx(0.15)
+
+    def test_normalizes_before_fusing(self):
+        # 未正規化的向量（長度非1）應先正規化再加權
+        record = {"q_vector": [2.0, 0.0], "q_vector_graph": [0.0, 4.0]}
+        result = _fuse_graph_vector(record, alpha=0.5)
+        fused = result["q_vector"]
+        assert fused[0] == pytest.approx(0.5)
+        assert fused[1] == pytest.approx(0.5)
+
+    def test_pops_graph_vector_key_from_output(self):
+        record = {"q_vector": [1.0, 0.0], "q_vector_graph": [0.0, 1.0]}
+        result = _fuse_graph_vector(record)
+        assert "q_vector_graph" not in result
+
+    def test_alpha_one_equals_pure_text_vector(self):
+        record = {"q_vector": [1.0, 0.0], "q_vector_graph": [0.0, 1.0]}
+        result = _fuse_graph_vector(record, alpha=1.0)
+        assert result["q_vector"][0] == pytest.approx(1.0)
+        assert result["q_vector"][1] == pytest.approx(0.0)
+
+
+# ── 融合套用於 KG 路由查詢 + concept_ids 兩階段過濾 ────────────────────────────
+
+class TestFusionAndConceptIdsFilterAppliedToKgQueries:
+    async def test_get_all_kgs_concepts_applies_fusion(self):
+        repo, driver = _repo_with_driver()
+        kg_id = uuid4()
+        driver.execute_query.return_value = _FakeResult([
+            {"kg_id": str(kg_id), "concept_id": "c1", "name": "x",
+             "q_vector": [1.0, 0.0], "q_vector_graph": [0.0, 1.0],
+             "interest_score": 0.5, "professional_score": 0.5},
+        ])
+
+        result = await repo.get_all_kgs_concepts()
+
+        concept = result[kg_id][0]
+        assert concept["q_vector"] != [1.0, 0.0]  # 已被融合，不再是純文字向量
+        assert "q_vector_graph" not in concept
+
+    async def test_get_public_kgs_concepts_applies_fusion(self):
+        repo, driver = _repo_with_driver()
+        kg_id = uuid4()
+        driver.execute_query.return_value = _FakeResult([
+            {"kg_id": str(kg_id), "concept_id": "c1", "name": "x",
+             "q_vector": [1.0, 0.0], "q_vector_graph": [0.0, 1.0],
+             "interest_score": 0.5, "professional_score": 0.5},
+        ])
+
+        result = await repo.get_public_kgs_concepts()
+
+        concept = result[kg_id][0]
+        assert concept["q_vector"] != [1.0, 0.0]
+
+    async def test_no_graph_vector_leaves_text_vector_untouched(self):
+        repo, driver = _repo_with_driver()
+        kg_id = uuid4()
+        driver.execute_query.return_value = _FakeResult([
+            {"kg_id": str(kg_id), "concept_id": "c1", "name": "x",
+             "q_vector": [1.0, 0.0], "q_vector_graph": None,
+             "interest_score": 0.5, "professional_score": 0.5},
+        ])
+
+        result = await repo.get_all_kgs_concepts()
+
+        assert result[kg_id][0]["q_vector"] == [1.0, 0.0]
+
+    async def test_get_all_kgs_concepts_passes_concept_ids_filter(self):
+        repo, driver = _repo_with_driver()
+        driver.execute_query.return_value = _FakeResult([])
+
+        await repo.get_all_kgs_concepts(concept_ids=["c1", "c2"])
+
+        _, kwargs = driver.execute_query.call_args
+        assert kwargs["concept_ids"] == ["c1", "c2"]
+
+    async def test_get_all_kgs_concepts_none_concept_ids_means_no_filter(self):
+        repo, driver = _repo_with_driver()
+        driver.execute_query.return_value = _FakeResult([])
+
+        await repo.get_all_kgs_concepts()
+
+        _, kwargs = driver.execute_query.call_args
+        assert kwargs["concept_ids"] is None
+
+    async def test_get_all_documents_concepts_passes_concept_ids_filter(self):
+        repo, driver = _repo_with_driver()
+        driver.execute_query.return_value = _FakeResult([])
+
+        await repo.get_all_documents_concepts(concept_ids=["c1"])
+
+        _, kwargs = driver.execute_query.call_args
+        assert kwargs["concept_ids"] == ["c1"]

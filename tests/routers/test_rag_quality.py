@@ -34,6 +34,7 @@ from routers.agent import (
     _build_rag_prompt,
     _extract_confidence,
     _is_readable,
+    _is_global_query,
     _CONFIDENCE_THRESHOLD,
 )
 from core.constants import KG_ROUTE_THRESHOLD
@@ -653,6 +654,119 @@ class TestSVOFactInjection:
                 })
 
         assert calls == [2], f"事實充足時不應加深查詢，實際呼叫跳數：{calls}"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 第9節⑤：社群摘要檢索（全域性查詢路由）
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestGlobalQueryHeuristic:
+    def test_summary_keywords_detected_as_global(self):
+        assert _is_global_query("請總結這個知識庫的技術演進")
+        assert _is_global_query("整體來說有哪些主題？")
+        assert _is_global_query("give me an overview of this knowledge base")
+
+    def test_specific_question_not_global(self):
+        assert not _is_global_query("Transformer 使用什麼機制？")
+        assert not _is_global_query("強化學習怎麼運作？")
+
+
+class TestCommunitySummaryInjection:
+    """[第9節⑤] 全域性查詢時，若 KG 已建立社群摘要，須以 community_summaries SSE 事件回傳。"""
+
+    async def test_community_summaries_emitted_for_global_query(self, test_app):
+        kg_id = uuid4()
+        concepts = [_concept("知識庫")]
+        kg_obj = MagicMock()
+        kg_obj.name = "測試KG"
+        kg_obj.db_name = ""
+
+        mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_all_kgs_concepts.return_value = {kg_id: [_concept("知識庫")]}
+        mock_concept_repo.get_all_documents_concepts.return_value = {}
+        mock_kg_repo = AsyncMock()
+        mock_kg_repo.get_by_id.return_value = kg_obj
+        mock_kg_repo.get_documents.return_value = []
+        mock_doc_repo = AsyncMock()
+        mock_doc_repo.get_by_id.return_value = None
+
+        summaries = [{"summary": "這個知識庫涵蓋機器學習與資料庫兩大主題。",
+                      "member_count": 12, "top_entities": ["機器學習", "資料庫"]}]
+
+        with patch("routers.agent.build_query_concepts",
+                   new=AsyncMock(return_value=concepts)), \
+             patch("routers.agent.compute_match_score", return_value=(0.8, ["知識庫"])), \
+             patch("routers.agent.get_driver"), \
+             patch("routers.agent.ConceptRepository", return_value=mock_concept_repo), \
+             patch("routers.agent.DocumentRepository", return_value=mock_doc_repo), \
+             patch("routers.agent.KnowledgeGraphRepository", return_value=mock_kg_repo), \
+             patch("routers.agent.query_svo_facts",
+                   new=AsyncMock(return_value=([], [], []))), \
+             patch("services.community_service.get_community_summaries",
+                   new=AsyncMock(return_value=summaries)), \
+             patch("routers.agent.get_llm_provider") as mock_llm, \
+             patch("routers.agent.get_chunk_store") as mock_store:
+            mock_llm.return_value.stream = _make_stream(
+                "這個知識庫涵蓋機器學習與資料庫。\n", '{"confidence": 0.8}'
+            )
+            mock_store.return_value.read_ranked = AsyncMock(return_value=[])
+            async with AsyncClient(
+                transport=ASGITransport(app=test_app), base_url="http://test"
+            ) as c:
+                res = await c.post("/agent/chat", json={
+                    "question": "請總結這個知識庫的主題", "use_svo": True,
+                })
+                events = _parse_sse(res.content)
+
+        community_events = [e for e in events if "community_summaries" in e]
+        assert community_events, "全域性查詢且已有社群摘要時，應發送 community_summaries SSE 事件"
+        assert community_events[0]["community_summaries"] == summaries
+
+    async def test_no_community_summaries_event_for_specific_query(self, test_app):
+        """非全域性查詢不應觸發社群摘要查詢（即使 KG 已建立社群摘要）。"""
+        kg_id = uuid4()
+        concepts = [_concept("強化學習")]
+        kg_obj = MagicMock()
+        kg_obj.name = "測試KG"
+        kg_obj.db_name = ""
+
+        mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_all_kgs_concepts.return_value = {kg_id: [_concept("強化學習")]}
+        mock_concept_repo.get_all_documents_concepts.return_value = {}
+        mock_kg_repo = AsyncMock()
+        mock_kg_repo.get_by_id.return_value = kg_obj
+        mock_kg_repo.get_documents.return_value = []
+        mock_doc_repo = AsyncMock()
+        mock_doc_repo.get_by_id.return_value = None
+
+        mock_get_summaries = AsyncMock(return_value=[{"summary": "x", "member_count": 1, "top_entities": []}])
+
+        with patch("routers.agent.build_query_concepts",
+                   new=AsyncMock(return_value=concepts)), \
+             patch("routers.agent.compute_match_score", return_value=(0.8, ["強化學習"])), \
+             patch("routers.agent.get_driver"), \
+             patch("routers.agent.ConceptRepository", return_value=mock_concept_repo), \
+             patch("routers.agent.DocumentRepository", return_value=mock_doc_repo), \
+             patch("routers.agent.KnowledgeGraphRepository", return_value=mock_kg_repo), \
+             patch("routers.agent.query_svo_facts",
+                   new=AsyncMock(return_value=([], [], []))), \
+             patch("services.community_service.get_community_summaries", new=mock_get_summaries), \
+             patch("routers.agent.get_llm_provider") as mock_llm, \
+             patch("routers.agent.get_chunk_store") as mock_store:
+            mock_llm.return_value.stream = _make_stream(
+                "強化學習使用獎勵函數。\n", '{"confidence": 0.8}'
+            )
+            mock_store.return_value.read_ranked = AsyncMock(return_value=[])
+            async with AsyncClient(
+                transport=ASGITransport(app=test_app), base_url="http://test"
+            ) as c:
+                res = await c.post("/agent/chat", json={
+                    "question": "強化學習怎麼運作？", "use_svo": True,
+                })
+                events = _parse_sse(res.content)
+
+        assert not [e for e in events if "community_summaries" in e]
+        mock_get_summaries.assert_not_called()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1368,6 +1482,134 @@ class TestRefinementLoop:
         assert refine["round"] == 1
         assert refine["confidence_before"] < _CONFIDENCE_THRESHOLD
         assert refine["chunks_added"] > 0
+
+
+class TestActiveRAGEarlyExit:
+    """
+    [第9節④] Active RAG：串流生成中偵測到「無資訊」信號時，只在還有補充檢索機會的輪次
+    （非最後一輪）提前中斷生成，不浪費 token 等待模型講完整段填充文字。
+    """
+
+    def _setup_common(self):
+        kg_id = uuid4()
+        doc_id = uuid4()
+        chunk_ids = [str(uuid4()) for _ in range(5)]
+        doc = _make_doc(id=doc_id, content="測試內容。")
+        concepts = [_concept("測試主題")]
+
+        kg_obj = MagicMock()
+        kg_obj.name = "測試KG"
+        kg_obj.db_name = ""
+
+        mock_concept_repo = AsyncMock()
+        mock_concept_repo.get_all_kgs_concepts.return_value = {kg_id: [_concept("測試主題")]}
+        mock_concept_repo.get_all_documents_concepts.return_value = {}
+        mock_kg_repo = AsyncMock()
+        mock_kg_repo.get_by_id.return_value = kg_obj
+        mock_kg_repo.get_documents.return_value = []
+        mock_doc_repo = AsyncMock()
+        mock_doc_repo.get_by_id.return_value = doc
+
+        ranked_chunks = [{"chunk_id": cid, "text": f"補充內容{i}"} for i, cid in enumerate(chunk_ids)]
+        return kg_id, doc_id, chunk_ids, concepts, mock_concept_repo, mock_kg_repo, mock_doc_repo, ranked_chunks
+
+    async def test_stream_stops_early_on_no_info_signal(self, test_app):
+        """第一輪（非最後一輪）遇到無資訊信號應提前中斷，不消費後續的填充 token。"""
+        (kg_id, doc_id, chunk_ids, concepts, mock_concept_repo, mock_kg_repo,
+         mock_doc_repo, ranked_chunks) = self._setup_common()
+
+        call_num = [0]
+        round1_tokens_pulled: list[str] = []
+
+        async def _mock_stream(prompt):
+            call_num[0] += 1
+            if call_num[0] == 1:
+                # 第一個 token 就命中 _NO_INFO_RE；後面刻意接一段長填充文字 + 高信心 JSON，
+                # 若提前中斷生效，這些都不該被消費到。
+                tokens = ["找不到相關", "本不應被消費的填充文字" * 20, '{"confidence": 0.95}']
+                for t in tokens:
+                    round1_tokens_pulled.append(t)
+                    yield t
+            else:
+                for chunk in ["完整答案。\n", '{"confidence": 0.80}']:
+                    yield chunk
+
+        with patch("routers.agent.build_query_concepts", new=AsyncMock(return_value=concepts)), \
+             patch("routers.agent.compute_match_score", return_value=(0.8, ["測試主題"])), \
+             patch("routers.agent.get_driver"), \
+             patch("routers.agent.ConceptRepository", return_value=mock_concept_repo), \
+             patch("routers.agent.DocumentRepository", return_value=mock_doc_repo), \
+             patch("routers.agent.KnowledgeGraphRepository", return_value=mock_kg_repo), \
+             patch("routers.agent.query_svo_facts",
+                   new=AsyncMock(return_value=(
+                       ["測試主題(Concept) -[相關:related]→ 相關概念(Concept)"],
+                       [str(doc_id)], chunk_ids,
+                   ))), \
+             patch("routers.agent.get_embedding_provider", return_value=_mock_embedding_provider(0.7)), \
+             patch("routers.agent.get_llm_provider") as mock_llm, \
+             patch("routers.agent.get_chunk_store") as mock_store:
+            mock_llm.return_value.stream = _mock_stream
+            mock_store.return_value.read_ranked = AsyncMock(return_value=ranked_chunks)
+            async with AsyncClient(
+                transport=ASGITransport(app=test_app), base_url="http://test"
+            ) as c:
+                res = await c.post("/agent/chat", json={
+                    "question": "測試問題？", "use_svo": True,
+                })
+                events = _parse_sse(res.content)
+
+        # 只應消費到第一個命中無資訊信號的 token，填充文字與信心 JSON 都不該被拉取
+        assert round1_tokens_pulled == ["找不到相關"], \
+            f"提前中斷應只消費 1 個 token，實際消費 {round1_tokens_pulled}"
+
+        # 因為信心被強制下調（無資訊信號），應觸發精煉補充下一輪
+        refine_events = [e for e in events if "refine" in e and "refine_preview" not in e]
+        assert len(refine_events) >= 1, "無資訊信號應強制信心低於門檻並觸發精煉"
+
+    async def test_no_early_exit_on_final_round(self, test_app):
+        """最後一輪（無更多補充機會）即使遇到無資訊信號，也應完整消費整個 stream。"""
+        (kg_id, doc_id, chunk_ids, concepts, mock_concept_repo, mock_kg_repo,
+         mock_doc_repo, ranked_chunks) = self._setup_common()
+
+        call_num = [0]
+        final_round_tokens_pulled: list[str] = []
+
+        async def _mock_stream(prompt):
+            call_num[0] += 1
+            tokens = ["找不到相關", "資訊。", '{"confidence": 0.2}']
+            if call_num[0] < 3:
+                for t in tokens:
+                    yield t
+            else:
+                # 第 3 輪（_MAX_REFINE_ROUNDS=3 的最後一輪）：即使命中無資訊信號也應被完整消費
+                for t in tokens:
+                    final_round_tokens_pulled.append(t)
+                    yield t
+
+        with patch("routers.agent.build_query_concepts", new=AsyncMock(return_value=concepts)), \
+             patch("routers.agent.compute_match_score", return_value=(0.8, ["測試主題"])), \
+             patch("routers.agent.get_driver"), \
+             patch("routers.agent.ConceptRepository", return_value=mock_concept_repo), \
+             patch("routers.agent.DocumentRepository", return_value=mock_doc_repo), \
+             patch("routers.agent.KnowledgeGraphRepository", return_value=mock_kg_repo), \
+             patch("routers.agent.query_svo_facts",
+                   new=AsyncMock(return_value=(
+                       ["測試主題(Concept) -[相關:related]→ 相關概念(Concept)"],
+                       [str(doc_id)], chunk_ids,
+                   ))), \
+             patch("routers.agent.get_embedding_provider", return_value=_mock_embedding_provider(0.7)), \
+             patch("routers.agent.get_llm_provider") as mock_llm, \
+             patch("routers.agent.get_chunk_store") as mock_store:
+            mock_llm.return_value.stream = _mock_stream
+            mock_store.return_value.read_ranked = AsyncMock(return_value=ranked_chunks)
+            async with AsyncClient(
+                transport=ASGITransport(app=test_app), base_url="http://test"
+            ) as c:
+                await c.post("/agent/chat", json={"question": "測試問題？", "use_svo": True})
+
+        assert call_num[0] == 3, f"應執行滿 3 輪（_MAX_REFINE_ROUNDS），實際 {call_num[0]} 輪"
+        assert final_round_tokens_pulled == ["找不到相關", "資訊。", '{"confidence": 0.2}'], \
+            "最後一輪不應提前中斷，整個 stream 都應被消費"
 
 
 # ══════════════════════════════════════════════════════════════════════════════

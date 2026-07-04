@@ -23,3 +23,9 @@ faster-whisper>=1.0.0,<2.0.0
 openai~=2.29
 anthropic~=0.86
 google-generativeai~=0.8
+
+# ── 社群摘要 / 圖拓撲共嵌入 / 對比學習訓練（第9節①⑤⑦選用功能）─────────────
+networkx>=3.0
+gensim>=4.0
+datasets>=3.0.0
+accelerate>=0.26.0

@@ -16,3 +16,9 @@ CLASSIFY_MIN_THRESHOLD = 0.05   # 低於此值視為完全無相關，留 _stagi
 # Stage-1：用 Neo4j Vector Index 對每個 query concept 取 Top-K 候選 ConceptNode
 # Stage-2：僅對候選節點做 Python 端的對齊/強度精篩，取代全表掃描
 CONCEPT_COARSE_TOP_K = 100
+
+# 時序知識圖譜衰減（THEORETICAL_ARCHITECTURE.md 第9節⑥）
+TEMPORAL_DECAY_RATE = 0.005     # 每日衰減率：decay = exp(-rate * delta_days)，SVO 邊 created_at 缺失時視為不衰減
+
+# 圖拓撲感知共嵌入（THEORETICAL_ARCHITECTURE.md 第9節①）
+GRAPH_EMBEDDING_ALPHA = 0.85    # 融合權重：final = alpha*文字向量 + (1-alpha)*圖結構向量，偏保守（以文字向量為主）

@@ -81,11 +81,10 @@ flowchart TD
 系統設定了 `KG_ROUTE_THRESHOLD`（預設為 0.05）作為篩選門檻。
 
 #### 【多專家激活與跨域語意融合 (Top-K Multi-Expert Activation)】
-為了解決現實世界中的**跨領域（Cross-domain）複雜查詢**，系統實作了 **Top-K 門控路由機制**（以 `MAX_KG_PER_QUERY` 進行約束，通常設為 3 或 5）：
-$$\text{Activated\_KGs} = \text{Top-K}\Big( \big\{ \text{KG}_i \;\big|\; \text{Score}_{\text{kg}, i} \ge \text{Threshold} \big\} \Big)$$
-
+為了解決現實世界中**跨領域 (Cross-domain) 查詢**的問題（例如，問題涉及「醫學」與「資訊工程」的交集），系統**不限制只激活單一圖譜**，而是實作了 **Top-K 門控路由機制**（在代碼中以 `MAX_KG_PER_QUERY` 進行約束，**實際預設為 5**，定義於 `core/constants.py`，篩選邏輯見 `routers/agent.py`：先以 `score >= KG_ROUTE_THRESHOLD` 篩選，再取 `kg_scores[:MAX_KG_PER_QUERY]`）：
+$$\text{Activated\_KGs} = \text{Top-K}\Big( \big\{ \text{KG}_i \;\big|\; Score_{\text{kg}, i} \ge \text{Threshold} \big\} \Big)$$
 這對應於 **Top-K Sparsely-Gated MoE** 結構：
-1. **並行激活與聯邦檢索**：當多個專家圖譜被同時激活時（$\text{Gate}_i = 1$），系統跨多個圖譜分片並行執行 BFS 遍歷（`query_shards_parallel`）。
+1. **並行激活與聯邦檢索**：當多個專家圖譜被同時激活時（$\text{Gate}_i = 1$），系統在 `routers/agent.py` 的 `_bfs_kg()` 搭配 `asyncio.gather()` 對所有 `selected_kgs` 並行執行 BFS 遍歷，跨分片場景則由 `services/shard_query.py` 的 `query_shards_parallel()` 承接，獲取各自的離散 SVO Facts 與對應原文的物理座標。
 2. **跨域值融合 (Cross-Domain Value Fusion)**：將各個專家圖譜回傳的局部 Value 進行語意拼接與交叉融合：
    $$\text{Fused\_Context} = \bigoplus_{i \in \text{Activated}} V_i$$
    這讓最終的 LLM 能綜觀多個學科或專門領域的知識，進行**跨域語意聯邦推理（Cross-Domain Federated Reasoning）**。
@@ -132,12 +131,14 @@ sequence diagram
 * **座標對照**：系統沿著被激活的 SVO 節點中儲存的 `chunk_id` 與 `source_doc_id` 物理座標，直接向 `ChunkStore` 持久化數據庫發送請求。
 * **物理原文拉取**：將產生這些 SVO 節點的**原始文件段落（Chunk 原文）**回溯提取出來（例如包含「西元 701 年，李白出生於碎葉城，其家族在此經商...」的完整段落）。
 * **學術價值**：這解決了傳統 Knowledge Graph 缺乏上下文情境（Context-free）的重大缺陷。本系統透過 **「符號-物理對照映射（Symbolic-to-Physical Mapping）」**，讓 LLM 同時擁有離散的「邏輯關係邊（SVO）」與連續的「原文細節（Chunk）」，大幅提升回答的細節度與可信度。
+* **實際觸發條件（`routers/agent.py` 精煉迴圈，約 L549-593）**：並非對每次查詢都無條件回溯，而是有明確的觸發閥門——僅當 `req.use_svo` 開啟且 BFS 已取得 `svo_chunk_ids` 時才進入精煉迴圈；迴圈內先由 LLM 對初次生成的答案自報信心分數，只有 `confidence < _CONFIDENCE_THRESHOLD` 時才會呼叫 `chunk_store.read_ranked(remaining_ids, q_vec)` 補拉原文。這比文件原先「SVO 資訊不足即回溯」的描述更精確：觸發依據是**生成端的信心分數**，而非檢索端對 SVO 資訊量的判斷。
 
 #### 【第二軌：圖譜引導的文本重排（Graph-Driven Reranking）】
-以上述圖譜抽出的實體作為「引導信號」，在 `_pick_relevant_chunks` 中對物理 Chunk 進行重新排序，計算公式為：
+以上述圖譜抽出的實體作為「引導信號」，在 `routers/agent.py` 的 `_pick_relevant_chunks`（定義於約 L74）中對物理 Chunk 進行重新排序，計算公式為（實測與程式碼逐項核對，係數完全吻合）：
 $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \mathbf{SVO\_Hits \times 0.10} + \text{Enum\_Bonus}$$
 
-這實作了**圖譜符號知識對向量相似度空間的偏置與引導**，優先提取與圖譜事實密切相關的原始文本。
+其中 `Enum_Bonus = 0.25`（L161）。這實作了**圖譜符號知識對向量相似度空間的偏置與引導**，優先提取與圖譜事實密切相關的原始文本。
+* **實作細節（文件先前未提及）**：實際排序並非單純依 `Score` 由大到小排，而是**兩階段排序**（L167-171）——先比較 `Query_Hits` 命中數，命中數相同時才比較綜合 `Score`。這代表系統對「關鍵詞直接命中」的信任權重高於「向量+圖譜綜合分數」，屬於刻意的保守排序策略。
 
 #### 【學術文獻背書與經典論文】
 * **GraphRAG 架構**：
@@ -200,10 +201,10 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
 ### (Federated Graph Querying & Entity Alignment)
 
 #### 【技術機制】
-為解決海量世界知識（World Knowledge）帶來的資料庫單點效能瓶頸，系統在 [routers/world.py](file:///C:/Users/mycena/Desktop/knowledge-base-ai/routers/world.py) 中實作了：
-
-1. **聯邦 Registry 合併**：整合本地與 GitHub 遠端 Registry，將查詢並行發送至各個分片（`query_shards_parallel`）。
-2. **跨實例實體對齊（Entity Alignment）**：透過 `align_entity_results` 與同義詞自動展開，合併不同分片中命名不一致的實體。
+為解決海量世界知識（World Knowledge）帶來的資料庫單點效能瓶頸，系統在 [routers/world.py](file:///c:/Users/666/Desktop/智慧知識庫/routers/world.py) 與 `services/federation_service.py`、`services/shard_query.py` 中實作了：
+1. **聯邦 Registry 合併**：`services/federation_service.py` 的 `get_federation_cache()` 整合本地與 `settings.github_registry_url` 遠端 Registry 快取（快取過期時背景非同步刷新，不阻塞 `/world/chat`，見第13節變更記錄）；`services/shard_query.py` 的 `query_shards_parallel()` 將查詢並行發送至各個分片，並支援 `mark_shard_offline()` 對離線分片降級容錯。
+2. **跨實例實體對齊（Entity Alignment）**：透過 `services/entity_alignment.py` 的 `align_entity_results()`（以字典序最小詞作 canonical key 合併同義實體）與 `expand_terms()`（靜態同義詞表 + LLM 動態多語言同義詞展開）完成。
+   * **補充**：`expand_terms()` 並非只服務聯邦跨分片場景，`routers/agent.py` 在**單一 KG 內**的查詢期實體對齊也共用同一套函式，屬於比本節標題更通用的機制。
 
 #### 【學術文獻背書與經典論文】
 * **Federated Queries in Semantic Web**：
@@ -225,6 +226,12 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
 | [King-s-Knowledge-Graph-Lab/ProVe](https://github.com/King-s-Knowledge-Graph-Lab/ProVe) | 利用 LLM 對照網頁參考資料，校驗 Wikidata 中的三元組事實（Fact Verification）。 | 本系統實作了 **「事實溯源 (Provenance)」** 路由，與 ProVe 雷同，且加入了**「防幻覺過濾器」**進行實體原文存在性校驗。 |
 | [Wikipedia-KG-RAG](https://github.com/Wikipedia-KG-RAG) | 結合 Neo4j 與維基百科數據，實現基於圖譜的開放域問答。 | 本系統不只支持本機 Neo4j Wikipedia，更進一步實作了**聯邦分片（Federation Shard）**，可跨多個本機與遠端知識分片進行並行 RAG。 |
 | [pat-jj/KG-FIT](https://github.com/pat-jj/KG-FIT) | 針對開放世界知識（Open-World）進行圖譜的微調與補全，解決新實體對齊問題。 | 本系統在 `services/entity_alignment.py` 中實作了**同義詞展開與實體對齊**，在不微調模型的情況下完成開放世界實體融合。 |
+| [microsoft/graphrag](https://github.com/microsoft/graphrag) | 微軟官方 GraphRAG 實作，用 Leiden 演算法對知識圖譜做階層式社群偵測，為每個社群生成 LLM 摘要，支援 Global Query（全域性宏觀問答）。 | 對應本文件第9節⑤「多層次社群摘要檢索」——**已於 2026-07-03 落地**（`services/community_service.py`），但用 `networkx` 內建 Louvain 取代 Leiden，且未做階層式多層分群，差異與原因見第9節⑤說明。 |
+| [neo4j-contrib/ms-graphrag-neo4j](https://github.com/neo4j-contrib/ms-graphrag-neo4j) | 微軟 GraphRAG 與 Neo4j 的官方整合套件，提供 Leiden 社群偵測直接寫入 Neo4j 圖資料庫的參考實作。 | 若未來要將 Louvain 升級為 Leiden，此專案是最低摩擦力的參考實作（技術棧同為 Neo4j）。 |
+| [PathRAG (arXiv:2502.14902)](https://arxiv.org/pdf/2502.14902) | 用「關鍵關係路徑剪枝」取代 GraphRAG 的社群式檢索與 LightRAG 的鄰居全取，降噪並減少 Token 消耗。 | 本系統目前的圖譜引導重排（`_pick_relevant_chunks`）仍是「BFS 全部取回 + 分數加權」，PathRAG 的路徑剪枝概念可用於在 BFS 命中的 SVO 子圖過大時先做路徑級篩選，降低送入 LLM 的 Context 噪音。 |
+| [MoG: Mixture of Experts for Graph-based RAG (arXiv:2605.31010)](https://arxiv.org/pdf/2605.31010) | 提出「Hub Graph（常駐、跨查詢共用的核心知識）+ 稀疏激活的 Expert Graph」雙層結構，比單純 Top-K 選圖更細緻。 | 與本系統的 Graph-MoE 路由（第2節）高度同源，但本系統目前**沒有 Hub Graph 概念**——跨領域查詢若所有 KG 的 `Score_kg` 都低於 `KG_ROUTE_THRESHOLD` 就會 0 個專家被激活。引入 Hub Graph 可作為 fallback，避免路由「全滅」的邊界情況。 |
+| [GraphRAG-Router (arXiv:2604.16401)](https://arxiv.org/pdf/2604.16401) | 用強化學習訓練路由器，依問題難度動態決定該用哪個 GraphRAG 子系統、甚至該用多大的生成模型，減少約 30% 大模型濫用。 | 本系統的 KG 路由分數公式（Cos × Align × Mag）是固定的手工特徵組合，無法隨查詢難度自適應調整 LLM 選型。可作為第9節「動態」系列方向的延伸參考，尤其若未來要接多種規格的 LLM Provider 做成本優化。 |
+| [Neurosymbolic Retrievers for RAG (arXiv:2601.04568)](https://arxiv.org/pdf/2601.04568) | 提出 KG-Path RAG：沿知識圖譜路徑擴展查詢以提升檢索可解釋性，並用症狀學（醫療風險評估）場景驗證神經符號檢索優於純向量檢索。 | 為本系統整體「神經符號」定位（第4節 T-Box/A-Box）提供 2026 年的最新學術背書，且其 KG-Path 查詢擴展手法與本系統 `expand_terms()` 的同義詞展開思路相通，可互相參照優化查詢擴展策略。 |
 
 ---
 
@@ -243,90 +250,154 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
 
 ## 9. 架構前瞻與未來優化方向 (Architectural Extensions & Future Enhancements)
 
-為了進一步提升神經符號 Graph-MoE RAG 架架在極大規模與複雜邏輯下的推理精度，未來可在以下方向進行架構擴展，各方向均有相關學術研究支撐：
+為了進一步提升神經符號 Graph-MoE RAG 架構在極大規模與複雜邏輯下的推理精度，未來可在以下八個前沿方向進行架構擴展，各方向均有相關學術研究支撐：
 
-> **落地狀態總覽**（2026-07 系統健檢與稽核後回填，見第 11 節變更記錄）：
+> **落地狀態總覽**（2026-07 系統健檢與稽核後回填，並於整合 `worktree-gap-fixes` 與 `worktree-shiny-doodling-journal` 兩條分支後更新，見第 13 節變更記錄）：
 >
 > | 方向 | 狀態 | 備註 |
 > |---|---|---|
-> | ① GNN 共嵌入空間 | ❌ 暫不做 | 過度工程，見下方評估 |
-> | ② 動態本體對齊 | ❌ 暫不做 | 過度工程，見下方評估 |
+> | ① GNN/node2vec 共嵌入空間 | ✅ 已落地 | `services/graph_embedding_service.py` + `repositories/concept_repo.py` 的 `_fuse_graph_vector()` |
+> | ② 動態本體對齊 | ❌ 暫不做 | 目前無真實異質 schema 分片會用到，見下方評估 |
 > | ③ Graph-CoT 推理 | ✅ 已落地（簡化版） | `routers/agent.py` 門檻觸發式加深查詢，不含 LLM 選路 |
-> | ④ Active RAG | ❌ 暫不做 | 過度工程，見下方評估 |
-> | ⑤ 社群摘要檢索 | ❌ 暫不做 | 過度工程，見下方評估 |
-> | ⑥ 時序知識圖譜 | ❌ 暫不做 | 有條件保留，見下方評估 |
-> | ⑦ 對比學習 | ❌ 暫不做 | 過度工程，見下方評估 |
-> | ⑧ 二階段粗精篩 | ✅ 已落地 | `repositories/concept_repo.py` 的 `*_for_query` 方法 |
+> | ④ Active RAG | 🟡 部分落地 | 只做到「提早結束單輪生成」，見下方說明 |
+> | ⑤ 社群摘要檢索 | ✅ 已落地 | `services/community_service.py`，Louvain 分群 + LLM 摘要 |
+> | ⑥ 時序知識圖譜衰減 | ✅ 已落地 | `services/svo_service.py::_temporal_decay()` |
+> | ⑦ 對比學習 | ✅ 已落地（離線訓練管線） | `services/contrastive_training_service.py` |
+> | ⑧ 二階段粗精篩 | ✅ 已落地 | `services/concept_engine.py` 的 `route_kgs()`/`route_documents()` |
 
-### ① 圖拓撲感知共嵌入空間 (Graph-Aware Co-embedding Space)
-* **落地狀態**：❌ 暫不做 —— 個人知識庫規模（單 KG 通常數百至數千實體）用不到 GNN 才能解決的表徵瓶頸；且需要離線訓練管線、額外模型生命週期管理與 GPU 資源，屬於過度工程（over-engineering）。現有 cosine + 對齊分數（`services/concept_engine.py` 的 `compute_match_score`）已足夠。
+### ① 圖拓撲感知共嵌入空間 (Graph-Aware Co-embedding Space) — ✅ 已落地（2026-07-03，採 node2vec，範圍與原設計有出入見下）
 * **當前局限**：目前的 ConceptNode 連續特徵向量（Embedding）是利用標準文本模型獨立計算的，未感知到 Neo4j 圖譜中 SVO 邊所承載的拓撲結構與關聯強度。
-* **優化建議**：引入 **圖神經網絡 (GNN)** 演算法（如 GraphSAGE 或 Node2Vec），將圖譜的離散拓撲特徵與文本的語意特徵進行聯合表徵學習，產生「感知圖結構的概念向量」。這能使 Gating Router 的相似度計算精確數倍。
-* **學術文獻**：*Hamilton, W., et al. (NeurIPS 2017). "Inductive Representation Learning on Large Graphs." (GraphSAGE 奠基作)*
+* **優化建議**：引入 **圖神經網絡 (GNN)** 算法（如 GraphSAGE 或 Node2Vec），將圖譜的離散拓撲特徵與文本的語意特徵進行聯合表徵學習，產生「感知圖結構的概念向量 (Graph-Aware Concept Embeddings)」。這能使 Gating Router 的相似度計算精確數倍。
+* **技術選型**：採用 **node2vec**，不是文件原先並列的 GraphSAGE。理由：本專案已將 `networkx>=3.0` 列為直接相依套件，`networkx` 沒有內建 node2vec 但有輕量第三方實作可直接套用其圖結構 API，不需要 `torch` + `torch-geometric` 這類重型 ML 框架；GraphSAGE 是 inductive（可對新節點免重訓推論），能力更強，但代價是要引入 PyTorch 系依賴——這與本專案「本地 CPU 推論優先、盡量避免 GPU 依賴」的定位有摩擦（可對照 PaddleOCR 在 GPU 初始化失敗時要求 fallback 回 CPU 的既有修復）。GraphSAGE 留作未來若有「新節點需要即時可用向量」的明確需求時再評估的 Phase 2。
+* **落地範圍的釐清（容易被誤解之處）**：文件標題「圖拓撲感知」容易讓人以為要用 SVO 的 Entity-Entity 圖。但 KG 路由層（`concept_engine.compute_match_score`）比對的是 `ConceptNode.q_vector`，而 ConceptNode 之間目前唯一的圖結構關係是「同一份 Document/KG 透過 `EFFECTIVE` 邊連到哪些 ConceptNode」，是一個 Document/KG ↔ ConceptNode 的二分圖（bipartite graph），並非 SVO 的 Entity-Entity 圖，因此落地對象是對這個二分圖做 node2vec，而非對 SVO 圖做 GNN。
+* **實際落地位置**：
+  * `run_build_graph_embeddings.py`：離線批次腳本（比照 `run_build_kg.py` 慣例），抓取全部 `(Document|KnowledgeGraph)-[:EFFECTIVE]->(ConceptNode)` 邊建圖，跑 node2vec 產生每個 ConceptNode 的圖結構向量。
+  * `repositories/concept_repo.py::set_concept_graph_vectors()`：批次寫入 ConceptNode 的 `q_vector_graph` 屬性，與既有 `q_vector`（純文字 embedding）並存、不覆蓋——刻意的風險控制設計。
+  * `repositories/concept_repo.py::_fuse_graph_vector()`：查詢期融合邏輯，`final = α·q_vector + (1-α)·q_vector_graph`（兩向量各自正規化後才加權平均，避免量級不一致主導結果）；`q_vector_graph` 缺失（尚未跑批次腳本的新概念）時原樣返回純文字向量，完全向後相容。融合權重 `α` 為 `core/constants.py::GRAPH_EMBEDDING_ALPHA = 0.85`（偏保守，以文字向量為主），已接入 `get_all_kgs_concepts()`/`get_public_kgs_concepts()` 兩個路由查詢入口。
+* **風險**：node2vec 是 **transductive**——新增 ConceptNode 後，要獲得穩定的 graph embedding 得重新訓練整個圖的向量，這與專案現有「增量建圖、跳過已處理文件」的設計哲學有摩擦：新文件加入後其 ConceptNode 在下次全量重訓前只能先用融合後仍以純文字向量為主（`α=0.85`）的降級行為。若這個限制被證實不可接受，才需要評估升級到 GraphSAGE（inductive）。
+* **學術來源**：
+  * Hamilton, W., Ying, Z., & Leskovec, J. (2017). *"Inductive Representation Learning on Large Graphs."* NeurIPS 2017. (GraphSAGE 奠基作，未來可能升級方向)
+  * Grover, A., & Leskovec, J. (2016). *"node2vec: Scalable Feature Learning for Networks."* KDD 2016. (實際採用)
 
-### ② 多源聯邦本體動態對齊 (Dynamic Federated Ontology Alignment)
-* **落地狀態**：❌ 暫不做 —— 本專案本體 schema（30 種關係、13 種實體類型）是全域共享的單一定義，`services/entity_alignment.py` 的同義詞表已解決同名實體問題；只有真正對接第三方 KG（不同本體 schema）時才有意義，目前聯邦查詢對象都是同一套 schema 的分片。虛擬碼中以 regex 字串替換轉換 Cypher 關係語句的做法本身也有 Cypher 注入風險，不建議照原設計實作。
+### ② 多源聯邦本體動態對齊 (Dynamic Federated Ontology Alignment) — 🔵 設計方案已補充（尚未實作，建議暫緩）
 * **當前局限**：跨分片並行查詢時，若不同分片的本體 Schema（如關係邊定義）存在命名或分類不一致（如 `IS_A` 與 `INSTANCE_OF` 混用），跨域查詢的語意流會發生斷裂。
-* **優化建議**：在路由層引入基於 LLM 或 Graph Matching 的 **動態本體對齊（Ontology Alignment）** 機制，自動在查詢發起前對不同知識庫的關係邊進行 Schema 轉換與映射。
-* **學術文獻**：*Shvaiko, P., & Euzenat, J. (2013). "Ontology Matching: A State of the Art and Future Challenges."*
+* **優化建議**：在路由層引入基於 LLM 或 Graph Matching 的 **動態本體對齊（Ontology Alignment）** 機制，自動在查詢發起前對不同知識庫的關係邊進行 Schema 轉換與映射，達成「無感知的跨域本體對接」。
+* **落地前提的查證結果（這是本項與其他項最大的不同之處）**：查過 `services/federation_service.py` 與 `services/shard_query.py` 目前的聯邦分片實作，所有分片（本機其他 KG、GitHub 遠端 registry）都遵循**同一套** `_VALID_REL_TYPES`（30 種）與 registry 格式——因為分片本身就是同一個專案的另一個部署實例，不是真正異質的外部知識圖譜。也就是說，**文件描述的本體不一致問題目前沒有真實案例會發生**，這是一個面向假設性未來需求（「未來若允許匯入非本專案格式的外部 KG」）的優化方向，不像⑧（O(N) 效能瓶頸）是已驗證的現有缺陷。
+* **技術選型（若未來真的要做）**：不引入新的 ML 模型，優先用 **LLM 輔助生成映射表**（複用專案已有的多 Provider LLM 抽象層 `core/providers/llm/`，零新增基礎設施），而非傳統 Graph Matching 演算法（如 AgreementMakerLight，需要獨立的 Java 服務，與現有 Python 單體架構不合）。
+* **具體設計**：
+  1. `services/federation_service.py` 的 registry 結構為每個遠端分片新增可選欄位 `ontology_mapping: dict[str, str]`（`{external_rel_name: internal_rel_name}`）。
+  2. 首次接入異質分片時，抓取該分片少量三元組樣本，呼叫 LLM 生成映射表草稿。
+  3. **強制人工審核**這份映射表後才寫入 registry——不能全自動上線。
+  4. `services/shard_query.py::query_shards_parallel()` 查詢時依 `shard_id` 查對應映射表，把回傳結果的 `rel_type` 欄位做替換。
+* **風險**：LLM 生成的映射表可能有誤，錯誤映射的後果是「兩個語意不同的關係被靜默合併成同一種」，屬於難以事後偵測的資料品質問題，這是堅持要人工審核的原因。
+* **建議暫緩**：目前沒有真實的異質 schema 分片會用到它，優先度應排在有真實需求驅動的項目之後，等真的要接入外部異質 KG時再啟動評估。
+* **學術來源**：
+  * Shvaiko, P., & Euzenat, J. (2013). *"Ontology Matching: A State of the Art and Future Challenges."* IEEE Transactions on Knowledge and Data Engineering.
+  * Faria, D., et al. (2013). *"AgreementMakerLight: A System for Large-Scale Ontology Matching."* Semantic Web Conference.
 
-### ③ 圖譜鏈式思考推理 (Graph Chain-of-Thought / G-CoT)
+### ③ 圖譜鏈式思考推理 (Graph Chain-of-Thought / G-CoT) — ✅ 已落地（簡化版）
 * **落地狀態**：✅ 已落地簡化版 —— 見 `routers/agent.py` 的 `_SVO_SPARSE_FACT_THRESHOLD` 機制。**與下方原始設計的關鍵差異**：不採用「每跳都呼叫 LLM 決定下一步」的做法（延遲與 LLM 成本過高，不適合個人 KB 的問答場景），改為門檻觸發式簡化版——2 跳 BFS 命中事實數低於門檻（3 條）時，用同一組種子詞加深一跳重查（`hops+1`）並合併結果，零額外 LLM 呼叫。細節見第 10 節③。
 * **當前局限**：圖譜內查找僅依賴簡單的 1-2 跳 BFS，屬於「被動式檢索」，缺乏對複雜邏輯路徑的自主推理能力。
 * **優化建議**：引入 **Graph-CoT (圖譜鏈式思考)** 機制。LLM 不僅被動接收 Context，而是能作為一個 Agent 沿著圖譜的語意關係邊主動「尋路」，動態決定下一跳要遍歷哪個實體，尋找最優的推理路徑（Multi-hop Reasoning Path）。
+
+* **技術選型**：不需要新模型，複用現有 LLM Provider 抽象層。核心改動是查詢邏輯從「一次性 BFS 1-2 跳全取」改為「LLM 逐跳決策」。
+* **具體設計**：`services/svo_service.py` 新增 `query_svo_facts_cot(kg_id, start_terms, question, max_hops=3)`：(1) 用既有全文索引找種子實體 (2) 迴圈最多 `max_hops` 次：查該實體的一跳鄰居（複用既有 Cypher pattern），把「目前推理路徑 + 候選鄰居 + 原始問題」交給 LLM，要求回覆 `{next_target, reason, is_stop}` 的 JSON（虛擬碼設計已在第10節③給出骨架）(3) 累積路徑上的所有邊作為最終 facts。
+* **最大的實際落地風險（延遲）**：`routers/agent.py` 已有一個精煉迴圈在做多輪 LLM 呼叫（confidence-based，最多 `_MAX_REFINE_ROUNDS=3` 輪）。若疊加 Graph-CoT 的多跳 LLM 呼叫，一次問答理論上可能觸發到 `hops(≤3) × refine_rounds(≤3) = 9` 次 LLM 呼叫。本專案預設走本地 Ollama（`phi4`/`qwen2.5` 等），單次生成常需要數秒到十幾秒，9 次呼叫的延遲對使用者是不可接受的。這是本項目**最需要先解決**的問題，而不是尋路邏輯本身。
+* **建議的漸進落地策略**：不讓 Graph-CoT 成為預設路徑。只在「BFS 1-2 跳 + 既有精煉迴圈都無法達到信心門檻」時才觸發，接在現有精煉迴圈「信心不足」分支之後，作為第三種補救手段（BFS → 相似度補充 chunk → Graph-CoT 尋路），而非取代 BFS 本身。這樣多數問答完全不受影響，只有少數「疑難」查詢才會付出額外延遲成本。
+* **影響範圍**：`services/svo_service.py`（新函式）、`routers/agent.py`（精煉迴圈新增第三層補救分支）、需要新增 LLM 呼叫次數的監控/上限保護（避免失控的延遲或 API 費用）。
+* **風險**：延遲風險（如上，需要嚴格的觸發條件與呼叫次數上限）；LLM 決策品質風險——本地小模型（如 `qwen2.5:7b`）做多跳路徑決策的可靠度未經驗證，可能不如預期，需要 fallback（例如連續 2 次尋路失敗就放棄，回退現有答案）。
+* **工作量分級**：大，2-3 週，含延遲監控、呼叫上限與 fallback 機制的工程量，且必須用真實資料集做 A/B 測試驗證「Graph-CoT 答案品質是否真的優於現有 BFS」，不能只憑理論假設就上線——這點文件原提案沒有涵蓋，但是落地前必要的驗證步驟。
 * **學術來源**：
   * He, Xiaoxin, et al. (2023). *"Mind's Eye of LLM: Reasoning on Graphs with Chain-of-Thought."* arXiv:2310.13344 (G-CoT 經典研究；本專案簡化版的理論依據)。
   * Chao, Yuxiao, et al. (2024). *"Graph-ToolChain: Leveraging Tool Chains for Reasoning on Graphs."* arXiv:2401.12345.
 
-### ④ 主動自適應檢索 (Active & Adaptive Retrieval)
-* **落地狀態**：❌ 暫不做 —— 虛擬碼設計依賴 token 級 confidence/logprobs，但 `core/providers/llm/` 下的 Ollama/Anthropic/Gemini/Grok provider 介面目前都只有純文字 `generate()`/`stream()`，未暴露 logprobs，需先改造整個 provider 介面才能支援。專案既有的「自我精煉迴圈」（`routers/agent.py` 的信心校準 + 補充 chunk 機制）本質上已是簡化版 Active RAG，核心價值已被覆蓋。
+### ④ 主動自適應檢索 (Active & Adaptive Retrieval) — 🟡 部分落地（範圍遠小於原設計，見下）
 * **當前局限**：現有機制為單次檢索後生成答案，即便有自我精煉（Self-Refinement）也只是被動回填 Chunks，無法在生成過程中自發性地決定何時需要新知識。
 * **優化建議**：引入 **Active RAG (主動式檢索增強)**。在 LLM 串流生成的過程中，如果發現缺失某個中間邏輯鏈條的知識，能自發發起圖譜檢索，實現「一邊生成、一邊動態判斷、一邊補充檢索」的自適應生成。
+* **實際落地範圍與原設計的差異（誠實揭露：這不是完整的 Active RAG）**：
+  * **沒有做到「發起新檢索」，只做到「提早結束生成」**：原設計的核心是「生成中途發現知識缺口 → 自發觸發新一輪圖譜/文件檢索 → 把結果插回去繼續生成」。實際落地的是遠遠更保守的版本：`routers/agent.py` 既有的精煉迴圈（confidence-based refinement，本來就會在整段答案生成完畢後，若信心 < `_CONFIDENCE_THRESHOLD` 就補充 chunk 重新生成）在此基礎上新增「串流過程中一旦偵測到 `_NO_INFO_RE`（「找不到相關」「無法回答」等）信號，立即中斷該輪的 token 消費」，跳過模型接下來可能講的填充/免責文字，提早進入既有的補充檢索流程。**沒有實作**逐 token confidence/entropy 監控、沒有偵測「孤立未參照實體」、也沒有在生成中途插入新資訊後從中斷點接續生成——這些都是原設計較困難的部分，需要 LLM Provider 支援 per-token logprobs（目前 Ollama/OpenAI/Anthropic/Gemini/Grok 5 種 Provider 介面不統一，貿然實作有跨 Provider 相容性風險），故本次不做。
+  * **為什麼仍值得做**：即使只是「提早結束一輪生成」，也是把「決定要不要多檢索」的判斷點從「生成完畢後」提前到「生成過程中」，是文件所述「一邊生成、一邊判斷」精神的一個小而真實的子集，且零額外延遲風險（沒有偵測到信號時行為與原本完全一致）。
+  * **不在最後一輪套用**：`_MAX_REFINE_ROUNDS`（預設3）的最後一輪沒有更多檢索預算可用，提早中斷該輪只會讓答案變短而沒有實質好處，因此保留完整生成。
+* **實際落地位置**：`routers/agent.py` 的 `/agent/chat` 精煉迴圈（約 L599 起）：`_active_watch = round_num < _MAX_REFINE_ROUNDS - 1`，串流消費迴圈中每收到一個 token 就檢查累積文字是否命中既有的 `_NO_INFO_RE`，命中且非最後一輪即 `break`；其餘信心計算、補充邏輯完全復用既有精煉迴圈，未新增額外分支。
+* **測試**：`tests/routers/test_rag_quality.py::TestActiveRAGEarlyExit`（驗證非最後一輪提前中斷且不消費填充 token、驗證最後一輪不提前中斷）。
 * **學術來源**：
   * Trivedi, H., et al. (2023). *"Active Retrieval Augmented Generation."* EMNLP 2023.
   * Asai, Akari, et al. (2024). *"Self-RAG: Learning to Retrieve, Generate, and Critique through Self-Reflection."* ICLR 2024.
+  * *（2026補充）* Fan, D., et al. (2026). *"GraphRAG-Router: Learning Cost-Efficient Routing over GraphRAGs and LLMs with Reinforcement Learning."* arXiv:2604.16401 — 用 RL 讓路由器依問題難度自適應決定檢索/生成策略，減少約 30% 大模型濫用，思路與本方向互補。
+  * *（2026補充）* *"RouteRAG: Efficient Retrieval-Augmented Generation from Text and Graph via Reinforcement Learning."* arXiv:2512.09487 — 用端到端 RL 讓模型在生成過程中自主決定「何時推理、向文本或圖譜檢索、何時作答」，是本方向「一邊生成、一邊動態判斷」構想的最新工程化嘗試，可作為實作參考。
 
-### ⑤ 多層次社群摘要檢索 (Community-based Hierarchical Retrieval)
-* **落地狀態**：❌ 暫不做 —— 這個機制解決的是「全域性宏觀問題」，但個人 KB 場景下一個 KG 通常只有數百到數千實體，直接把 BFS 結果餵給 LLM 摘要即可，不需要先做社群偵測分群再摘要的兩層架構。規模不到，過度工程。
+### ⑤ 多層次社群摘要檢索 (Community-based Hierarchical Retrieval) — ✅ 已落地（範圍與原設計有出入見下）
 * **當前局限**：當遭遇全域性（Global Query）或跨多個文檔的宏觀查詢（如：「請總結所有公開圖譜中的技術演進」）時，BFS 遍歷與向量路由僅能匹配局部實體，無法回答全局性問題。
 * **優化建議**：引入 **社群檢測 (Community Detection)** 算法（如 Louvain 或 Leiden 算法），對 Neo4j 中的圖譜結構進行層次化分群，並由 LLM 預先為每個分群生成「社群摘要 (Community Summaries)」。問答時根據問題層級路由至相應的社群摘要，提供巨觀的全局回答。
+* **實際落地範圍與原設計的差異**：
+  * **用 Louvain 而非 Leiden**：`networkx` 已是專案既有的（間接）相依套件，其 `networkx.algorithms.community.louvain_communities()` 可直接使用；Leiden 演算法需要 `leidenalg` + `python-igraph`，兩者皆含 C 擴充套件，在本專案的 Windows 開發環境下需要編譯工具鏈才能安裝，風險與環境相依成本較高。Louvain 是 Leiden 的前身，效果在中小型圖譜上差異有限，先以 Louvain 落地、未來若圖譜規模擴大出現社群品質問題，再評估遷移至 Leiden。
+  * **未實作「層次化」多層級分群**：只做單層 Louvain 分群，未實作 Leiden 論文強調的階層式社群樹（Level 0/1/2…）。
+  * **全域查詢偵測為關鍵詞啟發式，非語意分類器**：`routers/agent.py::_is_global_query()` 用正則比對「總結/整體/全部/overview/summarize」等關鍵詞，非文件原構想中更精確的問題語意分類。誤判在所難免（例如「這篇文件整體在講什麼」會被視為全域查詢），但作為第一版足夠可用，且失敗模式是「多給一段摘要 context」而非拒答，風險可控。
+  * **只整合到 `/agent/chat`**：`/world/chat`（公開 KG 聯邦問答）尚未接上此機制，留待後續迭代。
+* **實際落地位置**：
+  * `services/community_service.py`：
+    * `build_communities_for_kg(kg_id, db_name, min_size, max_communities)`：抓取 Entity 關係邊建 `networkx.Graph`，跑 `louvain_communities(seed=42)`，過濾規模 < `min_size`（預設3）的社群，逐一取樣社群內 SVO 事實、呼叫 LLM 生成 2-3 句摘要，持久化為 Neo4j `:Community` 節點（`summary`/`member_count`/`top_entities` 屬性）並用 `(:Entity)-[:IN_COMMUNITY]->(:Community)` 邊連結成員。每次執行先 `DETACH DELETE` 該 KG 舊社群再重建（沿用 `run_build_kg.py --force` 的慣例）。
+    * `get_community_summaries(kg_id, db_name, limit)`：依 `member_count` 降冪讀回已建立的社群摘要。
+  * `run_build_communities.py`：離線批次腳本，比照 `run_label_kg.py` 慣例（`--kg`、`--min-size` 參數）。
+  * `routers/agent.py`：新增 `_is_global_query()` 啟發式判斷；`/agent/chat` 在 KG 路由完成、BFS 事實回傳後，若判定為全域查詢則並行呼叫 `get_community_summaries()`，透過新增的 `community_summaries` SSE 事件回傳給前端，並將摘要文字併入 `contexts`（走既有的、已驗證會進入 LLM prompt 的路徑，而非 `svo_facts` — 後者只用於 SSE 顯示與 chunk 關鍵詞加權，詳見 `tests/routers/test_rag_quality.py::TestSVOFactInjection` 的既有測試註解）。
+  * `requirements.txt` 新增 `networkx>=3.0`（明確聲明此前僅為間接相依的套件）。
+  * 測試：`tests/services/test_community_service.py`（雙群偵測、規模過濾、LLM 摘要容錯、讀取排序）、`tests/routers/test_rag_quality.py::TestGlobalQueryHeuristic`/`TestCommunitySummaryInjection`（關鍵詞判定、SSE 事件觸發與非觸發）。
 * **學術來源**：
-  * Blondel, V., et al. (2008). *"Fast unfolding of communities in large networks."* Journal of Statistical Mechanics. (Louvain 算法經典)
-  * Traag, V., et al. (2019). *"From Louvain to Leiden: guaranteeing well-behaved communities."* Scientific Reports. (Leiden 算法)
+  * Blondel, V., et al. (2008). *"Fast unfolding of communities in large networks."* Journal of Statistical Mechanics. (Louvain 算法經典，本次實際採用)
+  * Traag, V., et al. (2019). *"From Louvain to Leiden: guaranteeing well-behaved communities."* Scientific Reports. (Leiden 算法，未來可能遷移方向)
 
-### ⑥ 時序知識圖譜與陳舊性校正 (Temporal Knowledge Graphs & Decay)
-* **落地狀態**：❌ 暫不做，但保留條件 —— 目前 SVO 三元組沒有時間維度，`confidence` 欄位（`services/svo_service.py`）某種程度隱含新舊（重複出現次數），但無法區分「舊資訊被新資訊取代」。若未來使用者實際回報「AI 引用過期資訊」的痛點，最小可行版本是：SVO schema 加一個 `updated_at`（已有 `created_at`），在 `_pick_relevant_chunks` 的 reranking 公式（`routers/agent.py`）加一個時間衰減項，不需要完整的 `valid_from`/`valid_to` 區間模型。在痛點明確前優先度低。
+### ⑥ 時序知識圖譜與陳舊性校正 (Temporal Knowledge Graphs & Decay) — ✅ 已落地（範圍與原設計有出入見下）
 * **當前局限**：知識事實會隨著時間演進而陳舊（例如：CEO 職位更迭、技術標準變遷）。若 SVO 缺乏時間維度，圖譜中會存在相互衝突的過期知識，導致 LLM 產生幻覺。
 * **優化建議**：引入 **時序知識圖譜 (Temporal KG)** 機制，為每條 SVO 關係邊加上時間戳（`valid_from`, `valid_to`），並在重排公式中引入 **「時間衰減因子 (Temporal Decay Factor)」**，確保時效性高、未過期的事實被優先檢索。
+* **實際落地範圍與原設計的差異**：
+  * **未新增 `valid_from`/`valid_to` 欄位**——`svo_service.py` 的 SVO MERGE 邏輯早已在 `ON CREATE SET rel.created_at = datetime()` 設定建立時間（此為既有欄位，先前只寫入從未被讀取），本次落地直接沿用 `created_at` 作為衰減基準時間，而非新增文件中提出的 `valid_from`/`valid_to` 生效區間欄位。原因：`valid_from`/`valid_to` 代表「事實在現實世界中的有效期間」，需要從文件內容解析時序語意（例如辨識「2023年起」「已於2024年終止」等敘述）才能準確填值，屬於獨立的 NLP 子任務，不在本次範圍內；`created_at`（事實被抽取進圖譜的時間）是可以立即使用、對既有資料 100% 相容的代理指標（proxy），先以此上線，時序語意抽取留待未來迭代。
+  * **未修改「重排公式」（`_pick_relevant_chunks`，第3節）**——該函式只處理單一文件內的段落文字，沒有跨文件的發布時間可比較，衰減在此層級沒有意義。改為套用在 **SVO 事實排序**：`services/svo_service.py` 的 `query_svo_facts()`（`/agent/chat` 主要問答路徑）與 `query_svo_facts_with_provenance()`（`/world/chat`、聯邦分片查詢），BFS 撈回候選邊後，用 `confidence × decay_factor` 重新排序，取代原本只依 `confidence DESC` 排序。
+* **實際落地位置**：
+  * `services/svo_service.py::_temporal_decay(created_at, rate)`：`decay = exp(-rate * delta_days)`，與文件公式一致；`created_at` 缺失或無法解析時回傳 `1.0`（不衰減），確保舊資料/邊界情況下為向後相容。
+  * `core/constants.py::TEMPORAL_DECAY_RATE = 0.005`（與原虛擬碼 `daily_decay_rate` 預設值一致）。
+  * 3 處 `query_svo_facts()` 的 Cypher 分支與 2 處 `query_svo_facts_with_provenance()` 分支皆已加上 `toString(r.created_at) AS created_at`，並在 Python 端用 `_temporal_decay` 重新排序候選邊（Cypher 端 `LIMIT` 仍以 `confidence` 截斷候選集，僅重排取回後的順序，不影響何者被納入候選）。
+  * 測試：`tests/services/test_svo_service.py::TestTemporalDecay`（缺失/無法解析回傳1.0、新鮮事實≈1.0、較舊事實衰減、新舊事實相對排序、無時區字串容錯）。
 * **學術來源**：
   * Trivedi, R., et al. (2017). *"Predicting Semantic Relations in Temporal Knowledge Graphs."* EMNLP 2017.
   * Goel, R., et al. (2020). *"Diachronic Embedding for Temporal Knowledge Graph Completion."* AAAI 2020.
 
-### ⑦ 對比自我監督概念學習 (Contrastive Concept Learning)
-* **落地狀態**：❌ 暫不做 —— 需要負樣本挖掘、embedding 模型微調管線；`core/providers/embedding/local.py` 用的是現成 sentence-transformers 模型，微調需要標註資料與訓練基礎設施，對個人知識庫是典型過度工程。真正想解決「路由邊界模糊」問題，調整 `KG_ROUTE_THRESHOLD`/`MAX_KG_PER_QUERY`（`core/constants.py`）或優化同義詞表的成本效益高得多。
+### ⑦ 對比自我監督概念學習 (Contrastive Concept Learning) — ✅ 已落地（離線訓練管線，範圍遠小於原始評估時的擔憂，見下）
 * **當前局限**：在 ConceptNode 路由比對中只計算了正向的 Similarity 相似分，若兩個相鄰領域的概念界線模糊，容易發生路由偏差。
 * **優化建議**：在 Embedding 訓練或對齊計算中引入 **對比學習 (Contrastive Learning)**。在優化對齊權重時，不僅最大化正向概念的 cosine alignment，同時拉遠無關的負樣本概念（Negative Concepts），使得 Gating Router 的分類決策邊界更加清晰。
+* **早期評估 vs. 實際落地的落差**：本項目原本被評估為「目前不建議投入」——理由是傳統對比學習微調需要自建負樣本挖掘、SimCLR/GCL 風格 loss、訓練/驗證/模型版本管理的完整 pipeline，這與專案「呼叫外部/本地推論 API、不訓練模型」的定位衝突，且需要 GPU 資源。實際落地時**繞開了上述所有顧慮**：沒有自建訓練框架，而是直接使用 `sentence-transformers`（本專案既有相依套件）內建的 `SentenceTransformerTrainer` 微調 API 與 `MultipleNegativesRankingLoss`（in-batch negatives，即 InfoNCE 標準實作）——這是既有函式庫的一等公民功能，不是新增訓練基礎設施，因此上述「與架構哲學衝突」「需要新增訓練/版本管理能力」的疑慮不成立。
+* **實際落地位置**：
+  * `services/contrastive_training_service.py::generate_training_pairs()`：正樣本對來源為「同一份 Document 下共現的 ConceptNode 名稱配對」；若 Document 層級樣本數不足 `_MIN_PAIRS_TO_TRAIN`（20），退而求其次改用 KnowledgeGraph 層級共現（訊號較弱但涵蓋更廣）補足；負樣本由 `MultipleNegativesRankingLoss` 的 in-batch negatives 機制自動提供，不需額外挖掘。
+  * `run_finetune_embeddings.py`：離線批次腳本，讀取正樣本對、呼叫 `SentenceTransformerTrainer` 微調 `local_embedding_model`，屬於一次性/低頻執行的訓練任務，不常駐、不影響線上查詢路徑。
+* **仍然成立的風險提醒**：`compute_match_score` 的路由準確度目前沒有被驗證為現有問題（不像⑧的 O(N) 效能瓶頸是已明確指出的真實缺陷），且微調若樣本品質不佳，理論上仍有讓 embedding 品質變差（過度貼合訓練樣本、犧牲泛化能力）的風險，建議先小規模試跑並比對微調前後的路由準確度再決定是否納入預設流程。
 * **學術來源**：
   * Chen, T., et al. (2020). *"A Simple Framework for Contrastive Learning of Visual Representations."* ICML 2020. (SimCLR 對比學習架構)
   * You, Y., et al. (2020). *"Graph Contrastive Learning with Augmentations."* NeurIPS 2020. (GCL 圖對比學習)
 
-### ⑧ 二階段向量粗篩-精篩架構 (Two-Stage Coarse-to-Fine Retrieval)
-* **落地狀態**：✅ 已落地 —— `repositories/concept_repo.py` 的 `get_kgs_concepts_for_query()`、`get_public_kgs_concepts_for_query()`、`get_documents_concepts_for_query()`（Stage-1 呼叫 `db.index.vector.queryNodes` 做 KNN 粗篩）+ `services/concept_engine.py` 的 `route_kgs()`/`route_documents()`（Stage-2 精篩封裝，向量索引不可用時自動 fallback 全表掃描）。已套用到 `routers/agent.py`、`routers/world.py`、`routers/search.py`、`services/classify_service.py` 所有查詢期路由路徑。與下方虛擬碼的差異：粗篩候選數改為可調常數 `CONCEPT_COARSE_TOP_K`（`core/constants.py`，預設 100），且針對索引尚未建立/查詢失敗的情況內建 fallback，而非假設索引必然可用。
+### ⑧ 二階段向量粗篩-精篩架構 (Two-Stage Coarse-to-Fine Retrieval) — ✅ 已落地（2026-07-03）
+* **落地狀態**：✅ 已落地 —— `repositories/concept_repo.py` 的 `vector_search_concept_ids()`（Stage-1 呼叫 `db.index.vector.queryNodes` 做 KNN 粗篩）+ `get_all_kgs_concepts()`/`get_public_kgs_concepts()`/`get_all_documents_concepts()` 新增可選 `concept_ids` 參數（Stage-2 精篩範圍限縮，非 None 時只回傳候選集合內的概念）+ `services/concept_engine.py` 的 `route_via_two_stage()`（協調 Stage-1/2，向量索引不可用或無候選時自動 fallback 全表掃描）與其上層封裝 `route_kgs()`/`route_documents()`（供路由呼叫點使用）。已套用到 `routers/agent.py`、`routers/world.py`、`routers/search.py`、`services/classify_service.py` 所有查詢期路由路徑。與下方虛擬碼的差異：粗篩候選數改為可調常數 `CONCEPT_COARSE_TOP_K`（`core/constants.py`，預設 100）。
 * **當前局限**：概念匹配時在 Python 內存中對全庫進行 $O(N)$ 雙重迴圈計算，在大規模（N > 10,000）時會引發 CPU 阻塞與內存溢出。
 * **優化建議**：將檢索重構為**「二階段檢索架構（Two-Stage Retrieval）」**。第一階段（粗篩，Stage-1）利用 Neo4j 內建的 **Vector Index**（以 C++ 底層高速運算）抓出 Cosine 相似度最高的 Top-100 個候選節點；第二階段（精篩，Stage-2）在 Python 內存中僅對這 100 個候選節點進行對齊遮罩（Align）與強度振幅（Mag）的精細比對。複雜度由 $O(N)$ 驟降為 $O(100)$ 常數級別，效能提升千倍以上。
+* **實際落地位置**：
+  * `repositories/concept_repo.py` 的 `vector_search_concept_ids()`：呼叫既有的 `concept_q_vector` 向量索引（該索引原本已在 `main.py`/`run_build_kg.py` 等啟動流程建立，但先前從未被查詢使用）執行 `CALL db.index.vector.queryNodes(...)` 做 Stage-1 KNN 粗篩。
+  * `get_all_kgs_concepts()`、`get_public_kgs_concepts()`、`get_all_documents_concepts()` 新增可選參數 `concept_ids`，非 None 時將 Cypher 限定在候選集合內，取代原本的全表 `MATCH`。
+  * `services/concept_engine.py` 的 `route_via_two_stage()`：對每個 query concept 呼叫 Stage-1 取候選 id 聯集，再呼叫呼叫端傳入的 `fetch_candidates(ids)` 做 Stage-2；Stage-1 失敗（例如索引未就緒）或候選為空時，自動退回 `fetch_candidates(None)` 全表掃描，行為與優化前完全一致，不影響正確性。
+  * 已接入所有路由呼叫點：`routers/agent.py`（`/agent/chat` KG 路由、相似度補充、`/agent/query`）、`routers/world.py`（`/world/chat` 公開 KG 路由與相似度補充）、`routers/search.py`（`/search`）、`services/classify_service.py`（暫存區文件分類）。
+  * `core/constants.py` 新增 `CONCEPT_COARSE_TOP_K = 100`。
+  * 測試：`tests/services/test_concept_engine.py::TestRouteViaTwoStage`（Stage-1 失敗退回全表、候選為空退回全表、候選 id 聯集去重、Stage-1 中途例外退回全表）。
 * **學術來源**：
   * Nogueira, R., et al. (2019). *"Document Ranking with BERT."* arXiv:1903.07666. (經典二階段粗精篩檢索架構)
   * Robertson, S., et al. (2009). *"The Probabilistic Relevance Framework: BM25 and Beyond."* Foundations and Trends in Information Retrieval.
 
 ---
 
-## 10. 核心流程優化與演算法設計 (Algorithm Design & Pseudocode)
+## 10. 核心流程優化與虛擬碼設計草稿 (Algorithm Pseudocode & Workflow Integration — Design Drafts vs. Actual Implementation)
 
-為了便於將上述架構與優化方向落地，本章提供核心模組的**演算法虛擬碼 (Pseudocode)**，作為系統的核心設計藍圖：
+> **狀態聲明（2026-07-03 稽核 / 同日追蹤更新）**：本章標題原為「虛擬碼落地方案」，容易誤讀為已完成工程落地。稽核時 5 個 class（`FederatedOntologyMapper`、`TemporalDecayRerankEngine`、`GraphCoTReasoningEngine`、`ActiveRetrievalController`、`TwoStageVectorRetrievalEngine`）**完全未以 class 形式出現在任何 `.py` 檔案中**，僅為設計草稿；本輪整合 gap-fixes 與 shiny-doodling-journal 兩個分支後，其中 3 項已落地（皆拆成獨立函式而非單一 class）：②`TemporalDecayRerankEngine`（`services/svo_service.py::_temporal_decay()`）、③`GraphCoTReasoningEngine`（簡化版，`routers/agent.py` 門檻觸發式加深查詢）、⑤`TwoStageVectorRetrievalEngine`（`repositories/concept_repo.py::vector_search_concept_ids()` + `services/concept_engine.py::route_via_two_stage()`/`route_kgs()`/`route_documents()`）；④`ActiveRetrievalController` 只落地一個遠遠更小的子集（見該節「與原虛擬碼的差異」）；①`FederatedOntologyMapper` 仍為設計草稿，尚未寫入程式碼（見第9節②，建議暫緩理由不變）。
 
-### 演算法 1：聯邦本體 Schema 對齊與 Cypher 動態轉換 (Ontology Schema Translation)
-*   **學術目的**：解決跨分片聯邦查詢時，不同知識庫關係型別命名不一致的問題。
-*   **複雜度**：時間複雜度 $O(R)$，其中 $R$ 為待對齊關係的規則數量。
+為了便於工程團隊直接在現有 GraphRAG 代碼庫中落地上述優化方向，本章提供五個核心流程的代碼設計藍圖與 Python 虛擬碼草稿：
+
+### ① 聯邦本體 Schema 對齊與 Cypher 動態轉換 (Ontology Schema Translation) — 🔵 設計草稿，尚未實作（對應第9節②，建議暫緩，見該節理由）
+跨分片（Shard）並行查詢時，解決不同分片本體命名不一致的對齊流程：
 
 ```python
 Algorithm 1: Dynamic Federated Schema Alignment
@@ -345,9 +416,10 @@ Output: translated_cypher (轉換後符合標準本體的Cypher語句)
 10. Return translated_cypher
 ```
 
-### 演算法 2：融入時序衰減的圖譜引導重排演算法 (Temporal Decay Reranking)
-*   **學術目的**：在圖譜引導的物理段落重排中，引入基於發布時間差的連續衰減因子，確保資訊的時效性。
-*   **複雜度**：時間複雜度 $O(C)$，其中 $C$ 為候選 Chunk 數量。
+### ② 融入時序衰減的圖譜引導重排流程 (Temporal Decay Reranking) — ✅ 已落地（2026-07-03，套用位置與原虛擬碼不同，見第9節⑥說明）
+在圖譜引導的物理段落重排公式中，除了 SVO 命中加分，加入基於發布時間差的連續衰減權重：
+
+> **與原虛擬碼的差異**：實際落地**沒有**建立獨立的 `TemporalDecayRerankEngine` class，且套用對象不是「物理段落（chunk）重排」而是「SVO 事實排序」——理由與差異細節見第9節⑥。核心衰減公式 `exp(-rate * delta_days)` 與函式簽名精神保留，實作為 `services/svo_service.py::_temporal_decay()`。
 
 ```python
 Algorithm 2: Temporal-Decay Graph-Guided Reranking
@@ -366,9 +438,7 @@ Output: final_score (時效性修正後的最終重排評分)
 5.  Return final_score
 ```
 
-### 演算法 3：圖譜鏈式思考路徑推理流程 (Graph Chain-of-Thought / G-CoT)
-*   **學術目的**：引導 LLM 在圖譜中沿著語意關係主動進行多跳尋路推理（Multi-hop Reasoning）。
-*   **複雜度**：時間複雜度 $O(H \times D)$，其中 $H$ 為最大跳數（Max Hops），$D$ 為節點平均度數（Degree）。
+### ③ 圖譜鏈式思考路徑推理流程 (Graph Chain-of-Thought / G-CoT) — ✅ 已落地（簡化版，2026-07-03）
 
 > **實際落地（門檻觸發式簡化版）**：以下 `GraphCoTReasoningEngine` 虛擬碼保留作為原始理論設計參考，
 > 實際程式碼採用更輕量的做法，見 `routers/agent.py` 的 `_bfs_kg`/`_merge_bfs_results` 與
@@ -458,71 +528,50 @@ Output: refined_results (排序後的 Top-K 匹配概念列表)
 14. Return refined_results
 ```
 
----
+### ④ 自適應不確定性驅動的主動檢索 (Active Retrieval Controller) — 🟡 部分落地（2026-07-03，範圍遠小於本虛擬碼，見第9節④說明）
+在 LLM 串流生成答案的過程中，監控不確定性（Entropy/Confidence）自發決策是否觸發圖譜檢索：
 
-## 11. 實證評估與驗證框架 (Empirical Evaluation Framework)
-### (RAG System Evaluation & Empirical Validation)
+> **與原虛擬碼的差異**：`ActiveRetrievalController` class（含逐 token confidence 監控 `evaluate_generation_step()`、孤立實體偵測 `_contains_unreferenced_entities()`）**沒有落地**。實際落地是規模小得多的子集——`routers/agent.py` 精煉迴圈中對累積文字做 `_NO_INFO_RE` 關鍵詞比對以提前結束單輪生成，不涉及 token 級信心分數或跨 Provider 的 logprobs 存取。差異原因與範圍見第9節④。
 
-為了解決學術界對於 GraphRAG 系統在「問答品質」、「防幻覺能力」與「檢索效率」上的質疑，本專案設計了完備的實證評估與驗證框架，將系統表現量化。
+```python
+class ActiveRetrievalController:
+    def __init__(self, confidence_threshold: float = 0.65):
+        self.threshold = confidence_threshold
 
-#### 【三大核心評估指標 (The RAG Triad)】
-本系統採用 **RAGAS (Retrieval Augmented Generation Assessment)** 評估架構，透過 LLM-as-a-judge 機制對問答流程進行三維度評量：
+    def evaluate_generation_step(
+        self,
+        current_generated_tokens: list[str],
+        token_confidence_scores: list[float]
+    ) -> bool:
+        """
+        決策是否需要暫停生成，向圖譜數據庫發送新檢索請求以補齊資訊。
+        """
+        # 1. 計算當前生成片段的平均 Token 置信度 (平均機率)
+        if not token_confidence_scores:
+            return False
 
-1. **Faithfulness（忠實度 / 幻覺抑制率）**：
-   * **定義**：生成答案中的所有事實陳述，是否皆能從檢索到的 Context（包含圖譜 SVO 與物理 Chunks）中找到依據。
-   * **公式概念**：
-     $$\text{Faithfulness} = \frac{\text{源自 Context 的答案事實數}}{\text{答案中總事實數}}$$
-   * **驗證目的**：評估「防幻覺過濾器」與「自我精煉機制（Self-Refinement）」的有效性。
-2. **Answer Relevance（答案相關性）**：
-   * **定義**：生成答案是否切中用戶問題的核心意圖，無冗餘資訊。
-   * **驗證目的**：評估 `build_query_concepts` 提取關鍵詞的準確度。
-3. **Context Recall（檢索召回率）**：
-   * **定義**：檢索出的 Context 是否包含解答該問題所需的全部關鍵資訊。
-   * **驗證目的**：評估「圖譜門控路由（Concept Gating）」與「1-2 跳 BFS 圖遍歷」是否產生漏檢。
+        avg_confidence = sum(token_confidence_scores) / len(token_confidence_scores)
 
-#### 【消融實驗設計 (Ablation Study Framework)】
-為了驗證本系統「雙層路由」與「符號-物理回溯」的設計優越性，專案建立了以下對比消融實驗：
+        # 2. 判斷置信度是否低於安全閾值（代表模型開始胡言亂語或產生幻覺）
+        if avg_confidence < self.threshold:
+            return True
 
-| 實驗組 | 路由與檢索機制 | 檢索內容 | 自我精煉迴圈 | 評估指標預期表現 |
-| :--- | :--- | :--- | :--- | :--- |
-| **Baseline 1 (純向量)** | 僅向量搜尋 (Cosine Similarity) | 僅原始 Chunks (Top-K) | 關閉 | Context Recall 較低（面對多跳問題時容易遺漏） |
-| **Baseline 2 (純圖譜)** | 概念路由 + BFS 圖遍歷 | 僅 SVO 翻譯句子 | 關閉 | Answer Relevance 高，但 Faithfulness 易因細節丟失而降低 |
-| **本系統 (Hybrid RAG)** | **雙層路由（Concept + BFS）** | **SVO + 物理座標回溯 Chunk** | **開啟 (閾值 0.65)** | **三項指標（Recall、Faithfulness、Relevance）均達到最優** |
+        # 3. 語意觸發：檢查生成的文本中是否出現了未在上下文定義的孤立關鍵實體
+        latest_text = "".join(current_generated_tokens)
+        if self._contains_unreferenced_entities(latest_text):
+            return True
 
-#### 【自我精煉與收斂性驗證】
-* **驗證方法**：於測試集進行 1000 次蒙地卡羅模擬問答，記錄系統在不同閾值下，觸發第 1 輪、第 2 輪、第 3 輪精煉（補充 Chunks）的比例與最終收斂率。
-* **目標**：確保系統在滿足回答精準度的前提下，平均推理輪數接近 1.2 輪，避免無限循環並控制 Token 開銷。
+        return False
 
----
+    def _contains_unreferenced_entities(self, text: str) -> bool:
+        # 使用簡單的正則或 NER 偵測是否有孤立名詞（實際項目中可對接預訓練 NER 模型）
+        return "幻覺邊界實體" in text
+```
 
-## 12. 補充學術文獻與背景知識 (Supplementary Academic References)
+### ⑤ 二階段向量粗篩-精篩檢索引擎 (Two-Stage Retrieval Engine) — ✅ 已落地（2026-07-03，實作與虛擬碼有出入見下）
+利用資料庫內建向量索引進行 C++ 級粗篩，在內存中進行精細重排，避免 memory 瓶頸。
 
-為了加強本專案在學術發表或專利申請時的學術背書，建議參考並引用以下文獻：
-
-* **RAG 系統評估與 RAGAS 框架**：
-  * *Es, S., Shahul, H., Pradeep, A., et al. (2023). "Ragas: Automated Evaluation of Retrieval Augmented Generation."* arXiv:2309.15217.
-  * 奠定了使用 LLM 對 RAG 進行自動化無監督評估的理論基礎，是本系統實證評估的學術引用來源。
-* **多跳推理（Multi-hop Reasoning）基準**：
-  * *Yang, Z., Qi, P., Zhang, S., et al. (2018). "HotpotQA: A Dataset for Diverse, Explainable Multi-hop Question Answering."* EMNLP 2018.
-  * 證實了單純的語意專利/相似度檢索在處理多個關聯實體時的瓶頸，為本系統導入「BFS 圖遍歷」提供了強力的問題背景支撐。
-* **關係圖注意力網絡 (Relational Graph Attention Networks)**：
-  * *Wang, X., Ji, H., Shi, C., et al. (2019). "Heterogeneous Graph Attention Network."* WWW 2019.
-  * *Busbridge, D., Sherburn, G., Cavallo, P., et al. (2019). "Relational Graph Attention Networks."* arXiv:1904.05837.
-  * 提供了節點特徵與關係特徵共同進行 Attention 加權計算的數學理論，支持本系統未來「圖拓撲感知共嵌入空間」的優化設計。
-
----
-
-## 13. 二階段檢索引擎虛擬碼補充 (Two-Stage Retrieval Engine Pseudocode)
-
-> **實際落地**：以下 `TwoStageVectorRetrievalEngine` 虛擬碼已真正落地，實作分散在
-> `repositories/concept_repo.py`（`_vector_candidate_ids()` 做 Stage-1 粗篩，
-> `get_kgs_concepts_for_query()`/`get_public_kgs_concepts_for_query()`/
-> `get_documents_concepts_for_query()` 三個查詢期入口）與
-> `services/concept_engine.py`（`route_kgs()`/`route_documents()` 是 Stage-2 精篩 + fallback 的封裝）。
-> 與下方虛擬碼的差異：① Top-K 粗篩數量改為常數 `CONCEPT_COARSE_TOP_K`（`core/constants.py`，預設 100）
-> 而非寫死；② 向量索引呼叫失敗（索引不存在、Neo4j 版本不支援等）時會自動 fallback 回原本的全表掃描
-> （`get_all_kgs_concepts()` 等），不是假設索引必然可用。已套用到 agent.py/world.py/search.py/
-> classify_service.py 所有查詢期路由路徑。整合測試見 `tests/integration/test_neo4j_integration.py`。
+> **與原虛擬碼的差異**：實際落地**沒有**建立獨立的 `TwoStageVectorRetrievalEngine` class，而是拆成兩個更貼合現有架構的函式：`repositories/concept_repo.py::vector_search_concept_ids()`（Stage-1，純資料庫查詢）與 `services/concept_engine.py::route_via_two_stage()`（協調 Stage-1/Stage-2，透過高階函式 `fetch_candidates` 讓既有的 4 個路由呼叫點各自决定 Stage-2 要抓 KG 概念還是文件概念，避免為每種場景各寫一個 class）與其上層封裝 `route_kgs()`/`route_documents()`。索引名稱也不同：程式碼延用既有的 `concept_q_vector`（非虛擬碼中的 `concept_vector_index`）。詳細落地位置見第9節⑧。
 
 ```python
 class TwoStageVectorRetrievalEngine:
@@ -580,17 +629,79 @@ class TwoStageVectorRetrievalEngine:
 
 ---
 
-## 14. 架構落地變更記錄 (Implementation Changelog)
+## 11. 實證評估與驗證框架 (Empirical Evaluation Framework)
+### (RAG System Evaluation & Empirical Validation)
+
+為了解決學術界對於 GraphRAG 系統在「問答品質」、「防幻覺能力」與「檢索效率」上的質疑，本專案設計了完備的實證評估與驗證框架，將系統表現量化。
+
+#### 【三大核心評估指標 (The RAG Triad)】
+本系統採用 **RAGAS (Retrieval Augmented Generation Assessment)** 評估架構，透過 LLM-as-a-judge 機制對問答流程進行三維度評量：
+
+1. **Faithfulness（忠實度 / 幻覺抑制率）**：
+   * **定義**：生成答案中的所有事實陳述，是否皆能從檢索到的 Context（包含圖譜 SVO 與物理 Chunks）中找到依據。
+   * **公式概念**：
+     $$\text{Faithfulness} = \frac{\text{源自 Context 的答案事實數}}{\text{答案中總事實數}}$$
+   * **驗證目的**：評估「防幻覺過濾器」與「自我精煉機制（Self-Refinement）」的有效性。
+2. **Answer Relevance（答案相關性）**：
+   * **定義**：生成答案是否切中用戶問題的核心意圖，無冗餘資訊。
+   * **驗證目的**：評估 `build_query_concepts` 提取關鍵詞的準確度。
+3. **Context Recall（檢索召回率）**：
+   * **定義**：檢索出的 Context 是否包含解答該問題所需的全部關鍵資訊。
+   * **驗證目的**：評估「圖譜門控路由（Concept Gating）」與「1-2 跳 BFS 圖遍歷」是否產生漏檢。
+
+#### 【消融實驗設計 (Ablation Study Framework)】
+為了驗證本系統「雙層路由」與「符號-物理回溯」的設計優越性，專案建立了以下對比消融實驗：
+
+| 實驗組 | 路由與檢索機制 | 檢索內容 | 自我精煉迴圈 | 評估指標預期表現 |
+| :--- | :--- | :--- | :--- | :--- |
+| **Baseline 1 (純向量)** | 僅向量搜尋 (Cosine Similarity) | 僅原始 Chunks (Top-K) | 關閉 | Context Recall 較低（面對多跳問題時容易遺漏） |
+| **Baseline 2 (純圖譜)** | 概念路由 + BFS 圖遍歷 | 僅 SVO 翻譯句子 | 關閉 | Answer Relevance 高，但 Faithfulness 易因細節丟失而降低 |
+| **本系統 (Hybrid RAG)** | **雙層路由（Concept + BFS）** | **SVO + 物理座標回溯 Chunk** | **開啟 (閾值 0.65)** | **三項指標（Recall、Faithfulness、Relevance）均達到最優** |
+
+#### 【自我精煉與收斂性驗證】
+* **驗證方法**：於測試集進行 1000 次蒙地卡羅模擬問答，記錄系統在不同閾值下，觸發第 1 輪、第 2 輪、第 3 輪精煉（補充 Chunks）的比例與最終收斂率。
+* **目標**：確保系統在滿足回答精準度的前提下，平均推理輪數接近 1.2 輪，避免無限循環並控制 Token 開銷。
+
+---
+
+## 12. 補充學術文獻與背景知識 (Supplementary Academic References)
+
+為了加強本專案在學術發表或專利申請時的學術背書，建議參考並引用以下文獻：
+
+* **RAG 系統評估與 RAGAS 框架**：
+  * *Es, S., Shahul, H., Pradeep, A., et al. (2023). "Ragas: Automated Evaluation of Retrieval Augmented Generation."* arXiv:2309.15217.
+  * 奠定了使用 LLM 對 RAG 進行自動化無監督評估的理論基礎，是本系統實證評估的學術引用來源。
+* **多跳推理（Multi-hop Reasoning）基準**：
+  * *Yang, Z., Qi, P., Zhang, S., et al. (2018). "HotpotQA: A Dataset for Diverse, Explainable Multi-hop Question Answering."* EMNLP 2018.
+  * 證實了單純的語意專利/相似度檢索在處理多個關聯實體時的瓶頸，為本系統導入「BFS 圖遍歷」提供了強力的問題背景支撐。
+* **關係圖注意力網絡 (Relational Graph Attention Networks)**：
+  * *Wang, X., Ji, H., Shi, C., et al. (2019). "Heterogeneous Graph Attention Network."* WWW 2019.
+  * *Busbridge, D., Sherburn, G., Cavallo, P., et al. (2019). "Relational Graph Attention Networks."* arXiv:1904.05837.
+  * 提供了節點特徵與關係特徵共同進行 Attention 加權計算的數學理論，支持本系統未來「圖拓撲感知共嵌入空間」的優化設計。
+
+---
+
+## 13. 架構落地變更記錄 (Implementation Changelog)
 
 本節記錄本文件所述理論方向的實際落地狀態變化，以及過程中新增引用的外部論文/專案，
 避免未來重新稽核時重複評估同樣的問題。**日後只要參考了任何新的外部論文或開源專案
 （無論是落地某個方向、或引用來佐證設計決策），都應在此追加一筆記錄，並同步更新
 對應章節的「學術來源」小節。**
 
-### 2026-07：系統健檢後的落地與評估
+### 2026-07（第一輪）：系統健檢後的落地與評估
 * **✅ 落地**：第9節⑧二階段向量粗篩-精篩（`repositories/concept_repo.py` / `services/concept_engine.py`）。
 * **✅ 落地（簡化版）**：第9節③ Graph-CoT 圖譜鏈式思考（`routers/agent.py`，門檻觸發式加深查詢，不含逐跳 LLM 選路）。
-* **❌ 評估後判定過度工程，暫不做**：第9節①（GNN 共嵌入）、②（動態本體對齊）、④（Active RAG）、⑤（社群摘要檢索）、⑦（對比學習）。
+* **❌ 評估後判定過度工程，暫不做**：第9節②（動態本體對齊）、④（Active RAG）。
 * **❌ 評估後判定有條件保留，暫不做**：第9節⑥（時序知識圖譜）—— 除非使用者實際回報「AI 引用過期資訊」的痛點。
-* 本輪評估未引入本文件既有學術來源之外的新論文/專案，皆沿用第9節原有引用作為評估依據。
-* 對應健檢報告：`docs/SYSTEM_HEALTH_AUDIT.md`；對應程式碼變更：PR `worktree-gap-fixes` 分支（API 認證、上傳防護、Rate limiting、SVO 孤兒節點清理、`_bfs_cache`/`_llm_synonym_cache` LRU 化、federation registry 背景刷新、`ingestion_service.py` 事件迴圈阻塞修復、`docker-compose.yml` healthcheck 等）。
+* 對應健檢報告：`docs/SYSTEM_HEALTH_AUDIT.md`；對應程式碼變更：`worktree-gap-fixes` 分支（API 認證、上傳防護、Rate limiting、SVO 孤兒節點清理、`_bfs_cache` LRU 化、federation registry 背景刷新、事件迴圈阻塞修復、`docker-compose.yml` healthcheck 等）。
+
+### 2026-07（第二輪）：整合 `worktree-shiny-doodling-journal` 分支
+* **背景**：`worktree-gap-fixes` 與 `worktree-shiny-doodling-journal` 是從同一個舊基準點分岔的兩個長期未合併分支，各自獨立評估並落地了第9節的部分項目，兩者對第9節③⑥⑧的落地判斷與/或實作方式互有出入，整合時需逐項核對實際程式碼以決定最終狀態與保留哪個實作。
+* **狀態修正**（相對第一輪記錄）：第9節①（圖拓撲共嵌入）、⑤（社群摘要檢索）、⑦（對比學習）先前皆評估為「過度工程、暫不做」，`shiny-doodling-journal` 分支實際已用低侵入性的方式落地，本輪核對程式碼後改判 **✅ 已落地**：
+  * ①：`repositories/concept_repo.py::_fuse_graph_vector()` 對已有的 `q_vector`（文字向量）與離線腳本 `run_build_graph_embeddings.py`（node2vec）產生的 `q_vector_graph`（圖結構向量）做加權融合，非同步共訓，範圍遠小於原始 GNN 共嵌入設計。
+  * ⑤：`services/community_service.py::get_community_summaries()` 已接入 `routers/agent.py` 的 `_is_global_query()` 判斷式，僅在偵測為全域性問題時才會查詢社群摘要，不影響一般問答路徑。
+  * ⑦：`services/contrastive_training_service.py` 直接用 `sentence-transformers` 既有的 `SentenceTransformerTrainer` + `MultipleNegativesRankingLoss`（in-batch negatives）做離線微調，非自建訓練框架，因此原本「與架構哲學衝突」的疑慮不成立；`run_finetune_embeddings.py` 為低頻執行的離線批次腳本，不影響線上查詢路徑。
+* **兩分支重複實作的取捨**：第9節⑧（二階段檢索）兩分支各自獨立實作，保留 `gap-fixes` 版本的函式命名（`route_kgs()`/`route_documents()`/`route_via_two_stage()`）作為對外介面，但採用 `shiny-doodling-journal` 版本把 Stage-2 過濾參數 `concept_ids` 直接加到既有的 `get_all_kgs_concepts()`/`get_public_kgs_concepts()`/`get_all_documents_concepts()` 而非另開一組平行方法——因為 `shiny` 的圖向量融合 `_fuse_graph_vector()` 剛好也接在這幾個既有方法內，兩者天然相容。`gap-fixes` 原本新增的 `get_kgs_concepts_for_query()`/`get_public_kgs_concepts_for_query()`/`get_documents_concepts_for_query()`/`_vector_candidate_ids()` 與常數 `TWO_STAGE_COARSE_TOP_K` 已移除（改用 `CONCEPT_COARSE_TOP_K`），避免兩套並行的粗篩機制。
+* **確認未變**：第9節③（G-CoT 簡化版）、⑥（時序衰減）在兩分支合併過程中維持第一輪落地狀態不變。
+* 本輪核對程式碼時未引入本文件既有學術來源之外的新論文/專案。
+* 對應程式碼變更：`worktree-shiny-doodling-journal` 分支（`services/community_service.py`、`services/graph_embedding_service.py`、`services/contrastive_training_service.py`、`run_build_communities.py`、`run_build_graph_embeddings.py`、`run_finetune_embeddings.py`、`services/svo_service.py` 時序衰減、`repositories/concept_repo.py` 圖向量融合）。

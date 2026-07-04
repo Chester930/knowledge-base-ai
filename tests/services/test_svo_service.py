@@ -11,14 +11,49 @@ svo_service 純函數測試
 from __future__ import annotations
 import pytest
 
+from datetime import datetime, timedelta, timezone
+
 from services.svo_service import (
     _build_ft_query,
     _filter_hallucinated,
     _parse_svo_json,
     _parse_svo_lines,
     _sentence_chunk,
+    _temporal_decay,
 )
 from models.knowledge_graph import SVOTriple
+
+
+# ── _temporal_decay（第9節⑥時序知識圖譜衰減）───────────────────────────────
+
+class TestTemporalDecay:
+    def test_missing_created_at_no_decay(self):
+        assert _temporal_decay(None) == 1.0
+        assert _temporal_decay("") == 1.0
+
+    def test_unparseable_created_at_no_decay(self):
+        assert _temporal_decay("not-a-date") == 1.0
+
+    def test_just_created_decays_to_near_one(self):
+        now = datetime.now(timezone.utc).isoformat()
+        assert _temporal_decay(now) == pytest.approx(1.0, abs=0.01)
+
+    def test_older_fact_decays_below_one(self):
+        old = (datetime.now(timezone.utc) - timedelta(days=100)).isoformat()
+        result = _temporal_decay(old, rate=0.005)
+        assert 0.0 < result < 1.0
+        assert result == pytest.approx(2.718281828 ** (-0.005 * 100), rel=1e-3)
+
+    def test_more_recent_fact_scores_higher_than_older(self):
+        recent = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
+        old = (datetime.now(timezone.utc) - timedelta(days=500)).isoformat()
+        assert _temporal_decay(recent) > _temporal_decay(old)
+
+    def test_naive_datetime_string_treated_as_utc(self):
+        # Neo4j toString(datetime()) 可能不含時區資訊
+        naive = (datetime.now() - timedelta(days=10)).isoformat()
+        result = _temporal_decay(naive)
+        assert 0.0 < result <= 1.0
 
 
 # ── _build_ft_query ───────────────────────────────────────────────────────────
