@@ -197,6 +197,16 @@ class TestParseSvoLines:
             triples = _parse_svo_lines(raw)
             assert triples[0].rel_type == rel, f"Expected {rel}, got {triples[0].rel_type}"
 
+    def test_null_token_subject_skipped(self):
+        raw = "空白|其他|CREATED_BY|由...提出|楊思枬|人物"
+        triples = _parse_svo_lines(raw)
+        assert len(triples) == 0
+
+    def test_null_token_object_skipped(self):
+        raw = "A|概念|RELATED_TO|相關於|無|概念"
+        triples = _parse_svo_lines(raw)
+        assert len(triples) == 0
+
 
 # ── _parse_svo_json ───────────────────────────────────────────────────────────
 

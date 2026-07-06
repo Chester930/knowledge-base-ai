@@ -1225,6 +1225,10 @@ _VALID_TYPES = {
     "模型", "系統", "人物", "組織", "資料集", "指標", "其他",
 }
 
+# LLM 在「無符合內容」時會依 prompt 指示直接輸出這些字面詞，而非真正省略該行；
+# 若混入 metadata/frontmatter 等非自然語句的片段，容易被誤當成主詞/受詞產生假三元組。
+_NULL_ENTITY_TOKENS = {"空白", "無", "none", "n/a", "null", ""}
+
 _VALID_REL_TYPES = {
     # 層級/組成
     "IS_A", "PART_OF", "CONTAINS", "INSTANCE_OF",
@@ -1377,6 +1381,8 @@ def _parse_svo_lines(raw: str) -> list[SVOTriple]:
         if not s or not v or not o:
             continue
         if len(s) > 50 or len(v) > 20 or len(o) > 50:
+            continue
+        if s.lower() in _NULL_ENTITY_TOKENS or o.lower() in _NULL_ENTITY_TOKENS:
             continue
         key = (s, rel_type, o)   # 用 rel_type 去重（同類別的同主受詞只保留一條）
         if key in seen:
