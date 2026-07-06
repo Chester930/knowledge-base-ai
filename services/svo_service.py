@@ -1232,6 +1232,10 @@ _VALID_TYPES = {
 # 若混入 metadata/frontmatter 等非自然語句的片段，容易被誤當成主詞/受詞產生假三元組。
 _NULL_ENTITY_TOKENS = {"空白", "無", "none", "n/a", "null", ""}
 
+# 同樣的佔位字問題也會出現在動詞欄位：LLM 找不到明確關係時，偶爾會把這類字面值
+# 直接當成動詞輸出，而非省略該行。
+_NULL_VERB_TOKENS = {"無明確關係", "動詞", "無", "none", "n/a", "null", ""}
+
 _VALID_REL_TYPES = {
     # 層級/組成
     "IS_A", "PART_OF", "CONTAINS", "INSTANCE_OF",
@@ -1389,6 +1393,8 @@ def _parse_svo_lines(raw: str) -> list[SVOTriple]:
         if len(s) > 50 or len(v) > 20 or len(o) > 50:
             continue
         if s.lower() in _NULL_ENTITY_TOKENS or o.lower() in _NULL_ENTITY_TOKENS:
+            continue
+        if v.lower() in _NULL_VERB_TOKENS:
             continue
         key = (s, rel_type, o)   # 用 rel_type 去重（同類別的同主受詞只保留一條）
         if key in seen:
