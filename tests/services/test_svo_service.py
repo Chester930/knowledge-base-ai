@@ -193,9 +193,30 @@ class TestParseSvoLines:
         valid_rels = ["IS_A", "PART_OF", "CAUSES", "USES", "REQUIRES",
                       "IMPLEMENTS", "SIMILAR_TO", "DEFINED_AS", "SOLVES"]
         for rel in valid_rels:
-            raw = f"A|概念|{rel}|動詞|B|概念"
+            raw = f"A|概念|{rel}|使用|B|概念"
             triples = _parse_svo_lines(raw)
             assert triples[0].rel_type == rel, f"Expected {rel}, got {triples[0].rel_type}"
+
+    def test_null_token_subject_skipped(self):
+        raw = "空白|其他|CREATED_BY|由...提出|楊思枬|人物"
+        triples = _parse_svo_lines(raw)
+        assert len(triples) == 0
+
+    def test_null_token_object_skipped(self):
+        raw = "A|概念|RELATED_TO|相關於|無|概念"
+        triples = _parse_svo_lines(raw)
+        assert len(triples) == 0
+
+    def test_null_token_verb_skipped(self):
+        raw = "賴士豪|人物|RELATED_TO|無明確關係|事業單位名稱或負責人|概念"
+        triples = _parse_svo_lines(raw)
+        assert len(triples) == 0
+
+    def test_violates_rel_type_accepted(self):
+        raw = "延長工作時間|概念|VIOLATES|違反|勞動基準法第32條|概念"
+        triples = _parse_svo_lines(raw)
+        assert len(triples) == 1
+        assert triples[0].rel_type == "VIOLATES"
 
 
 # ── _parse_svo_json ───────────────────────────────────────────────────────────
