@@ -447,7 +447,9 @@ async def extract_svo_from_text(text: str, model_override: str | None = None) ->
         "歸屬/解決：\n"
         "  CREATED_BY  → 由...提出、由...開發、創建者為\n"
         "  SOLVES      → 解決、處理、應對、克服\n"
-        "  RELATED_TO  → 【絕對最後手段】以上 29 種皆完全不適用時才能用，目標使用率 < 5%\n\n"
+        "規範/合規：\n"
+        "  VIOLATES    → 違反、觸犯、不符合、逾越規定\n"
+        "  RELATED_TO  → 【絕對最後手段】以上 30 種皆完全不適用時才能用，目標使用率 < 5%\n\n"
         "規則：\n"
         "- 主詞與受詞為名詞或名詞短語（2-15字），去除冗餘後綴（如「XX技術」→「XX」、「XX方法」→「XX」）\n"
         "- 動詞欄位盡量引用原文中的實際措辭（2-8字），忠實反映原文用語，不要自行概括替換\n"
@@ -470,7 +472,8 @@ async def extract_svo_from_text(text: str, model_override: str | None = None) ->
         "反向傳播|算法|PRECEDES|先於|權重更新|方法\n"
         "Tokenizer|工具|TRANSFORMS|將文字轉換為|Token|資料集\n"
         "BERT|模型|CREATED_BY|由 Google 提出|Google|組織\n"
-        "Dropout|技術|PREVENTS|防止|過擬合|概念\n\n"
+        "Dropout|技術|PREVENTS|防止|過擬合|概念\n"
+        "延長工作時間|概念|VIOLATES|違反|勞動基準法第32條|概念\n\n"
         f"文字：\n{text}"
     )
     import json as _json
@@ -1245,7 +1248,9 @@ _VALID_REL_TYPES = {
     # 資料流
     "INPUTS", "TRANSFORMS",
     # 歸屬/解決
-    "CREATED_BY", "SOLVES", "RELATED_TO",
+    "CREATED_BY", "SOLVES",
+    # 規範/合規
+    "VIOLATES", "RELATED_TO",
 }
 
 # Cypher relationship type pattern（供 MATCH 使用）
@@ -1257,7 +1262,7 @@ _ALL_REL_PATTERN = (
     "DEFINED_AS|HAS_PROPERTY|MEASURED_BY|APPLIES_TO|"
     "PRECEDES|FOLLOWS|CO_OCCURS|"
     "INPUTS|TRANSFORMS|"
-    "CREATED_BY|SOLVES|RELATED_TO"
+    "CREATED_BY|SOLVES|VIOLATES|RELATED_TO"
 )
 
 # 關係類別的中文顯示名稱（供 UI 顯示）
@@ -1291,6 +1296,7 @@ REL_TYPE_LABELS = {
     "TRANSFORMS":   "轉換",
     "CREATED_BY":   "歸屬",
     "SOLVES":       "解決",
+    "VIOLATES":     "違反",
     "RELATED_TO":   "相關",
 }
 

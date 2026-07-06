@@ -32,14 +32,14 @@ _VALID_REL_TYPES = {
     "DEFINED_AS", "HAS_PROPERTY", "MEASURED_BY", "APPLIES_TO",
     "PRECEDES", "FOLLOWS", "CO_OCCURS",
     "INPUTS", "TRANSFORMS",
-    "CREATED_BY", "SOLVES", "RELATED_TO",
+    "CREATED_BY", "SOLVES", "VIOLATES", "RELATED_TO",
 }
 
 _RECLASSIFY_PROMPT = """\
 你是知識圖譜關係重分類器。以下三元組目前標記為 RELATED_TO（語意太模糊），
 請依據主詞、動詞、受詞的語意，為每條選擇更精確的關係類型。
 
-【可用類型（29種，不含 RELATED_TO）】
+【可用類型（30種，不含 RELATED_TO）】
 層級/組成: IS_A, PART_OF, CONTAINS, INSTANCE_OF
 因果/效應: CAUSES, PREVENTS, ENABLES, IMPROVES, INHIBITS
 功能/操作: USES, REQUIRES, PRODUCES, IMPLEMENTS, REPLACES, EXTENDS
@@ -48,11 +48,12 @@ _RECLASSIFY_PROMPT = """\
 時序:       PRECEDES, FOLLOWS, CO_OCCURS
 資料流:     INPUTS, TRANSFORMS
 歸屬/解決: CREATED_BY, SOLVES
+規範/合規: VIOLATES（違反、觸犯、不符合規定 —— 優先於 PREVENTS/INHIBITS/IMPROVES 使用）
 
 【規則】
 - 若有更精確類型，務必選用
 - 若真的無法確定比 RELATED_TO 更好的分類，回傳 RELATED_TO 維持原樣
-- 只能從上方 30 種選一，不可自造
+- 只能從上方 31 種選一，不可自造
 
 【三元組列表】
 {triples_text}
