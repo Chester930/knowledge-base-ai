@@ -278,14 +278,253 @@ async def generate_kg_guided_insights(kg_id: UUID) -> dict:
 
 ---
 
+### 方案五：跨段落四元組上下文合成器 (Cross-Chunk Context Synthesizer)
+*   **痛點**：在多跳推理場景下，當檢索到一條四元組或更長的邏輯鏈（如 `A -> B -> C -> D`）時，這些關聯實體可能散落在多個不同的原始 Chunks（例如段落 1、段落 2 與段落 3）中。如果將這些 Chunks 原封不動地全部塞進 Prompt Context，會帶入 80% 的背景雜訊 Token，導致 LLM 注意力分散且 Prefill 運算延遲大幅增加。
+*   **優化方案**：利用 Neo4j 提取出該多跳路徑（Path）對應的 `chunk_ids` 後，只拉取對應的原始 Chunks，隨後調用本地輕量 LLM 進行「定向句子提取與邏輯重建」，重構出一段小於 500 字的 **「合成上下文 (Synthetic Context)」** 餵給最終的 Generator。這既解決了跨段落多跳 RAG 的 Token 膨脹，也消除了無關雜訊干擾。
+
+#### 跨段落上下文合成程式碼藍圖（`services/context_synthesizer.py`）：
+```python
+import os
+from uuid import UUID
+from typing import List
+from core.database import get_driver
+from core.providers.factory import get_llm_provider
+from services.chunk_store import get_chunk_store
+
+class CrossChunkContextSynthesizer:
+    def __init__(self):
+        self.driver = get_driver()
+        self.chunk_store = get_chunk_store()
+        self.llm = get_llm_provider()
+
+    async def query_and_synthesize(self, kg_id: UUID, seed_name: str, query: str) -> str:
+        """
+        1. 在 Neo4j 中檢索跨段落的四元組/多跳路徑
+        2. 批次拉取涉及的原始 Chunks
+        3. 用 LLM 重構並合成一個精簡、無雜訊的上下文段落
+        """
+        # 搜尋長度為 3 邊（4節點）的四元組路徑，並撈出邊上關聯的 chunk_ids
+        cypher_query = """
+        MATCH path = (a:Entity)-[r1]->(b:Entity)-[r2]->(c:Entity)-[r3]->(d:Entity)
+        WHERE (r1.kg_id = $kg_id AND r2.kg_id = $kg_id AND r3.kg_id = $kg_id)
+          AND (a.name = $seed OR b.name = $seed)
+        RETURN 
+          [n in nodes(path) | n.name] as entity_chain,
+          [r in relationships(path) | {
+              source: startNode(r).name, 
+              relation: type(r), 
+              target: endNode(r).name, 
+              chunk_id: r.source_chunk_id
+          }] as relation_chain
+        LIMIT 5
+        """
+        
+        async with self.driver.session() as session:
+            result = await session.run(cypher_query, kg_id=str(kg_id), seed=seed_name)
+            records = await result.data()
+            
+        if not records:
+            return ""  # 未找到四元組關係鏈，Fallback 回標準三元組與向量檢索
+            
+        # 彙整所有涉及的關係鏈與獨一無二的 chunk_ids
+        target_chunk_ids = set()
+        logic_chains_str = []
+        
+        for record in records:
+            chain = record["relation_chain"]
+            chain_desc = " -> ".join([f"({r['source']})-[{r['relation']}]->({r['target']})" for r in chain])
+            logic_chains_str.append(chain_desc)
+            
+            for rel in chain:
+                if rel["chunk_id"]:
+                    target_chunk_ids.add(rel["chunk_id"])
+                    
+        if not target_chunk_ids:
+            return ""
+
+        # 從 ChunkStore 批次拉取這些原始 Chunks (I/O 速度極快)
+        chunks_data = []
+        for cid in target_chunk_ids:
+            chunk = await self.chunk_store.read_chunk(cid)
+            if chunk:
+                chunks_data.append(chunk.text)
+                
+        # 呼叫 LLM 進行定向上下文合成
+        synthetic_context = await self._synthesize_via_llm(
+            query=query,
+            logic_chains=logic_chains_str,
+            raw_chunks=chunks_data
+        )
+        
+        return synthetic_context
+
+    async def _synthesize_via_llm(self, query: str, logic_chains: List[str], raw_chunks: List[str]) -> str:
+        raw_documents_context = "\n\n".join([f"[段落 {i+1}]: {text}" for i, text in enumerate(raw_chunks)])
+        chains_context = "\n".join([f"- {chain}" for chain in logic_chains])
+        
+        prompt = f"""
+你是一個資訊提煉專家。你的任務是根據「邏輯鏈條」，從多個「原始段落」中只提取出與該邏輯鏈直接相關的關鍵事實，並融合成一段語意連貫、無雜訊的「合成上下文」，用以回答用戶的問題。
+
+### 用戶問題：
+{query}
+
+### 跨段落的邏輯鏈條：
+{chains_context}
+
+### 原始段落內容：
+{raw_documents_context}
+
+### 寫作要求：
+1. 必須將多個原始段落中的雜訊（無關的背景描述、過渡句）徹底丟棄。
+2. 僅保留能夠清楚、完整解釋上述「邏輯鏈條」如何發生的句子。
+3. 將提取出的句子整合成一段通順的繁體中文段落，字數限制在 400 字以內。
+4. 嚴禁編造任何原始段落中不存在的細節。
+
+合成上下文：
+"""
+        response = await self.llm.generate(prompt)
+        return response.strip()
+```
+
+#### 技術與學術支撐 (SOTA Baseline)
+*   **GRAG 論文 (Graph Retrieval-Augmented Generation)** [Hu et al., NAACL 2025] (引用：100+)：提出了「分治子圖檢索與大語言模型對齊（Divide-and-Conquer Subgraph-to-Text）」的推理機制，為多跳跨段落 Context 重建提供了強大的學術論證。
+*   **Awesome-Language-Model-on-Graphs** (GitHub 星星：4,000+)：彙整了當前將 LLM 與圖結構（Subgraphs）對齊、語意文本合成（Textual Generation on Graphs）的頂級開源實現與框架。
+
+#### 技術與學術支撐 (SOTA Baseline)
+*   **GRAG 論文 (Graph Retrieval-Augmented Generation)** [Hu et al., NAACL 2025] (引用：100+)：提出了「分治子圖檢索與大語言模型對齊（Divide-and-Conquer Subgraph-to-Text）」的推理機制，為多跳跨段落 Context 重建提供了強大的學術論證。
+*   **Awesome-Language-Model-on-Graphs** (GitHub 星星：4,000+)：彙整了當前將 LLM 與圖結構（Subgraphs）對齊、語意文本合成（Textual Generation on Graphs）的頂級開源實現與框架。
+
+---
+
+### 方案六：圖譜鏈式思考尋路代理人 (Think-on-Graph / ToG Agent)
+*   **痛點**：預先設定的 1-2 跳 BFS 屬於「被動式尋路」，如果推理路徑較長，BFS 會因為指數級的扇出而撈回海量雜訊。死板的 Cypher 無法因應複雜問題進行動態寻路。
+*   **優化方案**：實作 **「ToG (Think-on-Graph) 尋路機制」**。將 LLM 作為 Agent，在圖譜中進行動態深度尋路。LLM 每次獲得當前節點的一跳鄰居，自主決策「下一個最值得探索的節點是哪一個」，沿著邏輯鏈條逐步前行，直到收集到足夠的事實。
+
+#### 圖譜動態尋路代理人代碼藍圖：
+```python
+# 建議新增為 services/tog_agent.py
+from typing import List, Dict
+from core.database import get_driver
+from core.providers.factory import get_llm_provider
+
+class ThinkOnGraphAgent:
+    def __init__(self):
+        self.driver = get_driver()
+        self.llm = get_llm_provider()
+
+    async def dynamic_walk(self, kg_id: str, start_entity: str, query: str, max_steps: int = 3) -> List[Dict]:
+        """
+        讓 LLM 作為尋路 Agent，動態決定每一跳的目標
+        """
+        current_node = start_entity
+        collected_facts = []
+        visited = {start_entity}
+
+        for step in range(max_steps):
+            # 1. 撈出當前節點的一跳鄰居
+            neighbors = await self._get_one_hop_neighbors(kg_id, current_node)
+            if not neighbors:
+                break
+                
+            # 2. 構建決策 Prompt，讓 LLM 決定下一個目標
+            decision = await self._decide_next_node(query, current_node, neighbors, visited)
+            
+            # 記錄被選中的事實邊
+            collected_facts.append({
+                "subject": current_node,
+                "relation": decision["relation"],
+                "object": decision["next_node"]
+            })
+            
+            # 更新節點與訪問記錄
+            current_node = decision["next_node"]
+            visited.add(current_node)
+            
+            if decision.get("is_satisfied", False):
+                break
+                
+        return collected_facts
+
+    async def _get_one_hop_neighbors(self, kg_id: str, node_name: str) -> List[Dict]:
+        cypher = """
+        MATCH (s:Entity)-[r]->(o:Entity)
+        WHERE r.kg_id = $kg_id AND s.name = $node
+        RETURN o.name AS neighbor, type(r) AS relation
+        """
+        async with self.driver.session() as session:
+            res = await session.run(cypher, kg_id=kg_id, node=node_name)
+            return await res.data()
+
+    async def _decide_next_node(self, query: str, current: str, neighbors: List[Dict], visited: set) -> Dict:
+        # 由 LLM 判斷哪一個鄰居最有利於回答用戶問題，輸出 JSON
+        # 格式：{"next_node": "目標實體", "relation": "關係邊", "is_satisfied": true/false}
+        pass
+```
+
+#### 技術與學術支撐 (SOTA Baseline)
+*   **ToG 論文 (Think-on-Graph: Deep and Responsible Reasoning on KGs)** [Sun et al., 2023] (引用：150+)：首創將 LLM 當作 KG 尋路代理人的框架，證明了鏈式思考（Chain-of-Thought）與離散圖譜尋路融合的優越性。
+
+---
+
+### 方案七：階層式社群摘要全局檢索 (Hierarchical Community Summary RAG)
+*   **痛點**：圖譜的 BFS 檢索屬於「局部檢索 (Local Query)」，只能回答特定節點的細節。如果用戶問全局性問題（如「整份文件庫反映出的三大違規趨勢是什麼？」），傳統 RAG 與 BFS 將徹底失效。
+*   **優化方案**：在建庫後，運行 Louvain 分群將知識圖譜劃分為多個不同尺寸的社群。非同步調用 LLM 為每個社群的實體與關係撰寫「社群摘要 (Community Summary)」並寫入 Neo4j。全局問答時，直接比對並融合成員社群的摘要來回答，避開對全量原始 Chunks 的掃描。
+
+#### 社群摘要建構與檢索代碼藍圖：
+```python
+# 建議寫在 services/community_service.py 內
+from uuid import UUID
+from core.database import get_driver
+from core.providers.factory import get_llm_provider
+
+class CommunitySummaryRAG:
+    def __init__(self):
+        self.driver = get_driver()
+        self.llm = get_llm_provider()
+
+    async def build_community_summaries(self, kg_id: UUID):
+        """
+        為知識庫的所有 Louvain 社群生成摘要並寫入 Neo4j
+        """
+        # 1. 獲取所有社群
+        # 2. 針對每個社群的 (entities, relationships) 調用 LLM 生成總結
+        # 3. 執行 Cypher 將總結寫入 (:Community {id: cid, summary: $summary}) 節點上
+        pass
+
+    async def global_query(self, kg_id: UUID, query: str) -> str:
+        """
+        全局檢索：搜尋最相關的數個社群摘要，融合成最終回答
+        """
+        # 1. 向量檢索定位最相關的數個 Community 節點
+        cypher = """
+        MATCH (c:Community)
+        WHERE c.kg_id = $kg_id
+        RETURN c.id AS id, c.summary AS summary
+        LIMIT 5
+        """
+        async with self.driver.session() as session:
+            res = await session.run(cypher, kg_id=str(kg_id))
+            summaries = [r["summary"] for r in await res.data()]
+            
+        # 2. 合併摘要送給 LLM 生成回答
+        prompt = f"問題：{query}\n\n以下是相關概念社群的摘要：\n" + "\n\n".join(summaries)
+        response = await self.llm.generate(prompt)
+        return response
+```
+
+#### 技術與學術支撐 (SOTA Baseline)
+*   **Microsoft GraphRAG 論文 (From Local to Global)** [Edge et al., Microsoft 2024] (引用：100+)：微軟 GraphRAG 官方論文。該架構完全基於 Hierarchical Community Summary RAG 設計，是用於解決全局查詢（Global Query）的開創性方案。
+
+---
+
 ## 三、 超越路徑的實施優先級 (Implementation Roadmap)
 
 為了穩步落地超越方案，建議分為三階段實施：
 
 ```
-【第一階段：高優先級】 ──► 【第二階段：中優先級】 ──► 【第三階段：體驗優化】
-  非同步雙軌建圖 (方案一)     多模態 Layout 解析 (方案二)    社群 FAQ 導讀生成 (方案四)
-  向量引導圖剪枝 (方案三)     (需要引入 VLM 模型)           (提升前端引導體驗)
+【第一階段：高優先級】 ──► 【第二階段：中優先級】 ──► 【第三階段：全局與推理】
+  非同步雙軌建圖 (方案一)     多模態 Layout 解析 (方案二)    社群全局摘要 (方案七)
+  向量引導圖剪枝 (方案三)     跨段落四元組合成 (方案五)       ToG 尋路代理 (方案六)
 ```
 
 這套演進架構能讓你的智慧知識庫在**保有 100% 本地隱私與可解釋性**的同時，具備**媲美 NotebookLM 的秒級建庫速度與多模態解析能力**，真正實現完全超越。
