@@ -467,8 +467,7 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
   * 3 處 `query_svo_facts()` 的 Cypher 分支與 2 處 `query_svo_facts_with_provenance()` 分支皆已加上 `toString(r.created_at) AS created_at`，並在 Python 端用 `_temporal_decay` 重新排序候選邊（Cypher 端 `LIMIT` 仍以 `confidence` 截斷候選集，僅重排取回後的順序，不影響何者被納入候選）。
   * 測試：`tests/services/test_svo_service.py::TestTemporalDecay`（缺失/無法解析回傳1.0、新鮮事實≈1.0、較舊事實衰減、新舊事實相對排序、無時區字串容錯）。
 * **學術來源**：
-  * Trivedi, R., Dai, H., Wang, Y., & Song, L. (2017). *"Know-Evolve: Deep Temporal Reasoning for Dynamic Knowledge Graphs."* **ICML 2017**。（2026-07-08 修正：原文件標題與會議皆誤植——正確標題為「Know-Evolve」，正確會議為 ICML 而非 EMNLP，作者陣容經查證屬實。）
-  * Goel, R., et al. (2020). *"Diachronic Embedding for Temporal Knowledge Graph Completion."* AAAI 2020.
+  * Goel, R., et al. (2020). *"Diachronic Embedding for Temporal Knowledge Graph Completion."* AAAI 2020.（2026-07-08 第十六輪：本節原並列引用 Trivedi et al. (2017) "Know-Evolve"，但兩篇皆僅作為「時序知識圖譜」的同質背景理論引用，實際實作（`_temporal_decay()` 指數衰減）並未真正採用任一篇的時序嵌入方法，屬無獨立技術貢獻的重複引用，已依引用次數（583 > 370）保留本篇、移除 Know-Evolve，詳見 `docs/報告/02_參考文獻獨立查核報告.md` 第九節。）
 
 ### ⑦ 對比自我監督概念學習 (Contrastive Concept Learning) — ✅ 已落地（離線訓練管線，範圍遠小於原始評估時的擔憂，見下）
 
@@ -480,8 +479,7 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
   * `run_finetune_embeddings.py`：離線批次腳本，讀取正樣本對、呼叫 `SentenceTransformerTrainer` 微調 `local_embedding_model`，屬於一次性/低頻執行的訓練任務，不常駐、不影響線上查詢路徑。
 * **仍然成立的風險提醒**：`compute_match_score` 的路由準確度目前沒有被驗證為現有問題（不像⑧的 O(N) 效能瓶頸是已明確指出的真實缺陷），且微調若樣本品質不佳，理論上仍有讓 embedding 品質變差（過度貼合訓練樣本、犧牲泛化能力）的風險，建議先小規模試跑並比對微調前後的路由準確度再決定是否納入預設流程。
 * **學術來源**：
-  * Chen, T., et al. (2020). *"A Simple Framework for Contrastive Learning of Visual Representations."* ICML 2020. (SimCLR 對比學習架構)
-  * You, Y., et al. (2020). *"Graph Contrastive Learning with Augmentations."* NeurIPS 2020. (GCL 圖對比學習)
+  * Chen, T., et al. (2020). *"A Simple Framework for Contrastive Learning of Visual Representations."* ICML 2020. (SimCLR 對比學習架構；`services/contrastive_training_service.py` 實際採用的 `MultipleNegativesRankingLoss` 即 SimCLR 式 in-batch negatives 的標準實作)（2026-07-08 第十六輪：本節原並列引用 You et al. (2020) "Graph Contrastive Learning with Augmentations"，但實作並未採用 GraphCL 的圖結構增強手法，兩篇在本節中屬同質背景引用、無獨立技術貢獻，已依引用次數（22,211 > 865）保留 SimCLR、移除 GraphCL，詳見 `docs/報告/02_參考文獻獨立查核報告.md` 第九節。）
 
 ### ⑧ 二階段向量粗篩-精篩架構 (Two-Stage Coarse-to-Fine Retrieval) — ✅ 已落地（2026-07-03）
 
@@ -849,8 +847,7 @@ class TwoStageVectorRetrievalEngine:
   * *Yang, Z., Qi, P., Zhang, S., et al. (2018). "HotpotQA: A Dataset for Diverse, Explainable Multi-hop Question Answering."* EMNLP 2018.
   * 證實了單純的語意專利/相似度檢索在處理多個關聯實體時的瓶頸，為本系統導入「BFS 圖遍歷」提供了強力的問題背景支撐。
 * **關係圖注意力網絡 (Relational Graph Attention Networks)**：
-  * *Wang, X., Ji, H., Shi, C., et al. (2019). "Heterogeneous Graph Attention Network."* WWW 2019.
-  * *Busbridge, D., Sherburn, G., Cavallo, P., & Hammerla, N. Y. (2019). "Relational Graph Attention Networks."* arXiv:1904.05811.（2026-07-08 修正：原文件 arXiv ID 尾數誤植為 05837，正確 ID 為 05811。）
+  * *Wang, X., Ji, H., Shi, C., et al. (2019). "Heterogeneous Graph Attention Network."* WWW 2019.（2026-07-08 第十六輪：本節原並列引用 Busbridge et al. (2019) "Relational Graph Attention Networks"，但兩篇皆僅作為「節點與關係特徵共同 Attention 加權」的同質背景理論引用，無各自不可取代的技術重點，且 Busbridge et al. 論文本身結論為負面結果（"performs worse than anticipated"）；已依引用次數（2,255 > 152）保留 HGAT、移除 RGAT，詳見 `docs/報告/02_參考文獻獨立查核報告.md` 第九節。）
   * 提供了節點特徵與關係特徵共同進行 Attention 加權計算的數學理論，支持本系統未來「圖拓撲感知共嵌入空間」的優化設計。
 
 ---
@@ -1074,3 +1071,18 @@ class TwoStageVectorRetrievalEngine:
 * **✅ 同步更新**：第 12.1 節可信度總表移除 RouteRAG 範例，目前全文僅 Graph-CoT 一篇引用次數 <100 但予以保留（理由不變：已落地功能的唯一理論依據）。
 * 本輪未引入新論文，純移除低品質引用，未修改任何程式碼。
 * 對應程式碼：異動範圍：`docs/THEORETICAL_ARCHITECTURE.md` 第 9、12.1 節；`docs/報告/02_參考文獻獨立查核報告.md` 新增第八節記錄本輪決策。
+
+### 2026-07-08（第十六輪）：合併內容相似、無獨立技術貢獻的重複引用
+
+* **背景**：使用者要求「如果有很相似內容的論文，意義也類似，沒有關鍵技術，保留最多引用的即可」。逐組檢視全文並列引用的文獻對，區分「表面相似但有刻意技術對比用意」（應保留兩篇）與「純粹同質背景引用、無獨立技術貢獻」（應合併只留一篇）兩種情況，經使用者確認後執行。
+* **✅ 合併 3 組重複引用（保留引用次數較高者）**：
+  1. 第 12 節「關係圖注意力網絡」：移除 Busbridge et al. (2019) RGAT（152 次），保留 Wang et al. (2019) HGAT（2,255 次）——兩篇皆僅同質背景引用「節點與關係特徵共同 Attention」的概念，且 RGAT 論文本身結論為負面結果。
+  2. 第 9 節⑦「對比自我監督概念學習」：移除 You et al. (2020) GraphCL（865 次），保留 Chen et al. (2020) SimCLR（22,211 次）——實際實作（`MultipleNegativesRankingLoss`）是 SimCLR 式 in-batch negatives 的標準實作，並未採用 GraphCL 的圖結構增強手法。
+  3. 第 9 節⑥「時序知識圖譜」：移除 Trivedi et al. (2017) Know-Evolve（370 次），保留 Goel et al. (2020) Diachronic Embedding（583 次）——兩篇皆為同質背景引用，實際實作（`_temporal_decay()` 指數衰減）未採用任一篇的時序嵌入方法。
+* **⚠️ 判斷為不應合併的 3 組**（表面相似但服務於刻意的技術對比論證，各自不可取代）：
+  1. node2vec（實際採用）vs GraphSAGE（明確捨棄的替代方案，第9節①用兩篇對比說明 transductive vs inductive 的技術取捨）。
+  2. Shvaiko & Euzenat 本體對齊綜述 vs Faria et al. AgreementMakerLight（第9節②，前者是背景綜述，後者是被評估後放棄的具體工具，角色不同）。
+  3. Blondel et al. Louvain（實際採用）vs Traag et al. Leiden（第9節①⑤，明確標註的未來升級方向，是 Louvain 已知缺陷的具體技術改進，非同義重複）。
+* **✅ 同步更新**：第 12.1 節可信度總表與相關段落已同步；三個移除的引用皆保留完整修訂記錄於原文位置（而非直接刪除無痕跡），標註移除理由與保留對照文獻。
+* 本輪為引用去重，未引入新論文，未修改任何程式碼。
+* 對應程式碼：異動範圍：`docs/THEORETICAL_ARCHITECTURE.md` 第 9、12 節；`docs/報告/02_參考文獻獨立查核報告.md` 新增第九節記錄本輪去重決策與判斷標準。
