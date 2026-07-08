@@ -133,6 +133,7 @@ _set_doc_svo_processed(doc_id)
 ```
 
 BFS 查詢使用 OR pattern：
+
 ```cypher
 MATCH (seed)-[:IS_A|PART_OF|CONTAINS|...|RELATED_TO*1..2]-(neighbor)
 ```
@@ -163,6 +164,7 @@ kgspatiali0b46abc6 資料庫
 ### Community 版 Fallback
 
 若 Neo4j 不支援多資料庫，自動 fallback：
+
 - 所有 Entity 存主資料庫
 - 以 `{kg_id: $kg_id}` 屬性區隔
 - 功能不受影響，但效能較低
