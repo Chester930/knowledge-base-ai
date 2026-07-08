@@ -330,8 +330,8 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
 | :--- | :--- | :--- | :--- |
 | [zjunlp/WKM](https://github.com/zjunlp/WKM) <br>*(World Knowledge Model)* | ★167，最後活動 2024-12 | 浙江大學 NLP 團隊開發，為 AI Agent 注入先驗的物理和常識狀態，降低規劃幻覺。 | 本系統已對接 `claude-desktop`（獨立的外部伴侶應用，不在本 repo 內，於本機另以 `claude-desktop-frontend-dev`/`claude-desktop-backend-dev` 容器執行）作為 Agent 的外部大腦。2026-07-07 稽核時確認：本文件先前的 `package.json` file:// 連結指向的是舊機器路徑（`C:/Users/mycena/...`），該檔案在本專案目錄下實際不存在，已移除失效連結，僅保留文字敘述。 |
 | [King-s-Knowledge-Graph-Lab/ProVe](https://github.com/King-s-Knowledge-Graph-Lab/ProVe) | ★11，最後活動 2026-05（持續維護中） | 利用 LLM 對照網頁參考資料，校驗 Wikidata 中的三元組事實（Fact Verification）。 | 本系統實作了 **「事實溯源 (Provenance)」** 路由，與 ProVe 雷同，且加入了**「防幻覺過濾器」**進行實體原文存在性校驗。⚠️ **星數偏低（僅 11），可信度來源是 King's College London 學術實驗室背書，而非社群熱度**——引用時應明確標註是「學術機構的研究產出」而非「廣受採用的開源工具」，兩者是不同層級的證據力，不宜混為一談。 |
-| [pat-jj/KG-FIT](https://github.com/pat-jj/KG-FIT) | ★131，最後活動 2025-05 | 針對開放世界知識（Open-World）進行圖譜的微調與補全，解決新實體對齊問題。 | 本系統在 `services/entity_alignment.py` 中實作了**同義詞展開與實體對齊**，在不微調模型的情況下完成開放世界實體融合。 |
-| [microsoft/graphrag](https://github.com/microsoft/graphrag) | ★34,244，最後活動 2026-06（活躍） | 微軟官方 GraphRAG 實作，用 Leiden 演算法對知識圖譜做階層式社群偵測，為每個社群生成 LLM 摘要，支援 Global Query（全域性宏觀問答）。 | 對應本文件第9節⑤「多層次社群摘要檢索」——**已於 2026-07-03 落地**（`services/community_service.py`），但用 `networkx` 內建 Louvain 取代 Leiden，且未做階層式多層分群，差異與原因見第9節⑤說明。本表中星數最高、最無爭議的旗艦級對照對象。 |
+| [pat-jj/KG-FIT](https://github.com/pat-jj/KG-FIT) | ★132（2026-07-08 重新查核，原131），最後活動 2025-05 | 針對開放世界知識（Open-World）進行圖譜的微調與補全，解決新實體對齊問題。 | 本系統在 `services/entity_alignment.py` 中實作了**同義詞展開與實體對齊**，在不微調模型的情況下完成開放世界實體融合。 |
+| [microsoft/graphrag](https://github.com/microsoft/graphrag) | ★34,251（2026-07-08 重新查核，原34,244），最後活動 2026-06（活躍） | 微軟官方 GraphRAG 實作，用 Leiden 演算法對知識圖譜做階層式社群偵測，為每個社群生成 LLM 摘要，支援 Global Query（全域性宏觀問答）。 | 對應本文件第9節⑤「多層次社群摘要檢索」——**已於 2026-07-03 落地**（`services/community_service.py`），但用 `networkx` 內建 Louvain 取代 Leiden，且未做階層式多層分群，差異與原因見第9節⑤說明。本表中星數最高、最無爭議的旗艦級對照對象。 |
 | [neo4j-contrib/ms-graphrag-neo4j](https://github.com/neo4j-contrib/ms-graphrag-neo4j) | ★88，最後活動 2025-10 | 微軟 GraphRAG 與 Neo4j 的官方整合套件，提供 Leiden 社群偵測直接寫入 Neo4j 圖資料庫的參考實作。 | 若未來要將 Louvain 升級為 Leiden，此專案是最低摩擦力的參考實作（技術棧同為 Neo4j）。⚠️ **星數不高（88），但屬於 Neo4j 官方組織（`neo4j-contrib`）帳號下的專案，可信度來源是廠商官方背書而非社群熱度**，與 ProVe 同理不應單純以星數評價。 |
 | [PathRAG (arXiv:2502.14902)](https://arxiv.org/pdf/2502.14902) | — | 用「關鍵關係路徑剪枝」取代 GraphRAG 的社群式檢索與 LightRAG 的鄰居全取，降噪並減少 Token 消耗。 | 本系統目前的圖譜引導重排（`_pick_relevant_chunks`）仍是「BFS 全部取回 + 分數加權」，PathRAG 的路徑剪枝概念可用於在 BFS 命中的 SVO 子圖過大時先做路徑級篩選，降低送入 LLM 的 Context 噪音。 |
 | [MoG: Mixture of Experts for Graph-based RAG (arXiv:2605.31010)](https://arxiv.org/pdf/2605.31010) | — | 提出「Hub Graph（常駐、跨查詢共用的核心知識）+ 稀疏激活的 Expert Graph」雙層結構，比單純 Top-K 選圖更細緻。 | 與本系統的 Graph-MoE 路由（第2節）高度同源，但本系統目前**沒有 Hub Graph 概念**——跨領域查詢若所有 KG 的 `Score_kg` 都低於 `KG_ROUTE_THRESHOLD` 就會 0 個專家被激活。引入 Hub Graph 可作為 fallback，避免路由「全滅」的邊界情況。 |
@@ -859,6 +859,21 @@ class TwoStageVectorRetrievalEngine:
 
 ---
 
+## 12.1 學術引用可信度總表（被引用次數，2026-07-08 查核）
+
+比照第 7 節 GitHub 專案已使用的「星數」可信度指標，本節補上對應的學術指標——**被引用次數（Citation Count）**，讓讀者能區分全文引用的 38 篇文獻中，哪些是奠基性經典、哪些是已站穩腳步的近期工作、哪些是太新尚未累積引用的前沿論文。完整查詢方法、資料品質限制（Semantic Scholar API 速率限制、跨資料庫統計口徑差異）與逐篇明細，見 `docs/報告/02_參考文獻獨立查核報告.md` 第六節。此處僅列摘要分級，數字為近似值，非精確即時數字。
+
+| 分級 | 定義 | 代表文獻 |
+|---|---|---|
+| 奠基性經典 | >5,000 次引用 | Attention Is All You Need (~160,000+)、RAG (~7,453)、GraphSAGE (27,921)、SimCLR (22,211)、node2vec (~11,400+)、Louvain (~11,000-20,000+) |
+| 已站穩腳步 | 500-5,000 次引用 | Sparsely-Gated MoE、BM25 and Beyond (4,481)、Leiden (4,102)、Epidemic Algorithms (2,553)、Self-Refine (~2,548)、Microsoft GraphRAG (~902)、FedX (501) 等 |
+| 新興但已有迴響 | 50-500 次引用 | AgreementMakerLight (468)、FLARE (341)、Know-Evolve (370)、Self-RAG（估計偏高）、Ragas (98) 等 |
+| 太新尚未累積 | <50 次或查無數字，多為 2023 年後論文 | Graph-CoT (30，可能低估)、第 9 節③④⑧引用的 2025-2026 年 arXiv 前沿論文（PathRAG、MoG、GraphRAG-Router、RouteRAG、Neurosymbolic Retrievers 皆屬此類） |
+
+**重要提醒（避免誤用這份表格）**：「太新尚未累積」不等於「品質可疑」——這些論文多半是第 9 節「架構前瞻與未來優化方向」引用的 2025-2026 年最新工作，本來就需要時間累積引用，本文件將它們定位為「前沿參考」而非「核心理論背書」是正確的，使用這份可信度表時應保持這個區分，不要暗示新論文與奠基性經典同等份量。
+
+---
+
 ## 13. 架構落地變更記錄 (Implementation Changelog)
 
 本節記錄本文件所述理論方向的實際落地狀態變化，以及過程中新增引用的外部論文/專案，
@@ -1029,3 +1044,13 @@ class TwoStageVectorRetrievalEngine:
 * **✅ 查無造假**：本輪重新查核全部 38 筆引用（含第十一輪已修正過的），**沒有再發現任何虛構或查無此文的引用**——第十一輪移除的 2 篇虛構引用與 3 篇不可考引用的處理方式經本輪獨立驗證，判斷正確。
 * 本輪查證方法：4 組獨立流程並行執行，各查核約 9-10 筆引用，透過 arXiv 官方頁面、dblp、ACL Anthology、IEEE/ACM Digital Library、Springer、Nature 等來源逐條核對標題、作者、會議/期刊、arXiv ID 是否精確吻合；對 2025-2026 年份的新論文額外加強查證力度（確認 ID 未被誤用於不相關論文）。
 * 對應程式碼：本輪為文獻查證與文件修正，未修改任何程式碼；異動範圍：`docs/THEORETICAL_ARCHITECTURE.md` 第 6、7、9、12 節；新增 `docs/報告/02_參考文獻獨立查核報告.md` 作為本輪查核的完整明細記錄。
+
+### 2026-07-08（第十三輪）：補上學術引用的被引用次數（可信度指標），刷新 GitHub 星數
+
+* **背景**：使用者要求比照第 7 節 GitHub 專案已使用的星數指標，為全文 38 篇學術引用補上對應的可信度指標——被引用次數，並重新確認 GitHub 專案的最新星數。
+* **✅ 新增第 12.1 節**：學術引用可信度總表，將 38 篇文獻依被引用次數分為「奠基性經典」（>5,000 次）、「已站穩腳步」（500-5,000 次）、「新興但已有迴響」（50-500 次）、「太新尚未累積」（<50 次或查無數字）四級，逐篇明細與查詢方法見 `docs/報告/02_參考文獻獨立查核報告.md` 第六節。
+* **⚠️ 資料品質誠實聲明**：Semantic Scholar 官方 API 查詢過程多次觸發速率限制（429），改用 OpenAlex API 與 Google Scholar 聚合搜尋交叉比對，因此多數數字為近似值而非精確即時數字，且不同資料庫統計口徑本身有落差（例如是否將 arXiv 預印本與正式發表版視為同一筆記錄）。查詢方式本身也會顯著影響結果——例如 Graph-CoT 論文直接用 arXiv DOI 查詢僅得 1 次引用，改用標題搜尋才比對到正確記錄變成 30 次，此案例已在報告中詳述作為方法論警示。
+* **✅ 刷新 GitHub 星數**：第 7 節表格中 `pat-jj/KG-FIT`（131→132）與 `microsoft/graphrag`（34,244→34,251）星數已更新並標註查核日期；`zjunlp/WKM`、`King-s-Knowledge-Graph-Lab/ProVe`、`neo4j-contrib/ms-graphrag-neo4j` 三者星數與第十一輪查核時相同，無需更動。
+* **📌 重要提醒**：第 9 節引用的多篇 2025-2026 年前沿論文（PathRAG、MoG、GraphRAG-Router、RouteRAG、Neurosymbolic Retrievers）被引用次數查無數字或極低，這是論文太新、索引尚未跟上的正常現象，不代表論文品質存疑——本文件將這些論文定位在「未來優化方向」的前瞻參考而非「核心理論背書」，這個定位維持不變且是正確的。
+* 本輪未引入新論文/開源專案，純補充可信度指標數據。
+* 對應程式碼：本輪為文獻查證與文件修正，未修改任何程式碼；異動範圍：`docs/THEORETICAL_ARCHITECTURE.md` 新增第 12.1 節、第 7 節兩處星數更新；`docs/報告/02_參考文獻獨立查核報告.md` 新增第六節「可信度指標：被引用次數」。
