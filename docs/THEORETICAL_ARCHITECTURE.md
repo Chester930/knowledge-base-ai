@@ -333,12 +333,9 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
 | [pat-jj/KG-FIT](https://github.com/pat-jj/KG-FIT) | ★132（2026-07-08 重新查核，原131），最後活動 2025-05 | 針對開放世界知識（Open-World）進行圖譜的微調與補全，解決新實體對齊問題。 | 本系統在 `services/entity_alignment.py` 中實作了**同義詞展開與實體對齊**，在不微調模型的情況下完成開放世界實體融合。 |
 | [microsoft/graphrag](https://github.com/microsoft/graphrag) | ★34,251（2026-07-08 重新查核，原34,244），最後活動 2026-06（活躍） | 微軟官方 GraphRAG 實作，用 Leiden 演算法對知識圖譜做階層式社群偵測，為每個社群生成 LLM 摘要，支援 Global Query（全域性宏觀問答）。 | 對應本文件第9節⑤「多層次社群摘要檢索」——**已於 2026-07-03 落地**（`services/community_service.py`），但用 `networkx` 內建 Louvain 取代 Leiden，且未做階層式多層分群，差異與原因見第9節⑤說明。本表中星數最高、最無爭議的旗艦級對照對象。 |
 | [neo4j-contrib/ms-graphrag-neo4j](https://github.com/neo4j-contrib/ms-graphrag-neo4j) | ★88，最後活動 2025-10 | 微軟 GraphRAG 與 Neo4j 的官方整合套件，提供 Leiden 社群偵測直接寫入 Neo4j 圖資料庫的參考實作。 | 若未來要將 Louvain 升級為 Leiden，此專案是最低摩擦力的參考實作（技術棧同為 Neo4j）。⚠️ **星數不高（88），但屬於 Neo4j 官方組織（`neo4j-contrib`）帳號下的專案，可信度來源是廠商官方背書而非社群熱度**，與 ProVe 同理不應單純以星數評價。 |
-| [PathRAG (arXiv:2502.14902)](https://arxiv.org/pdf/2502.14902) | — | 用「關鍵關係路徑剪枝」取代 GraphRAG 的社群式檢索與 LightRAG 的鄰居全取，降噪並減少 Token 消耗。 | 本系統目前的圖譜引導重排（`_pick_relevant_chunks`）仍是「BFS 全部取回 + 分數加權」，PathRAG 的路徑剪枝概念可用於在 BFS 命中的 SVO 子圖過大時先做路徑級篩選，降低送入 LLM 的 Context 噪音。 |
-| [MoG: Mixture of Experts for Graph-based RAG (arXiv:2605.31010)](https://arxiv.org/pdf/2605.31010) | — | 提出「Hub Graph（常駐、跨查詢共用的核心知識）+ 稀疏激活的 Expert Graph」雙層結構，比單純 Top-K 選圖更細緻。 | 與本系統的 Graph-MoE 路由（第2節）高度同源，但本系統目前**沒有 Hub Graph 概念**——跨領域查詢若所有 KG 的 `Score_kg` 都低於 `KG_ROUTE_THRESHOLD` 就會 0 個專家被激活。引入 Hub Graph 可作為 fallback，避免路由「全滅」的邊界情況。 |
-| [GraphRAG-Router (arXiv:2604.16401)](https://arxiv.org/pdf/2604.16401) | — | 用強化學習訓練路由器，依問題難度動態決定該用哪個 GraphRAG 子系統、甚至該用多大的生成模型，減少約 30% 大模型濫用。 | 本系統的 KG 路由分數公式（Cos × Align × Mag）是固定的手工特徵組合，無法隨查詢難度自適應調整 LLM 選型。可作為第9節「動態」系列方向的延伸參考，尤其若未來要接多種規格的 LLM Provider 做成本優化。 |
-| [Neurosymbolic Retrievers for Retrieval-augmented Generation (arXiv:2601.04568)](https://arxiv.org/pdf/2601.04568) | — | 提出 KG-Path RAG（論文另提出的 MAR、Process Knowledge-infused RAG 為同篇的另外兩個子方法）：沿知識圖譜路徑擴展查詢以提升檢索可解釋性，並用**心理健康風險評估（mental health risk assessment）**場景驗證神經符號檢索優於純向量檢索。（2026-07-08 獨立查核修正：原文件標題與驗證場景描述不精確，見 `docs/報告/02_參考文獻獨立查核報告.md`） | 為本系統整體「神經符號」定位（第4節 T-Box/A-Box）提供 2026 年的最新學術背書，且其 KG-Path 查詢擴展手法與本系統 `expand_terms()` 的同義詞展開思路相通，可互相參照優化查詢擴展策略。 |
-
 **已移除的項目**：原表格曾列出「`Wikipedia-KG-RAG`」一列，連結為 `https://github.com/Wikipedia-KG-RAG`——2026-07-08 查證發現這個 URL 格式本身無效（缺少 owner 路徑，不是合法的 GitHub repo 連結）。搜尋後找到語意最接近的真實專案 `zeyu-chen/Wikipedia-KG-RAG`（描述幾乎逐字相符），但該專案僅 **2 顆星**、最後推送於 2024-11，本質是未受矚目的個人/學生專案，不足以作為「前沿專案對照」的佐證，已整列移除，不做連結修補。
+
+**2026-07-08（第十四輪）額外移除的 4 項**：原表格另列有 PathRAG（arXiv:2502.14902）、MoG（arXiv:2605.31010）、GraphRAG-Router（arXiv:2604.16401）、Neurosymbolic Retrievers for Retrieval-augmented Generation（arXiv:2601.04568）四篇 2025-2026 年 arXiv 論文，被引用次數皆為 0 或查無數字（見第 12.1 節可信度總表）。與本表中保留的 ProVe（★11）、ms-graphrag-neo4j（★88）不同——後兩者雖星數低，但分別是「防幻覺過濾器/事實溯源」設計的直接參照對象、以及「若未來升級 Louvain→Leiden 的最低摩擦力參考實作」，即使移除也不影響任何**已實作**功能的學術依據；而這 4 篇論文在本文件中**只以「未來可延伸方向的參考連結」形式出現，沒有任何一項既有實作或既有主張的成立依賴這 4 篇論文**（第9節③「已落地」的 Graph-CoT 簡化版理論依據是 Jin et al. 2024，第9節④「部分落地」的 Active RAG 理論依據是 Jiang et al. FLARE 與 Asai et al. Self-RAG，皆與這 4 篇無關且引用次數 >100），故判定為純裝飾性內容，予以整列移除。GraphRAG-Router 在第 9 節④「（2026補充）」的對應引用亦一併移除（RouteRAG 予以保留，理由見第 13 節第十四輪）。
 
 ---
 
@@ -434,8 +431,7 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
 * **學術來源**：
   * Jiang, Z., Xu, F. F., Gao, L., et al. (2023). *"Active Retrieval Augmented Generation."* (FLARE) EMNLP 2023, arXiv:2305.06983。（2026-07-08 修正：原文件誤植作者為「Trivedi, H.」，經查證此篇論文的正確作者為 Jiang 等人；Harsh Trivedi 本人 2022 年的相關論文是 "IRCoT"，arXiv:2212.10509，主題不同，已更正為正確的 FLARE 論文作者與出處。）
   * Asai, Akari, et al. (2024). *"Self-RAG: Learning to Retrieve, Generate, and Critique through Self-Reflection."* ICLR 2024.
-  * *（2026補充）* Fan, D., et al. (2026). *"GraphRAG-Router: Learning Cost-Efficient Routing over GraphRAGs and LLMs with Reinforcement Learning."* arXiv:2604.16401 — 用 RL 讓路由器依問題難度自適應決定檢索/生成策略，減少約 30% 大模型濫用，思路與本方向互補。
-  * *（2026補充）* *"RouteRAG: Efficient Retrieval-Augmented Generation from Text and Graph via Reinforcement Learning."* arXiv:2512.09487 — 用端到端 RL 讓模型在生成過程中自主決定「何時推理、向文本或圖譜檢索、何時作答」，是本方向「一邊生成、一邊動態判斷」構想的最新工程化嘗試，可作為實作參考。
+  * *（2026補充）* *"RouteRAG: Efficient Retrieval-Augmented Generation from Text and Graph via Reinforcement Learning."* arXiv:2512.09487 — 用端到端 RL 讓模型在生成過程中自主決定「何時推理、向文本或圖譜檢索、何時作答」，是本方向「一邊生成、一邊動態判斷」構想的最新工程化嘗試，可作為實作參考。（2026-07-08 第十四輪：同批的 GraphRAG-Router 因純屬裝飾性引用、被引用次數為 0 已移除，RouteRAG 予以保留——第9節③「學術來源」已將 RouteRAG 列為取代一篇經查證為虛構引用的替代文獻，與已落地的 Graph-CoT 簡化版存在直接的稽核脈絡關聯，非單純的「附加最新文獻」。）
 
 ### ⑤ 多層次社群摘要檢索 (Community-based Hierarchical Retrieval) — ✅ 已落地（範圍與原設計有出入見下）
 
@@ -868,9 +864,9 @@ class TwoStageVectorRetrievalEngine:
 | 奠基性經典 | >5,000 次引用 | Attention Is All You Need (~160,000+)、RAG (~7,453)、GraphSAGE (27,921)、SimCLR (22,211)、node2vec (~11,400+)、Louvain (~11,000-20,000+) |
 | 已站穩腳步 | 500-5,000 次引用 | Sparsely-Gated MoE、BM25 and Beyond (4,481)、Leiden (4,102)、Epidemic Algorithms (2,553)、Self-Refine (~2,548)、Microsoft GraphRAG (~902)、FedX (501) 等 |
 | 新興但已有迴響 | 50-500 次引用 | AgreementMakerLight (468)、FLARE (341)、Know-Evolve (370)、Self-RAG（估計偏高）、Ragas (98) 等 |
-| 太新尚未累積 | <50 次或查無數字，多為 2023 年後論文 | Graph-CoT (30，可能低估)、第 9 節③④⑧引用的 2025-2026 年 arXiv 前沿論文（PathRAG、MoG、GraphRAG-Router、RouteRAG、Neurosymbolic Retrievers 皆屬此類） |
+| 太新尚未累積 | <50 次或查無數字，多為 2023 年後論文 | Graph-CoT (30，可能低估，但為第9節③已落地功能的理論依據，予以保留)、RouteRAG（0 次，但為第9節③一篇經查證虛構引用的替代文獻，予以保留） |
 
-**重要提醒（避免誤用這份表格）**：「太新尚未累積」不等於「品質可疑」——這些論文多半是第 9 節「架構前瞻與未來優化方向」引用的 2025-2026 年最新工作，本來就需要時間累積引用，本文件將它們定位為「前沿參考」而非「核心理論背書」是正確的，使用這份可信度表時應保持這個區分，不要暗示新論文與奠基性經典同等份量。
+**重要提醒（避免誤用這份表格）**：「太新尚未累積」不等於「品質可疑」——本表列出的 2 篇低引用文獻（Graph-CoT、RouteRAG）都直接對應到本系統**已落地**功能的學術依據，予以保留是合理的。但 2026-07-08 第十四輪已將**與任何既有實作或既有主張都無直接依賴關係**的 4 篇純裝飾性 2025-2026 年前沿論文（PathRAG、MoG、GraphRAG-Router、Neurosymbolic Retrievers for RAG）自第 7 節與第 9 節整列移除，理由與明細見第 13 節第十四輪、`docs/報告/02_參考文獻獨立查核報告.md` 第七節。使用這份可信度表時仍應保持「低引用不等於低品質」的區分，但也不宜無差別保留純裝飾性的低可信度引用。
 
 ---
 
@@ -1054,3 +1050,16 @@ class TwoStageVectorRetrievalEngine:
 * **📌 重要提醒**：第 9 節引用的多篇 2025-2026 年前沿論文（PathRAG、MoG、GraphRAG-Router、RouteRAG、Neurosymbolic Retrievers）被引用次數查無數字或極低，這是論文太新、索引尚未跟上的正常現象，不代表論文品質存疑——本文件將這些論文定位在「未來優化方向」的前瞻參考而非「核心理論背書」，這個定位維持不變且是正確的。
 * 本輪未引入新論文/開源專案，純補充可信度指標數據。
 * 對應程式碼：本輪為文獻查證與文件修正，未修改任何程式碼；異動範圍：`docs/THEORETICAL_ARCHITECTURE.md` 新增第 12.1 節、第 7 節兩處星數更新；`docs/報告/02_參考文獻獨立查核報告.md` 新增第六節「可信度指標：被引用次數」。
+
+### 2026-07-08（第十四輪）：移除低可信度且無實作依賴的裝飾性引用
+
+* **背景**：使用者要求「移除星星數或引用小於100的項目」。逐項核對後發現機械套用門檻會誤傷部分項目——ProVe（★11）、ms-graphrag-neo4j（★88）雖星數低，但第十一輪稽核已明確標註兩者屬「機構背書，非社群熱度」不應單純以星數評價；Graph-CoT（Jin et al., 30 次引用）是第 9 節③已落地功能的**唯一明確理論依據**；Ragas（Es et al., 98 次）是第 11 節評估方法論命名與設計依據；RouteRAG（0 次引用）是第 9 節③「學術來源」清單中，取代一篇經第十一輪查證為虛構的引用（`Chao, Yuxiao et al. Graph-ToolChain`）後補上的替代文獻。與使用者確認後，改採「只移除純裝飾性、無實作依賴的項目」規則，而非機械套用數字門檻。
+* **✅ 移除 4 項純裝飾性引用**（皆為 2025-2026 年 arXiv 論文，被引用次數為 0 或查無數字，且在本文件中只以「未來可延伸方向的參考連結」形式出現，沒有任何既有實作或既有主張依賴它們）：
+  1. PathRAG（arXiv:2502.14902）——第 7 節整列移除。
+  2. MoG: Mixture of Experts for Graph-based RAG（arXiv:2605.31010）——第 7 節整列移除。
+  3. GraphRAG-Router（Fan et al. 2026, arXiv:2604.16401）——第 7 節整列移除，第 9 節④「（2026補充）」對應引用一併移除。
+  4. Neurosymbolic Retrievers for Retrieval-augmented Generation（Saxena & Gaur, arXiv:2601.04568）——第 7 節整列移除。
+* **✅ 保留但明確標註理由**（星數/引用數雖低於 100，但有實作依賴或機構背書，非純裝飾性）：ProVe、ms-graphrag-neo4j（第 7 節，機構背書）、Graph-CoT（第 9 節③，已落地功能理論依據）、Ragas（第 12 節，評估方法論命名依據）、RouteRAG（第 9 節③，虛構引用的替代文獻，與第 9 節④的 GraphRAG-Router 待遇不同——因為 RouteRAG 出現在「學術來源」正式清單中並帶有稽核脈絡，GraphRAG-Router 只出現在「（2026補充）」的附加清單中，兩者的文件定位不同）。
+* **✅ 同步更新**：第 12.1 節可信度總表移除已刪除的 4 篇論文範例，改列出保留的 Graph-CoT、RouteRAG 並附保留理由；第 7 節結尾新增「第十四輪額外移除的 4 項」說明段落，比照既有「已移除的項目」（Wikipedia-KG-RAG）段落格式。
+* 本輪為文獻篩選與文件精簡，未引入新論文，未修改任何程式碼。
+* 對應程式碼：異動範圍：`docs/THEORETICAL_ARCHITECTURE.md` 第 7、9、12.1 節；`docs/報告/02_參考文獻獨立查核報告.md` 新增第七節記錄本輪移除決策與理由。
