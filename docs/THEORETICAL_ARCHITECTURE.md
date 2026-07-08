@@ -286,10 +286,10 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
 #### 【學術文獻背書與經典論文】
 
 * **Federated Queries in Semantic Web**：
-  * *文獻*：*Schwarte, A., et al. (2011). "FedX: Optimization Techniques for Federated Query Processing on Structured Data."* **ISWC 2011**（2026-07-08 修正：原文件誤標為 WWW 2011，正確發表會議為 International Semantic Web Conference）。
+  * *文獻*：*Schwarte, A., et al. (2011). "FedX: Optimization Techniques for Federated Query Processing on Linked Data."* **ISWC 2011**（2026-07-08 修正：原文件誤標為 WWW 2011，正確發表會議為 International Semantic Web Conference；本輪獨立查核另修正：標題誤植為「on Structured Data」，正確標題為「on **Linked Data**」，見 `docs/報告/02_參考文獻獨立查核報告.md`）。
   * *理論連結*：這是在語意網領域中進行分散式 SPARQL 聯邦查詢的奠基之作。本系統的並行分片查詢（`query_shards_parallel`）即是聯邦查詢在 GraphRAG 系統中的具體實作。
 * **實體消歧與融合**：
-  * *文獻*：*Zhao, X., Zeng, W., Tang, J., Wang, W., & Suchanek, F. M. (2020). "An Experimental Study of State-of-the-Art Entity Alignment Approaches."* IEEE Transactions on Knowledge and Data Engineering (TKDE)（2026-07-08 修正：原文件作者姓氏首字母誤植為「Zhao, C.」且缺漏發表期刊，正確作者為 Xiang Zhao（趙翔），已補上真實標題與 TKDE 期刊出處）。
+  * *文獻*：*Zhao, X., Zeng, W., Tang, J., Wang, W., & Suchanek, F. M. (2020/2022). "An Experimental Study of State-of-the-Art Entity Alignment Approaches."* IEEE Transactions on Knowledge and Data Engineering (TKDE)（2026-07-08 修正：原文件作者姓氏首字母誤植為「Zhao, C.」且缺漏發表期刊，正確作者為 Xiang Zhao（趙翔），已補上真實標題與 TKDE 期刊出處。另，本輪獨立查核發現年份標示可能造成混淆：DOI 標註的線上優先/接受年份為 2020，但正式期刊卷期出版年份為 2022（vol.34, issue 6），論文引用時請依投稿規範選擇年份寫法，見 `docs/報告/02_參考文獻獨立查核報告.md`）。
   * *理論連結*：探討了在多源、分散式知識庫中，如何利用對齊算法（Alignment Algorithms）整合命名不一致但實質等價的實體。
 
 ### 6.1 聯邦架構的三項工程延伸（Phase 3a/3c/3d）— ✅ 已落地（2026-07 稽核後補入）
@@ -336,7 +336,7 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
 | [PathRAG (arXiv:2502.14902)](https://arxiv.org/pdf/2502.14902) | — | 用「關鍵關係路徑剪枝」取代 GraphRAG 的社群式檢索與 LightRAG 的鄰居全取，降噪並減少 Token 消耗。 | 本系統目前的圖譜引導重排（`_pick_relevant_chunks`）仍是「BFS 全部取回 + 分數加權」，PathRAG 的路徑剪枝概念可用於在 BFS 命中的 SVO 子圖過大時先做路徑級篩選，降低送入 LLM 的 Context 噪音。 |
 | [MoG: Mixture of Experts for Graph-based RAG (arXiv:2605.31010)](https://arxiv.org/pdf/2605.31010) | — | 提出「Hub Graph（常駐、跨查詢共用的核心知識）+ 稀疏激活的 Expert Graph」雙層結構，比單純 Top-K 選圖更細緻。 | 與本系統的 Graph-MoE 路由（第2節）高度同源，但本系統目前**沒有 Hub Graph 概念**——跨領域查詢若所有 KG 的 `Score_kg` 都低於 `KG_ROUTE_THRESHOLD` 就會 0 個專家被激活。引入 Hub Graph 可作為 fallback，避免路由「全滅」的邊界情況。 |
 | [GraphRAG-Router (arXiv:2604.16401)](https://arxiv.org/pdf/2604.16401) | — | 用強化學習訓練路由器，依問題難度動態決定該用哪個 GraphRAG 子系統、甚至該用多大的生成模型，減少約 30% 大模型濫用。 | 本系統的 KG 路由分數公式（Cos × Align × Mag）是固定的手工特徵組合，無法隨查詢難度自適應調整 LLM 選型。可作為第9節「動態」系列方向的延伸參考，尤其若未來要接多種規格的 LLM Provider 做成本優化。 |
-| [Neurosymbolic Retrievers for RAG (arXiv:2601.04568)](https://arxiv.org/pdf/2601.04568) | — | 提出 KG-Path RAG：沿知識圖譜路徑擴展查詢以提升檢索可解釋性，並用症狀學（醫療風險評估）場景驗證神經符號檢索優於純向量檢索。 | 為本系統整體「神經符號」定位（第4節 T-Box/A-Box）提供 2026 年的最新學術背書，且其 KG-Path 查詢擴展手法與本系統 `expand_terms()` 的同義詞展開思路相通，可互相參照優化查詢擴展策略。 |
+| [Neurosymbolic Retrievers for Retrieval-augmented Generation (arXiv:2601.04568)](https://arxiv.org/pdf/2601.04568) | — | 提出 KG-Path RAG（論文另提出的 MAR、Process Knowledge-infused RAG 為同篇的另外兩個子方法）：沿知識圖譜路徑擴展查詢以提升檢索可解釋性，並用**心理健康風險評估（mental health risk assessment）**場景驗證神經符號檢索優於純向量檢索。（2026-07-08 獨立查核修正：原文件標題與驗證場景描述不精確，見 `docs/報告/02_參考文獻獨立查核報告.md`） | 為本系統整體「神經符號」定位（第4節 T-Box/A-Box）提供 2026 年的最新學術背書，且其 KG-Path 查詢擴展手法與本系統 `expand_terms()` 的同義詞展開思路相通，可互相參照優化查詢擴展策略。 |
 
 **已移除的項目**：原表格曾列出「`Wikipedia-KG-RAG`」一列，連結為 `https://github.com/Wikipedia-KG-RAG`——2026-07-08 查證發現這個 URL 格式本身無效（缺少 owner 路徑，不是合法的 GitHub repo 連結）。搜尋後找到語意最接近的真實專案 `zeyu-chen/Wikipedia-KG-RAG`（描述幾乎逐字相符），但該專案僅 **2 顆星**、最後推送於 2024-11，本質是未受矚目的個人/學生專案，不足以作為「前沿專案對照」的佐證，已整列移除，不做連結修補。
 
@@ -401,8 +401,8 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
 * **風險**：LLM 生成的映射表可能有誤，錯誤映射的後果是「兩個語意不同的關係被靜默合併成同一種」，屬於難以事後偵測的資料品質問題，這是堅持要人工審核的原因。
 * **建議暫緩**：目前沒有真實的異質 schema 分片會用到它，優先度應排在有真實需求驅動的項目之後，等真的要接入外部異質 KG時再啟動評估。
 * **學術來源**：
-  * Shvaiko, P., & Euzenat, J. (2013). *"Ontology Matching: A State of the Art and Future Challenges."* IEEE Transactions on Knowledge and Data Engineering.
-  * Faria, D., et al. (2013). *"AgreementMakerLight: A System for Large-Scale Ontology Matching."* Semantic Web Conference.
+  * Shvaiko, P., & Euzenat, J. (2013). *"Ontology Matching: State of the Art and Future Challenges."* IEEE Transactions on Knowledge and Data Engineering, vol.25, pp.158-176.（2026-07-08 獨立查核修正：原標題誤植多了一個冠詞「A」，正確標題無「A」，見 `docs/報告/02_參考文獻獨立查核報告.md`）
+  * Faria, D., et al. (2013). *"AgreementMakerLight: A System for Large-Scale Ontology Matching."* **OTM 2013**（On The Move Federated Conferences）（2026-07-08 獨立查核修正：原文件誤標會議為「Semantic Web Conference」，正確發表會議為 OTM 2013；相關但不同的 OAEI 評測結果短文才發表於 ISWC 附屬 workshop，見 `docs/報告/02_參考文獻獨立查核報告.md`）。
 
 ### ③ 圖譜鏈式思考推理 (Graph Chain-of-Thought / G-CoT) — ✅ 已落地（簡化版）
 
@@ -456,7 +456,7 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
   * 測試：`tests/services/test_community_service.py`（雙群偵測、規模過濾、LLM 摘要容錯、讀取排序）、`tests/routers/test_rag_quality.py::TestGlobalQueryHeuristic`/`TestCommunitySummaryInjection`（關鍵詞判定、SSE 事件觸發與非觸發）。
 * **學術來源**：
   * Blondel, V., et al. (2008). *"Fast unfolding of communities in large networks."* Journal of Statistical Mechanics. (Louvain 算法經典，本次實際採用)
-  * Traag, V., et al. (2019). *"From Louvain to Leiden: guaranteeing well-behaved communities."* Scientific Reports. (Leiden 算法，未來可能遷移方向)
+  * Traag, V., et al. (2019). *"From Louvain to Leiden: guaranteeing well-connected communities."* Scientific Reports. (Leiden 算法，未來可能遷移方向；2026-07-08 獨立查核修正：原標題誤植為「well-behaved communities」，正確標題為「well-**connected** communities」，此為前一輪自我稽核未發現的錯誤，見 `docs/報告/02_參考文獻獨立查核報告.md`)
 
 ### ⑥ 時序知識圖譜與陳舊性校正 (Temporal Knowledge Graphs & Decay) — ✅ 已落地（範圍與原設計有出入見下）
 
@@ -501,7 +501,7 @@ $$\text{Score} = \text{Cosine}_{\text{max}} + \text{Query\_Hits} \times 0.4 + \m
   * 測試：`tests/services/test_concept_engine.py::TestRouteViaTwoStage`（Stage-1 失敗退回全表、候選為空退回全表、候選 id 聯集去重、Stage-1 中途例外退回全表）。
 * **學術來源**：
   * Nogueira, R., & Cho, K. (2019). *"Passage Re-ranking with BERT."* arXiv:1901.04085. (經典二階段粗精篩檢索架構；2026-07-08 修正：原文件 arXiv ID 1903.07666 經查證實際對應 Mitra & Craswell 的另一篇無關論文「An Updated Duet Model for Passage Re-ranking」，已更正為 Nogueira 本人的正確論文與 ID。)
-  * Robertson, S., et al. (2009). *"The Probabilistic Relevance Framework: BM25 and Beyond."* Foundations and Trends in Information Retrieval.
+  * Robertson, S., & Zaragoza, H. (2009). *"The Probabilistic Relevance Framework: BM25 and Beyond."* Foundations and Trends in Information Retrieval, 3(4), 333-389.（2026-07-08 獨立查核補充：原文件漏列共同作者 Zaragoza, H.，見 `docs/報告/02_參考文獻獨立查核報告.md`）
 
 ---
 
@@ -1013,3 +1013,19 @@ class TwoStageVectorRetrievalEngine:
 * **📌 總結**：全文查核約 34 筆學術引用 + 6 個 GitHub repo。**2 篇確認虛構**（已替換為真實文獻）、**8 處確認有誤但非虛構**（已修正作者/年份/會議/ID）、**3 篇無法找到可靠出處**（已移除引用，誠實標註）、其餘約 21 篇查證屬實無需更動。GitHub 部分 1 個因連結無效且對應真實專案星數過低已移除，其餘 5 個屬實保留並標註星數與可信度來源。
 * 本輪未引入額外新論文；純查證與修正既有引用。
 * 對應程式碼：本輪為文獻查證與文件修正，未修改任何程式碼；異動範圍：`docs/THEORETICAL_ARCHITECTURE.md` 第 2、3、4、6、6.1、7、9、12 節與第 13 節本身。
+
+### 2026-07-08（第十二輪）：獨立於本文件自身稽核之外的第二次查證，發現 6 處第十一輪未抓到的錯誤
+
+* **背景**：使用者要求「達到論文的嚴謹程度與專業性」，並明確要求先確認所有參考依據。鑑於第十一輪的查證是由同一份文件的維護流程自行執行，本輪改用**完全獨立、彼此互不參照**的 4 組查證流程，對全文 38 筆學術引用重新逐條核對，且刻意不採信第十一輪標記的「已查證」結論，目的是測試「自我稽核」本身是否有遺漏。完整查核報告見 `docs/報告/02_參考文獻獨立查核報告.md`。
+* **📌 方法論發現（比修正內容本身更重要）**：即使第十一輪已經逐條核對過 arXiv ID 是否對應正確論文，本輪仍額外發現 **6 處第十一輪未抓到的標題用字、會議名稱、缺漏作者錯誤**——證明只核對「ID 是否對應到對的論文」不足以保證「標題逐字正確」，兩者是不同層級的查證動作。這印證了「多次獨立查證優於單次查證」的方法論假設，尤其是查證流程之間刻意不共用彼此中間結論時效果最明顯。
+* **✅ 本輪修正的 6 處錯誤**（第十一輪查證後仍存在，本輪查證後修正）：
+  1. 第 6 節 FedX：標題誤植為「on Structured Data」，正確為「on **Linked Data**」（會議 ISWC 2011 本身第十一輪已修正無誤，僅標題文字有誤）。
+  2. 第 9 節②Shvaiko & Euzenat：標題多了一個冠詞「A」，正確標題無「A」。
+  3. 第 9 節②Faria et al. AgreementMakerLight：會議誤植為「Semantic Web Conference」，正確為 **OTM 2013**。
+  4. 第 9 節①Traag et al. Leiden 演算法：標題誤植為「well-**behaved** communities」，正確為「well-**connected** communities」——這是本輪查證中最容易被忽略的一種錯誤（單字替換但語意相近，肉眼掃讀不易發現）。
+  5. 第 12 節 Robertson BM25：漏列共同作者 Zaragoza, H.。
+  6. 第 7 節 GitHub 表格 "Neurosymbolic Retrievers for RAG"：標題與驗證場景描述不夠精確（正確標題無「for RAG」而是「for **Retrieval-augmented Generation**」；驗證場景是心理健康風險評估而非泛稱「症狀學」；且 KG-Path RAG 只是論文三個子方法之一）。
+* **⚠️ 額外發現 1 處非錯誤、但建議統一寫法的事項**：第 6 節 Zhao et al. 實體對齊調查論文，DOI 標註的線上優先年份（2020）與正式期刊卷期出版年份（2022）不同，非事實錯誤而是引用慣例選擇，已加註兩個年份供使用者依投稿規範決定。
+* **✅ 查無造假**：本輪重新查核全部 38 筆引用（含第十一輪已修正過的），**沒有再發現任何虛構或查無此文的引用**——第十一輪移除的 2 篇虛構引用與 3 篇不可考引用的處理方式經本輪獨立驗證，判斷正確。
+* 本輪查證方法：4 組獨立流程並行執行，各查核約 9-10 筆引用，透過 arXiv 官方頁面、dblp、ACL Anthology、IEEE/ACM Digital Library、Springer、Nature 等來源逐條核對標題、作者、會議/期刊、arXiv ID 是否精確吻合；對 2025-2026 年份的新論文額外加強查證力度（確認 ID 未被誤用於不相關論文）。
+* 對應程式碼：本輪為文獻查證與文件修正，未修改任何程式碼；異動範圍：`docs/THEORETICAL_ARCHITECTURE.md` 第 6、7、9、12 節；新增 `docs/報告/02_參考文獻獨立查核報告.md` 作為本輪查核的完整明細記錄。
