@@ -12,6 +12,7 @@ from uuid import UUID
 from core.database import get_driver
 from core.providers.factory import get_llm_provider
 from services.svo_service import _ALL_REL_PATTERN
+from services.ontology_service import get_effective_rel_pattern
 
 logger = logging.getLogger(__name__)
 
@@ -42,10 +43,11 @@ async def build_communities_for_kg(
     db_kw = {"database_": db_name} if db_name else {}
     kg_filter = "" if db_name else "{kg_id: $kg_id}"
     params_base: dict = {} if db_name else {"kg_id": str(kg_id)}
+    rel_pattern = get_effective_rel_pattern(str(kg_id), _ALL_REL_PATTERN)
 
     edge_result = await driver.execute_query(
         f"""
-        MATCH (s:Entity {kg_filter})-[r:{_ALL_REL_PATTERN}]-(o:Entity {kg_filter})
+        MATCH (s:Entity {kg_filter})-[r:{rel_pattern}]-(o:Entity {kg_filter})
         WHERE s.name <> o.name
         RETURN DISTINCT s.name AS a, o.name AS b
         """,
@@ -81,7 +83,7 @@ async def build_communities_for_kg(
     for idx, members in enumerate(qualifying):
         member_names = list(members)
         facts = await _sample_community_facts(
-            driver, member_names, kg_filter, params_base, db_kw,
+            driver, member_names, kg_filter, params_base, db_kw, rel_pattern,
         )
         summary = await _summarize_community(member_names, facts)
         if not summary:
@@ -111,12 +113,13 @@ async def build_communities_for_kg(
 
 async def _sample_community_facts(
     driver, member_names: list[str], kg_filter: str, params_base: dict, db_kw: dict,
+    rel_pattern: str = _ALL_REL_PATTERN,
     limit: int = _MAX_FACTS_IN_PROMPT,
 ) -> list[str]:
     """取樣社群成員之間的關係事實，供 LLM 摘要用。"""
     result = await driver.execute_query(
         f"""
-        MATCH (s:Entity {kg_filter})-[r:{_ALL_REL_PATTERN}]->(o:Entity {kg_filter})
+        MATCH (s:Entity {kg_filter})-[r:{rel_pattern}]->(o:Entity {kg_filter})
         WHERE s.name IN $names AND o.name IN $names
         RETURN s.name AS s, type(r) AS rel_type, r.verb AS verb, o.name AS o
         LIMIT $limit

@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     svo_concurrency: int = 2              # SVO 提取最大並行數
     svo_format: str = "json"              # SVO 提取格式 (json | pipe)
 
+    # ── SVO 品質驗證機制（抽取 → 驗證 → 重試 → 本體擴充）────────────────────────
+    svo_verify_enabled: bool = True       # 是否啟用第二個模型驗證抽取結果
+    svo_verify_model: str = ""            # 驗證/本體擴充用模型（空白 = 沿用主要抽取模型）
+    svo_verify_max_retries: int = 1       # 驗證失敗後的重新抽取次數上限，超過則呼叫本體擴充模型
+
     # ── 聯邦識別 ───────────────────────────────────────────────────────────────
     instance_id: str = "local"          # 用於 KB Skill 描述檔的 instance 命名空間
     registry_path: str = "./registry.json"   # 本機 registry 路徑

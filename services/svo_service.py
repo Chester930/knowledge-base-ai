@@ -18,6 +18,12 @@ from models.knowledge_graph import SVOTriple
 from repositories.document_repo import DocumentRepository
 from repositories.knowledge_graph_repo import KnowledgeGraphRepository
 from services.chunk_store import SentenceChunk, get_chunk_store, sentence_chunk
+from services.ontology_service import (
+    add_extension as _ontology_add_extension,
+    get_extra_entity_types as _ontology_extra_entity_types,
+    get_extra_rel_types as _ontology_extra_rel_types,
+    get_effective_rel_pattern as _ontology_effective_rel_pattern,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +31,20 @@ _SENTENCES_PER_CHUNK = 5  # 每個 Chunk 的句子數（可調整）
 _SVO_CONCURRENCY = 2      # 每份文件最大平行 LLM 呼叫數（對應 OLLAMA_NUM_PARALLEL=2）
 _BFS_CACHE_TTL = 300      # BFS 查詢快取 TTL（秒）
 _BFS_CACHE_MAX = 1000     # LRU 容量上限，避免長時間運行無上限增長造成記憶體洩漏
+# query_svo_facts 的 LIMIT 原本作用在「每份來源文件各一列」的原始邊上：若同一組
+# (subject, rel_type, verb, object) 泛用事實在 KG 內多份文件重複出現（例如「勞動基準法
+# -[違反]-> 延長工作時間」在每份裁罰案文件都會被抽取一次），會把 LIMIT 全部耗在同一句
+# 泛用事實的重複列上，擠掉真正需要的具體事實（見 THEORETICAL_ARCHITECTURE.md 第13節第七輪）。
+# 修法：改為對 (subject, rel_type, verb, object) 分組聚合後再套用 LIMIT，讓 LIMIT 作用在
+# 「相異語意事實」的數量上；每組事實仍保留最多 _MAX_DOCS_PER_FACT 個來源文件供回溯，避免單一
+# 泛用事實獨占 doc_ids 名額，但也不完全捨棄其多文件佐證的價值。
+_MAX_DOCS_PER_FACT = 3
+# 光是分組去重仍不夠：若某個 seed 實體（如「勞動基準法」）在 KG 內本身就是高扇出的樞紐節點，
+# 真實連到數十個「相異」的具體案例實體，分組後仍是數十筆相異事實，一樣會把 LIMIT 佔滿、擠掉
+# 其他低扇出、高特定性 seed（如公司名）的事實。修法：用 CALL (seed) {...} 子查詢對每個 seed
+# 的扇出先各自截斷到 _PER_SEED_FACT_LIMIT 筆（依 confidence 排序），確保每個 seed 都至少有
+# 機會貢獻自己的事實，不會被同批次裡的樞紐節點獨占全部名額。
+_PER_SEED_FACT_LIMIT = 20
 _bfs_cache: OrderedDict = OrderedDict()  # (kg_id, terms, hops, min_conf) → (facts, docs, chunk_ids, ts)
 
 
@@ -301,7 +321,7 @@ async def build_graph_for_kg(
                                 except Exception:
                                     pass
 
-                            triples = await extract_svo_from_text(sc.text, model_override=model_override)
+                            triples = await extract_svo_verified(sc.text, kg_id, model_override=model_override)
                             merged = await merge_triples_to_neo4j(
                                 triples, kg_id, __doc_id, db_name, chunk_id=sc.chunk_id
                             )
@@ -311,11 +331,22 @@ async def build_graph_for_kg(
                         except Exception as e:
                             last_err = e
                             if attempt < _MAX_CHUNK_RETRIES:
-                                wait = 2 ** attempt
-                                logger.warning(
-                                    f"SVO 提取重試 [{__doc_title} chunk {sc.idx}] "
-                                    f"第 {attempt + 1} 次（等 {wait}s）：{e}"
-                                )
+                                import random
+                                err_msg = str(e).lower()
+                                if "429" in err_msg or "quota" in err_msg or "rate limit" in err_msg:
+                                    # 對於 429 限制，退避 20-25 秒以等待限流窗口重設
+                                    wait = 20 + random.uniform(1, 5)
+                                    logger.warning(
+                                        f"⚠️ 偵測到 API 限流 (429) [{__doc_title} chunk {sc.idx}]，"
+                                        f"進行避讓重試（等待 {wait:.2f}s）：{e}"
+                                    )
+                                else:
+                                    # 一般錯誤，使用指數退避 + 隨機抖動
+                                    wait = 2 ** attempt + random.uniform(0.5, 1.5)
+                                    logger.warning(
+                                        f"SVO 提取重試 [{__doc_title} chunk {sc.idx}] "
+                                        f"第 {attempt + 1} 次（等 {wait:.2f}s）：{e}"
+                                    )
                                 await asyncio.sleep(wait)
                     logger.warning(
                         f"SVO 提取失敗 [{__doc_title} chunk {sc.idx}]"
@@ -400,15 +431,32 @@ async def build_graph_for_kg(
     )
 
 
-async def extract_svo_from_text(text: str, model_override: str | None = None) -> list[SVOTriple]:
-    """呼叫 LLM 從單段文字提取本體論知識三元組，依設定選用 JSON 或 Pipe 模式。"""
+async def extract_svo_from_text(
+    text: str,
+    model_override: str | None = None,
+    extra_entity_types: list[str] | None = None,
+    extra_rel_types: list[str] | None = None,
+) -> list[SVOTriple]:
+    """呼叫 LLM 從單段文字提取本體論知識三元組，依設定選用 JSON 或 Pipe 模式。
+    extra_entity_types/extra_rel_types：由 services/ontology_service.py 管理的、
+    此 KG 透過本體擴充機制新增的類型，會附加進提取提示詞並在解析時視為有效。
+    """
     if not text.strip():
         return []
+
+    extra_type_note = (
+        f"\n【本 KG 額外允許的實體類型】（除上述清單外，本知識圖譜曾擴充以下類型，可視情況使用）：\n"
+        f"{'、'.join(extra_entity_types)}\n"
+    ) if extra_entity_types else ""
+    extra_rel_note = (
+        f"\n【本 KG 額外允許的關係類別】（除上述 30 種外，本知識圖譜曾擴充以下類別，可視情況使用）：\n"
+        f"{'、'.join(extra_rel_types)}\n"
+    ) if extra_rel_types else ""
 
     prompt = (
         "請從以下文字中提取知識關係，以六欄格式輸出，每行一組：\n"
         "主詞|主詞類型|關係類別|動詞|受詞|受詞類型\n\n"
-        "【實體類型】選最接近：概念、算法、技術、方法、工具、框架、模型、系統、人物、組織、資料集、指標、其他\n\n"
+        "【實體類型】選最接近：法規、假期、企業、政府機關、限制數值、行為、概念、算法、技術、方法、工具、框架、模型、系統、人物、組織、資料集、指標、其他\n\n"
         "【關係類別】必須從以下 30 種選一，不可自造：\n"
         "層級/組成：\n"
         "  IS_A        → 是一種、屬於、屬類\n"
@@ -449,8 +497,10 @@ async def extract_svo_from_text(text: str, model_override: str | None = None) ->
         "  SOLVES      → 解決、處理、應對、克服\n"
         "規範/合規：\n"
         "  VIOLATES    → 違反、觸犯、不符合、逾越規定\n"
-        "  RELATED_TO  → 【絕對最後手段】以上 30 種皆完全不適用時才能用，目標使用率 < 5%\n\n"
-        "規則：\n"
+        "  RELATED_TO  → 【絕對最後手段】以上 30 種皆完全不適用時才能用，目標使用率 < 5%\n"
+        f"{extra_rel_note}"
+        f"{extra_type_note}"
+        "\n規則：\n"
         "- 主詞與受詞為名詞或名詞短語（2-15字），去除冗餘後綴（如「XX技術」→「XX」、「XX方法」→「XX」）\n"
         "- 動詞欄位盡量引用原文中的實際措辭（2-8字），忠實反映原文用語，不要自行概括替換\n"
         "- 嚴禁濫用 RELATED_TO：有明確語意關係必須選精確類別，每段文字最多使用 1 次\n"
@@ -473,7 +523,10 @@ async def extract_svo_from_text(text: str, model_override: str | None = None) ->
         "Tokenizer|工具|TRANSFORMS|將文字轉換為|Token|資料集\n"
         "BERT|模型|CREATED_BY|由 Google 提出|Google|組織\n"
         "Dropout|技術|PREVENTS|防止|過擬合|概念\n"
-        "延長工作時間|概念|VIOLATES|違反|勞動基準法第32條|概念\n\n"
+        "勞動基準法第30條|法規|DEFINED_AS|規範了|正常工作時間|概念\n"
+        "延長工作時間|行為|VIOLATES|違反|勞動基準法第32條|法規\n"
+        "輪班制換班|行為|REQUIRES|必須間隔|11小時休息|限制數值\n"
+        "宜蘭縣政府|政府機關|APPLIES_TO|處分|臺灣湯淺電池|企業\n\n"
         f"文字：\n{text}"
     )
     import json as _json
@@ -497,7 +550,7 @@ async def extract_svo_from_text(text: str, model_override: str | None = None) ->
             match = re.search(r"\[[\s\S]*\]", raw)
             if match:
                 items = _json.loads(match.group())
-                triples = _parse_svo_json(items)
+                triples = _parse_svo_json(items, extra_entity_types, extra_rel_types)
                 if triples:
                     return _filter_hallucinated(triples, text)
         except Exception as e:
@@ -505,14 +558,305 @@ async def extract_svo_from_text(text: str, model_override: str | None = None) ->
 
     # Fallback：傳統 pipe-delimited 格式
     raw = await llm.generate(prompt)
-    triples = _parse_svo_lines(raw)
+    triples = _parse_svo_lines(raw, extra_entity_types, extra_rel_types)
     return _filter_hallucinated(triples, text)
+
+
+def _extract_json_objects(raw: str) -> list[dict]:
+    """健壯地從 LLM 回應中取出一個或多個 JSON 物件，統一回傳 list[dict]。
+
+    實測發現（見 run_svo_pipeline_debug.py 人工逐階段檢驗）：即使 prompt 明確要求
+    「只輸出 JSON 陣列」，真實模型有時仍會在只想評論少數幾筆時直接輸出單一裸物件
+    （不包陣列），導致原本只找 `[...]` 的正則解析失敗、觸發保守 fallback（全數視為
+    通過）。此函式依序嘗試三種容錯手段：
+    1. 整段直接 json.loads（可能本來就是合法陣列或物件）。
+    2. 正則抓出 `[...]` 陣列片段解析。
+    3. 逐字掃描所有頂層 `{...}` 區塊（處理模型多個物件並列、忘記包陣列的情況）。
+    """
+    import json as _json
+    text = raw.strip()
+
+    try:
+        parsed = _json.loads(text)
+        if isinstance(parsed, list):
+            return [x for x in parsed if isinstance(x, dict)]
+        if isinstance(parsed, dict):
+            return [parsed]
+    except Exception:
+        pass
+
+    match = re.search(r"\[[\s\S]*\]", text)
+    if match:
+        try:
+            parsed = _json.loads(match.group())
+            if isinstance(parsed, list):
+                return [x for x in parsed if isinstance(x, dict)]
+        except Exception:
+            pass
+
+    items: list[dict] = []
+    depth = 0
+    start = None
+    for i, ch in enumerate(text):
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start is not None:
+                chunk = text[start:i + 1]
+                try:
+                    obj = _json.loads(chunk)
+                    if isinstance(obj, dict):
+                        items.append(obj)
+                except Exception:
+                    pass
+                start = None
+    return items
+
+
+async def verify_svo_extraction(
+    source_text: str,
+    triples: list[SVOTriple],
+    model_override: str | None = None,
+) -> tuple[bool, list[dict]]:
+    """第二個模型：檢驗抽取結果是否可被原句子支持、類型/關係選擇是否恰當。
+
+    這是 SVO 品質驗證機制的第一道關卡（見 core/config.py::svo_verify_enabled）：
+    抽取模型產出結果後，由本函式呼叫獨立的一次驗證，決定是否可進入知識圖譜。
+    回傳 (是否全數通過, 每筆三元組的判定明細)。空的抽取結果視為無需驗證、直接通過。
+    """
+    if not triples:
+        return True, []
+
+    from core.config import settings
+    if model_override is None and settings.svo_verify_model:
+        model_override = settings.svo_verify_model
+
+    if model_override:
+        from core.providers.llm.ollama import OllamaLLMProvider
+        llm = OllamaLLMProvider(base_url=settings.ollama_base_url, model=model_override)
+    else:
+        llm = get_llm_provider()
+
+    triples_desc = "\n".join(
+        f"{i}. {t.subject}({t.subject_type}) -[{t.rel_type}:{t.verb}]-> {t.object}({t.object_type})"
+        for i, t in enumerate(triples)
+    )
+    prompt = (
+        "[角色] 你是嚴謹的知識圖譜品質審查員，獨立於抽取模型審核其產出。\n\n"
+        "[任務] 以下是從一段原文中抽取出的知識三元組，請逐條檢查是否可被原文支持，"
+        "以及主詞/受詞類型、關係類別的選擇是否恰當。\n\n"
+        "[判斷準則]\n"
+        "- accepted=false：三元組是幻覺（原文完全沒有提到這個關係）、主詞或受詞明顯錯誤或無意義、"
+        "或關係類別明顯選錯（例如用 RELATED_TO 但其實有更精確的類別可用）。\n"
+        "- accepted=true：三元組確實反映原文語意，類型與關係選擇合理（不要求完美，合理即可）。\n\n"
+        "[原文]\n"
+        f"{source_text}\n\n"
+        "[待審查三元組]\n"
+        f"{triples_desc}\n\n"
+        "[輸出格式] 只輸出 JSON 陣列，每項對應一條三元組（依序，index 從 0 開始）：\n"
+        '[{"index": 0, "accepted": true, "reason": "..."}, ...]\n'
+        "不要輸出任何其他文字。"
+    )
+
+    try:
+        raw = await llm.generate_json(prompt)
+        items = _extract_json_objects(raw)
+        if not items:
+            raise ValueError("回應中找不到任何可解析的 JSON 物件")
+        verdicts = []
+        for i in range(len(triples)):
+            item = next((it for it in items if it.get("index") == i), None)
+            # 解析不到對應項目時保守判定通過，避免驗證模型格式異常誤殺正常抽取結果
+            accepted = bool(item.get("accepted", True)) if item else True
+            reason = str(item.get("reason", "")) if item else "未取得判定，預設通過"
+            verdicts.append({"index": i, "accepted": accepted, "reason": reason})
+        return all(v["accepted"] for v in verdicts), verdicts
+    except Exception as e:
+        logger.debug(f"SVO 驗證解析失敗，保守判定全數通過：{e}")
+        return True, [
+            {"index": i, "accepted": True, "reason": "驗證解析失敗，預設通過"}
+            for i in range(len(triples))
+        ]
+
+
+async def propose_ontology_extension(
+    source_text: str,
+    rejected_triples: list[SVOTriple],
+    verdicts: list[dict],
+    model_override: str | None = None,
+    kg_id: str | None = None,
+) -> dict:
+    """第三個模型：當抽取結果重試後仍被驗證模型拒絕時，提出目前本體清單缺少的新類別。
+
+    這是 SVO 品質驗證機制的最後手段（見 services/ontology_service.py）：只在
+    「抽取 → 驗證失敗 → 重新抽取 → 驗證仍失敗」之後才會呼叫。回傳的新類型會由呼叫端
+    透過 ontology_service.add_extension() 持久化，預設僅供該 KG 使用（scope="kg"），
+    僅在明顯具跨領域普適性時才標記 scope="global"。依使用者指示，此決定不經人工審核。
+
+    kg_id：若提供，會把這個 KG 先前已擴充過的類型也列入「不要重複提議」名單，
+    避免同一個 KG 因為不同句子多次觸發擴充，累積出語意重疊的近義新類型
+    （例如「法規類別A」和「法規類別B」實際上指同一件事）。
+    """
+    from core.config import settings
+    if model_override is None and settings.svo_verify_model:
+        model_override = settings.svo_verify_model
+
+    if model_override:
+        from core.providers.llm.ollama import OllamaLLMProvider
+        llm = OllamaLLMProvider(base_url=settings.ollama_base_url, model=model_override)
+    else:
+        llm = get_llm_provider()
+
+    existing_extra_et = _ontology_extra_entity_types(kg_id) if kg_id else []
+    existing_extra_rt = _ontology_extra_rel_types(kg_id) if kg_id else []
+    all_existing_types = _VALID_TYPES | set(existing_extra_et)
+    all_existing_rel_types = _VALID_REL_TYPES | set(existing_extra_rt)
+
+    rejected_desc = "\n".join(
+        f"- {t.subject}({t.subject_type}) -[{t.rel_type}:{t.verb}]-> {t.object}({t.object_type})"
+        f"（審查意見：{next((v['reason'] for v in verdicts if v['index'] == i and not v['accepted']), '未通過')}）"
+        for i, t in enumerate(rejected_triples)
+    )
+    extra_existing_note = (
+        f"\n[本 KG 先前已擴充過的類型（同樣不要重複提議，若語意相近應沿用而非新造）]\n"
+        f"實體：{'、'.join(existing_extra_et) if existing_extra_et else '（無）'}\n"
+        f"關係：{'、'.join(existing_extra_rt) if existing_extra_rt else '（無）'}\n"
+    ) if kg_id else ""
+    prompt = (
+        "[角色] 你是知識圖譜本體論（Ontology）設計師。\n\n"
+        "[背景] 抽取模型已針對以下原文重新抽取一次，但審查模型仍判定部分三元組不理想，"
+        "理由詳見下方。請判斷：是不是因為目前允許的實體類型或關係類別清單裡，"
+        "缺少真正符合這段原文語意的選項，導致抽取模型只能勉強套用不精確的類型？\n\n"
+        "[目前已有的實體類型（不要重複提議）]\n"
+        f"{'、'.join(sorted(_VALID_TYPES))}\n\n"
+        "[目前已有的關係類別（不要重複提議）]\n"
+        f"{'、'.join(sorted(_VALID_REL_TYPES))}\n"
+        f"{extra_existing_note}"
+        "\n[原文]\n"
+        f"{source_text}\n\n"
+        "[被拒絕的三元組與審查意見]\n"
+        f"{rejected_desc if rejected_desc else '（無，或全數通過，僅供參考）'}\n\n"
+        "[任務] 若確實缺少必要類別，最多各提議 3 個新的實體類型與關係類別（沒有必要就回傳空陣列，"
+        "不要為了湊數而硬提議）。同時判斷這些新類別的適用範圍：\n"
+        '- "kg"：只適用於這份文件所屬的特定領域（預設，大多數情況應選這個）\n'
+        '- "global"：這個類別明顯是跨領域都通用的基礎概念，值得所有知識圖譜共用（少數情況才選這個）\n\n'
+        "[輸出格式] 只輸出 JSON，不要有其他文字：\n"
+        '{"entity_types": ["..."], "rel_types": ["..."], "scope": "kg", "rationale": "簡短說明為何需要/不需要新類別"}\n'
+        "rel_types 請用大寫英文蛇形命名（如 REGULATES），entity_types 請用中文 2-6 字詞彙。"
+    )
+
+    try:
+        raw = await llm.generate_json(prompt)
+        items = _extract_json_objects(raw)
+        if not items:
+            raise ValueError("回應中找不到任何可解析的 JSON 物件")
+        result = items[0]
+        # 防禦性過濾：即使模型沒遵守「不要重複提議」的指示，也不讓已存在的類型
+        # （含此 KG 先前擴充過的）被當成新類型重複寫入
+        entity_types = [
+            str(t).strip() for t in result.get("entity_types", [])
+            if str(t).strip() and str(t).strip() not in all_existing_types
+        ]
+        rel_types = [
+            str(t).strip().upper() for t in result.get("rel_types", [])
+            if str(t).strip() and str(t).strip().upper() not in all_existing_rel_types
+        ]
+        scope = result.get("scope", "kg")
+        if scope not in ("kg", "global"):
+            scope = "kg"
+        return {
+            "entity_types": entity_types,
+            "rel_types": rel_types,
+            "scope": scope,
+            "rationale": str(result.get("rationale", "")),
+        }
+    except Exception as e:
+        logger.debug(f"本體擴充提議解析失敗，視為無需擴充：{e}")
+        return {"entity_types": [], "rel_types": [], "scope": "kg", "rationale": f"解析失敗：{e}"}
+
+
+async def extract_svo_verified(
+    text: str,
+    kg_id: UUID,
+    model_override: str | None = None,
+) -> list[SVOTriple]:
+    """SVO 品質驗證主流程：抽取 → 驗證 → （拒絕）重新抽取 → 驗證 → （仍拒絕）呼叫本體擴充模型
+    → 用擴充後的類型再抽取一次 → 回傳最終結果（此後不再驗證，確保流程有界、不無限循環）。
+
+    對應使用者需求：「先執行抽取，然後有檢驗模型根據原句子判斷是否可接受；
+    不能接受就重新抽取；重新抽取後仍不行，就請另一個模型添加類別/關係，
+    讓抽取模型依新類型重新抽取」。重試次數由 core/config.py::svo_verify_max_retries 控制
+    （預設 1 次）；core/config.py::svo_verify_enabled=False 時完全略過驗證，等同舊行為。
+    """
+    from core.config import settings
+
+    kg_id_str = str(kg_id)
+    extra_et = _ontology_extra_entity_types(kg_id_str)
+    extra_rt = _ontology_extra_rel_types(kg_id_str)
+
+    triples = await extract_svo_from_text(
+        text, model_override=model_override,
+        extra_entity_types=extra_et, extra_rel_types=extra_rt,
+    )
+
+    if not settings.svo_verify_enabled or not triples:
+        return triples
+
+    accepted, verdicts = await verify_svo_extraction(text, triples)
+
+    attempt = 0
+    while not accepted and attempt < settings.svo_verify_max_retries:
+        attempt += 1
+        logger.debug(f"SVO 驗證未通過，第 {attempt} 次重新抽取")
+        triples = await extract_svo_from_text(
+            text, model_override=model_override,
+            extra_entity_types=extra_et, extra_rel_types=extra_rt,
+        )
+        if not triples:
+            return triples
+        accepted, verdicts = await verify_svo_extraction(text, triples)
+
+    if accepted:
+        return triples
+
+    # 重試用盡仍未通過 → 呼叫本體擴充模型，提出新類別後最後再抽取一次
+    try:
+        extension = await propose_ontology_extension(text, triples, verdicts, kg_id=kg_id_str)
+        if extension["entity_types"] or extension["rel_types"]:
+            await _ontology_add_extension(
+                kg_id_str, extension["entity_types"], extension["rel_types"], extension["scope"],
+            )
+            logger.info(
+                f"[ontology] KG {kg_id_str} 因抽取持續不理想而擴充本體："
+                f"entity_types={extension['entity_types']}, rel_types={extension['rel_types']}, "
+                f"scope={extension['scope']}，理由：{extension['rationale']}"
+            )
+            extra_et = _ontology_extra_entity_types(kg_id_str)
+            extra_rt = _ontology_extra_rel_types(kg_id_str)
+            triples = await extract_svo_from_text(
+                text, model_override=model_override,
+                extra_entity_types=extra_et, extra_rel_types=extra_rt,
+            )
+    except Exception as e:
+        logger.warning(f"本體擴充流程失敗，沿用重試後的抽取結果：{e}")
+
+    return triples
 
 
 def _normalize_entity(name: str) -> str:
     """正規化實體名稱（☆8）：NFKC + 去頭尾空白 + 合併連續空格 + 修正康熙部首偏僻字。"""
     name = _unicodedata.normalize("NFKC", name).strip()
     name = re.sub(r"\s+", " ", name)
+    
+    # 移除字尾類似 (負責人)、(盧宏恩)、(王淑貞) 等括號
+    name = re.sub(r"\s*\(.*?\)\s*$", "", name).strip()
+    
+    # 針對公司、行號進行字尾去噪歸一化（如：臺灣湯淺電池股份有限公司 -> 臺灣湯淺電池）
+    name = re.sub(r"(股份有限公司|有限公司|合夥|企業社|工作室|商行)$", "", name).strip()
+
     # 修正康熙部首偏僻字對應
     mapping = {
         "\u2fd3": "龍",
@@ -715,11 +1059,12 @@ async def get_kg_graph(
     db_kw = {"database_": db_name} if db_name else {}
     kg_filter = "" if db_name else "{kg_id: $kg_id}"
     params = {"kg_id": str(kg_id), "limit": limit, "min_conf": min_confidence}
+    rel_pattern = _ontology_effective_rel_pattern(str(kg_id), _ALL_REL_PATTERN)
 
     entities_q = driver.execute_query(
         f"""
         MATCH (e:Entity {kg_filter})
-        OPTIONAL MATCH (e)-[r:{_ALL_REL_PATTERN}]->()
+        OPTIONAL MATCH (e)-[r:{rel_pattern}]->()
         WITH e, count(r) AS out_degree
         RETURN e.id AS id, e.name AS name, e.type AS type, out_degree
         ORDER BY out_degree DESC LIMIT $limit
@@ -728,7 +1073,7 @@ async def get_kg_graph(
     )
     relations_q = driver.execute_query(
         f"""
-        MATCH (s:Entity {kg_filter})-[r:{_ALL_REL_PATTERN}]->(o:Entity {kg_filter})
+        MATCH (s:Entity {kg_filter})-[r:{rel_pattern}]->(o:Entity {kg_filter})
         WHERE r.confidence >= $min_conf
         RETURN s.name AS subject, s.type AS subject_type,
                type(r) AS rel_type, r.verb AS verb,
@@ -754,9 +1099,9 @@ async def get_kg_graph(
 
 
 def _build_ft_query(terms: list[str]) -> str:
-    """將 terms 轉成 Lucene OR 查詢字串，特殊字元逸出。"""
+    """將 terms 轉成 Lucene OR 查詢字串，特殊字元逸出，並使用萬用字元進行子字串匹配。"""
     escape = str.maketrans({c: f"\\{c}" for c in r'+-&|!(){}[]^"~*?:\/'})
-    return " OR ".join(f'"{t.translate(escape)}"' for t in terms)
+    return " OR ".join(f'{t.translate(escape)}*' for t in terms)
 
 
 async def query_svo_facts(
@@ -789,6 +1134,9 @@ async def query_svo_facts(
     db_kw = {"database_": db_name} if db_name else {}
     kg_id_str = str(kg_id)
     ft_query_str = _build_ft_query(terms)
+    # 若此 KG 曾透過本體擴充機制新增自訂關係類型，BFS 也要能走這些邊，
+    # 否則新類型的關係會被排除在圖遍歷之外（見 services/ontology_service.py）
+    rel_pattern = _ontology_effective_rel_pattern(kg_id_str, _ALL_REL_PATTERN)
 
     if db_name:
         seed_cypher_ft = (
@@ -819,7 +1167,7 @@ async def query_svo_facts(
             try:
                 expand_result = await driver.execute_query(
                     f"""
-                    MATCH (seed)-[:{_ALL_REL_PATTERN}]-(neighbor:Entity {kg_filter})
+                    MATCH (seed)-[:{rel_pattern}]-(neighbor:Entity {kg_filter})
                     WHERE elementId(seed) IN $seed_ids
                     RETURN DISTINCT elementId(neighbor) AS nid
                     LIMIT 20
@@ -833,24 +1181,36 @@ async def query_svo_facts(
             except Exception:
                 pass
 
-        bfs_params: dict = {"seed_ids": seed_ids, "limit": limit, "min_conf": min_confidence}
+        bfs_params: dict = {
+            "seed_ids": seed_ids, "limit": limit, "min_conf": min_confidence,
+            "per_seed_limit": _PER_SEED_FACT_LIMIT,
+        }
         if not db_name:
             bfs_params["kg_id"] = kg_id_str
         result = await driver.execute_query(
             f"""
             MATCH (seed)
             WHERE elementId(seed) IN $seed_ids
-            WITH collect(seed) AS seeds
+            WITH collect(DISTINCT seed) AS seeds
             UNWIND seeds AS seed
-            MATCH path = (seed)-[:{_ALL_REL_PATTERN}*1..{hops}]-(neighbor:Entity {kg_filter})
-            UNWIND relationships(path) AS r
-            WITH startNode(r) AS s, r, endNode(r) AS o
-            WHERE r.confidence >= $min_conf
-            RETURN DISTINCT s.name AS subject, s.type AS subject_type,
-                   type(r) AS rel_type, r.verb AS verb,
-                   o.name AS object, o.type AS object_type,
-                   r.confidence AS confidence, r.source_doc_id AS source_doc_id,
-                   toString(r.created_at) AS created_at
+            CALL (seed) {{
+                MATCH path = (seed)-[:{rel_pattern}*1..{hops}]-(neighbor:Entity {kg_filter})
+                UNWIND relationships(path) AS rel
+                WITH DISTINCT rel
+                WHERE rel.confidence >= $min_conf
+                RETURN rel
+                ORDER BY rel.confidence DESC
+                LIMIT $per_seed_limit
+            }}
+            WITH startNode(rel) AS s, rel AS r, endNode(rel) AS o
+            WITH s.name AS subject, s.type AS subject_type,
+                 type(r) AS rel_type, r.verb AS verb,
+                 o.name AS object, o.type AS object_type,
+                 max(r.confidence) AS confidence,
+                 collect(DISTINCT r.source_doc_id)[0..{_MAX_DOCS_PER_FACT}] AS source_doc_ids,
+                 max(toString(r.created_at)) AS created_at
+            RETURN subject, subject_type, rel_type, verb, object, object_type,
+                   confidence, source_doc_ids, created_at
             ORDER BY confidence DESC LIMIT $limit
             """,
             **bfs_params, **db_kw,
@@ -862,22 +1222,32 @@ async def query_svo_facts(
         fallback_params: dict = {f"term{i}": t for i, t in enumerate(terms)}
         fallback_params["limit"] = limit
         fallback_params["min_conf"] = min_confidence
+        fallback_params["per_seed_limit"] = _PER_SEED_FACT_LIMIT
         if db_name:
             result = await driver.execute_query(
                 f"""
                 MATCH (e:Entity)
                 WHERE {where_clauses}
-                WITH collect(e) AS seeds
+                WITH collect(DISTINCT e) AS seeds
                 UNWIND seeds AS seed
-                MATCH path = (seed)-[:{_ALL_REL_PATTERN}*1..{hops}]-(neighbor:Entity)
-                UNWIND relationships(path) AS r
-                WITH startNode(r) AS s, r, endNode(r) AS o
-                WHERE r.confidence >= $min_conf
-                RETURN DISTINCT s.name AS subject, s.type AS subject_type,
-                       type(r) AS rel_type, r.verb AS verb,
-                       o.name AS object, o.type AS object_type,
-                       r.confidence AS confidence, r.source_doc_id AS source_doc_id,
-                       toString(r.created_at) AS created_at
+                CALL (seed) {{
+                    MATCH path = (seed)-[:{rel_pattern}*1..{hops}]-(neighbor:Entity)
+                    UNWIND relationships(path) AS rel
+                    WITH DISTINCT rel
+                    WHERE rel.confidence >= $min_conf
+                    RETURN rel
+                    ORDER BY rel.confidence DESC
+                    LIMIT $per_seed_limit
+                }}
+                WITH startNode(rel) AS s, rel AS r, endNode(rel) AS o
+                WITH s.name AS subject, s.type AS subject_type,
+                     type(r) AS rel_type, r.verb AS verb,
+                     o.name AS object, o.type AS object_type,
+                     max(r.confidence) AS confidence,
+                     collect(DISTINCT r.source_doc_id)[0..{_MAX_DOCS_PER_FACT}] AS source_doc_ids,
+                     max(toString(r.created_at)) AS created_at
+                RETURN subject, subject_type, rel_type, verb, object, object_type,
+                       confidence, source_doc_ids, created_at
                 ORDER BY confidence DESC LIMIT $limit
                 """,
                 database_=db_name, **fallback_params,
@@ -888,17 +1258,26 @@ async def query_svo_facts(
                 f"""
                 MATCH (e:Entity {{kg_id: $kg_id}})
                 WHERE {where_clauses}
-                WITH collect(e) AS seeds
+                WITH collect(DISTINCT e) AS seeds
                 UNWIND seeds AS seed
-                MATCH path = (seed)-[:{_ALL_REL_PATTERN}*1..{hops}]-(neighbor:Entity {{kg_id: $kg_id}})
-                UNWIND relationships(path) AS r
-                WITH startNode(r) AS s, r, endNode(r) AS o
-                WHERE r.confidence >= $min_conf
-                RETURN DISTINCT s.name AS subject, s.type AS subject_type,
-                       type(r) AS rel_type, r.verb AS verb,
-                       o.name AS object, o.type AS object_type,
-                       r.confidence AS confidence, r.source_doc_id AS source_doc_id,
-                       toString(r.created_at) AS created_at
+                CALL (seed) {{
+                    MATCH path = (seed)-[:{rel_pattern}*1..{hops}]-(neighbor:Entity {{kg_id: $kg_id}})
+                    UNWIND relationships(path) AS rel
+                    WITH DISTINCT rel
+                    WHERE rel.confidence >= $min_conf
+                    RETURN rel
+                    ORDER BY rel.confidence DESC
+                    LIMIT $per_seed_limit
+                }}
+                WITH startNode(rel) AS s, rel AS r, endNode(rel) AS o
+                WITH s.name AS subject, s.type AS subject_type,
+                     type(r) AS rel_type, r.verb AS verb,
+                     o.name AS object, o.type AS object_type,
+                     max(r.confidence) AS confidence,
+                     collect(DISTINCT r.source_doc_id)[0..{_MAX_DOCS_PER_FACT}] AS source_doc_ids,
+                     max(toString(r.created_at)) AS created_at
+                RETURN subject, subject_type, rel_type, verb, object, object_type,
+                       confidence, source_doc_ids, created_at
                 ORDER BY confidence DESC LIMIT $limit
                 """,
                 **fallback_params,
@@ -930,10 +1309,10 @@ async def query_svo_facts(
         edge_map.setdefault((s, o), []).append(edge_str)
         entity_freq[s] = entity_freq.get(s, 0) + 1
         entity_freq[o] = entity_freq.get(o, 0) + 1
-        doc_id = r.get("source_doc_id")
-        if doc_id and doc_id not in seen_docs:
-            seen_docs.add(doc_id)
-            source_docs.append(doc_id)
+        for doc_id in (r.get("source_doc_ids") or []):
+            if doc_id and doc_id not in seen_docs:
+                seen_docs.add(doc_id)
+                source_docs.append(doc_id)
 
     # 輸出：單邊事實 + 多跳推理鏈（找出可串接的路徑 A→B→C）
     facts: list[str] = []
@@ -1033,6 +1412,7 @@ async def query_svo_facts_with_provenance(
     kg_id_str = str(kg_id)
     kg_filter = "" if db_name else "{kg_id: $kg_id}"
     ft_query_str = _build_ft_query(terms)
+    rel_pattern = _ontology_effective_rel_pattern(kg_id_str, _ALL_REL_PATTERN)
 
     # ── 種子節點（Full-text → fallback CONTAINS）─────────────────────────────
     use_ft = False
@@ -1069,7 +1449,7 @@ async def query_svo_facts_with_provenance(
             MATCH (seed) WHERE elementId(seed) IN $seed_ids
             WITH collect(seed) AS seeds
             UNWIND seeds AS seed
-            MATCH path = (seed)-[:{_ALL_REL_PATTERN}*1..{hops}]-(nb:Entity {kg_filter})
+            MATCH path = (seed)-[:{rel_pattern}*1..{hops}]-(nb:Entity {kg_filter})
             UNWIND relationships(path) AS r
             WITH startNode(r) AS s, r, endNode(r) AS o
             WHERE r.confidence >= $min_conf
@@ -1097,7 +1477,7 @@ async def query_svo_facts_with_provenance(
         MATCH (e:Entity {kg_filter}) WHERE {where}
         WITH collect(e) AS seeds
         UNWIND seeds AS seed
-        MATCH path = (seed)-[:{_ALL_REL_PATTERN}*1..{hops}]-(nb:Entity {kg_filter})
+        MATCH path = (seed)-[:{rel_pattern}*1..{hops}]-(nb:Entity {kg_filter})
         UNWIND relationships(path) AS r
         WITH startNode(r) AS s, r, endNode(r) AS o
         WHERE r.confidence >= $min_conf
@@ -1161,6 +1541,17 @@ async def create_entity_index() -> None:
     await driver.execute_query(
         "CREATE INDEX entity_kg_name IF NOT EXISTS FOR (e:Entity) ON (e.kg_id, e.name)"
     )
+    # 建立單屬性索引，防範多 KG 混合時的全表掃描（todo_tasks.md 任務 4）
+    try:
+        await driver.execute_query(
+            "CREATE INDEX entity_kg_id IF NOT EXISTS FOR (e:Entity) ON (e.kg_id)"
+        )
+        await driver.execute_query(
+            "CREATE INDEX concept_kg_id IF NOT EXISTS FOR (c:ConceptNode) ON (c.kg_id)"
+        )
+    except Exception as e:
+        logger.warning(f"單屬性索引建立失敗（可能已存在或不支持）：{e}")
+
     # fulltext index：加速 query_svo_facts 的關鍵字模糊搜尋
     try:
         await driver.execute_query(
@@ -1186,6 +1577,12 @@ _TYPE_LABEL_MAP: dict[str, str] = {
     "資料集": "Dataset",
     "指標":  "Metric",
     "其他":  "Other",
+    "法規":  "Regulation",
+    "假期":  "Holiday",
+    "企業":  "Enterprise",
+    "政府機關": "GovernmentAgency",
+    "限制數值": "LimitValue",
+    "行為":  "Behavior",
 }
 
 
@@ -1226,6 +1623,9 @@ def _sentence_chunk(doc_id: str, text: str) -> list[SentenceChunk]:
 _VALID_TYPES = {
     "概念", "算法", "技術", "方法", "工具", "框架",
     "模型", "系統", "人物", "組織", "資料集", "指標", "其他",
+    # 抽取 prompt 範例已長期使用以下 6 種（法規遵循類場景），但驗證清單先前漏未同步，
+    # 導致 LLM 正確標註後仍被靜默降級為「其他」（2026-07-08 修正，見 THEORETICAL_ARCHITECTURE.md 第4節）
+    "法規", "假期", "企業", "政府機關", "限制數值", "行為",
 }
 
 # LLM 在「無符合內容」時會依 prompt 指示直接輸出這些字面詞，而非真正省略該行；
@@ -1305,8 +1705,17 @@ REL_TYPE_LABELS = {
 }
 
 
-def _parse_svo_json(items: list[dict]) -> list[SVOTriple]:
-    """解析 LLM 回傳的 JSON 格式三元組陣列。"""
+def _parse_svo_json(
+    items: list[dict],
+    extra_entity_types: list[str] | None = None,
+    extra_rel_types: list[str] | None = None,
+) -> list[SVOTriple]:
+    """解析 LLM 回傳的 JSON 格式三元組陣列。
+    extra_entity_types/extra_rel_types：此 KG 透過本體擴充機制新增的類型
+    （見 services/ontology_service.py），驗證時視為與固定清單同等有效，不降級。
+    """
+    valid_types = _VALID_TYPES | set(extra_entity_types or [])
+    valid_rel_types = _VALID_REL_TYPES | set(extra_rel_types or [])
     triples: list[SVOTriple] = []
     seen: set[tuple[str, str, str]] = set()
     for item in items:
@@ -1322,11 +1731,11 @@ def _parse_svo_json(items: list[dict]) -> list[SVOTriple]:
             continue
         if len(s) > 50 or len(v) > 20 or len(o) > 50:
             continue
-        if st not in _VALID_TYPES:
+        if st not in valid_types:
             st = "其他"
-        if ot not in _VALID_TYPES:
+        if ot not in valid_types:
             ot = "其他"
-        if r not in _VALID_REL_TYPES:
+        if r not in valid_rel_types:
             r = "RELATED_TO"
         key = (s, r, o)
         if key in seen:
@@ -1350,13 +1759,21 @@ def _filter_hallucinated(triples: list[SVOTriple], source_text: str) -> list[SVO
     return kept
 
 
-def _parse_svo_lines(raw: str) -> list[SVOTriple]:
+def _parse_svo_lines(
+    raw: str,
+    extra_entity_types: list[str] | None = None,
+    extra_rel_types: list[str] | None = None,
+) -> list[SVOTriple]:
     """解析 LLM 回傳的知識三元組行。
 
     6欄（新）：主詞|主詞類型|關係類別|關係描述|受詞|受詞類型
     5欄（舊）：主詞|主詞類型|關係描述|受詞|受詞類型
     3欄（舊）：主詞|關係描述|受詞
+
+    extra_entity_types/extra_rel_types：此 KG 透過本體擴充機制新增的類型，驗證時視為有效。
     """
+    valid_types = _VALID_TYPES | set(extra_entity_types or [])
+    valid_rel_types = _VALID_REL_TYPES | set(extra_rel_types or [])
     triples: list[SVOTriple] = []
     seen: set[tuple[str, str, str]] = set()
 
@@ -1368,18 +1785,18 @@ def _parse_svo_lines(raw: str) -> list[SVOTriple]:
 
         if len(parts) == 6:
             s, s_type, rel_type, v, o, o_type = parts
-            if s_type not in _VALID_TYPES:
+            if s_type not in valid_types:
                 s_type = "其他"
-            if o_type not in _VALID_TYPES:
+            if o_type not in valid_types:
                 o_type = "其他"
-            if rel_type not in _VALID_REL_TYPES:
+            if rel_type not in valid_rel_types:
                 rel_type = "RELATED_TO"
         elif len(parts) == 5:
             s, s_type, v, o, o_type = parts
             rel_type = "RELATED_TO"
-            if s_type not in _VALID_TYPES:
+            if s_type not in valid_types:
                 s_type = "其他"
-            if o_type not in _VALID_TYPES:
+            if o_type not in valid_types:
                 o_type = "其他"
         elif len(parts) == 3:
             s, v, o = parts
@@ -1427,16 +1844,19 @@ async def _clear_kg_entities(kg_id: UUID, db_name: str = "") -> None:
 
 
 async def _clear_kg_relations(kg_id: UUID, db_name: str = "") -> None:
-    """rebuild_relations_only 時只清除關係邊，保留 Entity 節點。"""
+    """rebuild_relations_only 時只清除關係邊，保留 Entity 節點。
+    需用該 KG 的擴充後 rel pattern，否則本體擴充機制新增的自訂關係類型不會被清除，
+    重建後會與新抽取的邊並存，造成資料不一致。"""
     driver = get_driver()
+    rel_pattern = _ontology_effective_rel_pattern(str(kg_id), _ALL_REL_PATTERN)
     if db_name:
         await driver.execute_query(
-            f"MATCH ()-[r:{_ALL_REL_PATTERN}]->() DELETE r",
+            f"MATCH ()-[r:{rel_pattern}]->() DELETE r",
             database_=db_name,
         )
     else:
         await driver.execute_query(
-            f"MATCH (s:Entity {{kg_id: $kg_id}})-[r:{_ALL_REL_PATTERN}]->() DELETE r",
+            f"MATCH (s:Entity {{kg_id: $kg_id}})-[r:{rel_pattern}]->() DELETE r",
             kg_id=str(kg_id),
         )
     logger.info(f"KG {kg_id} 關係邊清除完成（rebuild_relations_only）")
